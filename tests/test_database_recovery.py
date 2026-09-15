@@ -8,22 +8,22 @@ from aiosqlite.context import Result
 from shop_bot.db import Database, FSMStorage
 from shop_bot.models import OrderStatus
 from shop_bot.services import orders
-from shop_bot.services.upstream import StubUpstreamClient
+from shop_bot.services.purchasing import DemoPurchaser
 
 
 async def test_different_orders_and_fsm_writes_can_run_concurrently(db, user, product):
     created = [await orders.create_order(db, user.id, product, 1) for _ in range(8)]
     storage = FSMStorage(db)
     results, _ = await asyncio.gather(
-        asyncio.gather(*(orders.mark_paid(db, StubUpstreamClient(), o.id) for o in created)),
+        asyncio.gather(*(orders.mark_paid(db, DemoPurchaser(), o.id) for o in created)),
         asyncio.gather(
             storage.set_state(StorageKey(bot_id=1, chat_id=42, user_id=42), "quantity"), db.upsert_user(43, "other")
         ),
     )
-    assert all(o.status == OrderStatus.DELIVERED for o, _ in results)
+    assert all(o.status == OrderStatus.PAID for o in results)
     async with db.connection() as conn:
         async with conn.execute("SELECT COUNT(*) FROM order_events") as cur:
-            assert (await cur.fetchone())[0] == 16
+            assert (await cur.fetchone())[0] == 8
 
 
 async def test_event_failure_rolls_back_status_and_goods(db, user, product):

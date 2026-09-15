@@ -7,11 +7,10 @@ from aiogram import Bot
 from ..db import Database
 from ..logging_config import get_logger
 from ..models import OrderStatus
-from .orders import OrderError, mark_paid
-from .upstream import UpstreamClient
+from .purchasing import Purchaser, split_payload_chunks
 
 logger = get_logger(__name__)
-RECOVERY_INTERVAL = 30
+RECOVERY_INTERVAL = 5
 
 
 async def notify_owner(db: Database, bot: Bot, order_id: int, *, resend: bool = False) -> bool:
@@ -26,12 +25,14 @@ async def notify_owner(db: Database, bot: Bot, order_id: int, *, resend: bool = 
         owner = await db.get_user(order.user_id)
         if owner is None:
             return False
-        text = f"🎉 你的订单 #{order.id} 已发货！"
-        if order.payload:
-            text += f"\n\n{order.payload}"
+        header = f"🎉 你的订单 #{order.id} 已发货！"
         try:
             # 收件人只从持久化订单取，不能使用命令所在群聊或查询者身份。
-            await bot.send_message(owner.telegram_id, text)
+            # 多张 eSIM 按块分条发送，避免超过消息长度；中断重发可能重复内容，但不会重新采购。
+            chunks = split_payload_chunks(order.payload) if order.payload else []
+            await bot.send_message(owner.telegram_id, header)
+            for chunk in chunks:
+                await bot.send_message(owner.telegram_id, chunk)
         except Exception as exc:
             logger.warning("delivery notification failed", extra={"order_id": order.id, "error": type(exc).__name__})
             return False
@@ -39,22 +40,22 @@ async def notify_owner(db: Database, bot: Bot, order_id: int, *, resend: bool = 
         return True
 
 
-async def recover_once(db: Database, upstream: UpstreamClient, bot: Bot) -> None:
+async def recover_once(db: Database, purchaser: Purchaser, bot: Bot | None) -> None:
+    """恢复扫描：推进 paid 订单的采购状态机，补发未送达的通知。bot=None 时跳过通知。"""
     for order in await db.list_recovery_orders():
         try:
             if order.status == OrderStatus.PAID:
-                await mark_paid(db, upstream, order.id)
-            await notify_owner(db, bot, order.id)
-        except OrderError:
-            logger.warning("delivery requires administrator retry", extra={"order_id": order.id})
+                await purchaser.fulfill(db, order.id)
+            if bot is not None:
+                await notify_owner(db, bot, order.id)
         except Exception as exc:
             logger.warning("recovery failed", extra={"order_id": order.id, "error": type(exc).__name__})
 
 
-async def recovery_loop(db: Database, upstream: UpstreamClient, bot: Bot) -> None:
+async def recovery_loop(db: Database, purchaser: Purchaser, bot: Bot) -> None:
     while True:
         try:
-            await recover_once(db, upstream, bot)
+            await recover_once(db, purchaser, bot)
         except Exception as exc:
             logger.warning("recovery scan failed", extra={"error": type(exc).__name__})
         await asyncio.sleep(RECOVERY_INTERVAL)

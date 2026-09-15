@@ -13,18 +13,19 @@ shop_bot/
 ├── keyboards.py        # 内联键盘（目录、确认、Web App 支付按钮）
 ├── logging_config.py   # 日志系统（彩色开发格式 + JSON 生产格式，按天轮转）
 ├── handlers/
-│   ├── start.py        # /start、主菜单、我的订单、/query 查支付状态
+│   ├── start.py        # /start、主菜单、我的订单、/query 查支付状态（触发一次履约推进）
 │   ├── catalog.py      # 商品目录浏览
 │   ├── order.py        # FSM 下单流程（选商品 → 数量 → 确认 → 生成支付链接）
-│   └── admin.py        # /orders、/paid、/cancel（管理员限定）
+│   └── admin.py        # /orders、/paid、/cancel、/purchases、/retry、/bind（管理员限定）
 ├── services/
-│   ├── upstream.py     # UpstreamClient 协议 + StubUpstreamClient + HttpUpstreamClient 骨架
-│   ├── orders.py       # 订单状态机（create → paid → delivered / failed / cancelled）
+│   ├── orders.py       # 收款确认（pending → paid + 建采购任务），与履约分离
+│   ├── purchasing.py   # 采购状态机（提交一次/详情轮询/未知转人工）+ Demo/Commbitz 双模式
+│   ├── fulfillment.py  # 买家私信（分条）+ 恢复循环（采购推进 + 通知补发）
 │   ├── epay.py         # EPay 支付网关协议（MD5 签名、支付链接、回调验证、订单查询）
-│   ├── commbitz_api.py # Commbitz 分销 API 只读客户端（令牌缓存/刷新、目录、订单详情）
+│   ├── commbitz_api.py # Commbitz 分销 API 客户端（令牌/目录/详情 + create_request）
 │   └── catalog_sync.py # 上游套餐同步为本地商品（SKU 映射；新商品 0 价下架待人工定价）
 └── web/
-    └── payment.py      # EPay 回调端点（form-urlencoded + MD5 签名验证）
+    └── payment.py      # EPay 回调端点（验签核单 → 确认收款 → 快速应答）
 ```
 
 ## 数据流
@@ -36,18 +37,25 @@ shop_bot/
                                               │
                                               v
                                     Web App 打开 EPay 收银台
-                                              │
                                               v
                                     用户完成支付
-                                              │
                                               v
-EPay 网关 ──GET/POST /payment/callback──> 验证 MD5 签名 ──> orders.mark_paid()
-                                              │
+EPay 网关 ──GET/POST /payment/callback──> 验签核单 ──> mark_paid() 确认收款
+                                              │          + purchases 建任务（ready）
                                               v
-                                    upstream.deliver() 发货
-                                              │
+                                    立即应答 success（规则 2）
+                                              │  后台恢复循环（5s）
                                               v
-                                    bot.send_message() 通知买家
+                          CommbitzPurchaser.fulfill()：
+                            ready → submitting（留痕）→ POST /v1/request
+                            → 立即保存上游 _id（upstream_pending）
+                            → GET /v1/details/:id 轮询 → 货品持久化
+                                              │
+                              ┌───────────────┴──────────────┐
+                              v                              v
+                        delivered + 通知买家         submission_unknown/rejected
+                                                      → /purchases 人工核对
+                                                      → /bind 绑定 或 /retry 重试
 ```
 
 ## 订单生命周期

@@ -30,7 +30,10 @@ async def test_actual_startup_authentication_and_resource_cleanup(tmp_path, monk
     monkeypatch.setattr(shop_bot, "get_settings", lambda: settings)
     monkeypatch.setattr(shop_bot, "Database", lambda path: database)
     monkeypatch.setattr(shop_bot, "Bot", lambda token: bot)
-    monkeypatch.setattr(shop_bot, "build_dispatcher", lambda db, upstream, epay: Dispatcher(storage=FSMStorage(db)))
+    def fake_dispatcher(db, purchaser, epay, commbitz):
+        return Dispatcher(storage=FSMStorage(db))
+
+    monkeypatch.setattr(shop_bot, "build_dispatcher", fake_dispatcher)
     monkeypatch.setattr(bot, "set_webhook", registration)
     task = asyncio.create_task(shop_bot.amain())
     if registration_fails:

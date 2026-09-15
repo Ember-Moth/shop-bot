@@ -17,7 +17,7 @@ from .services.catalog_sync import sync_catalog
 from .services.commbitz_api import CommbitzClient, CommbitzError, base_url_for
 from .services.epay import EPayClient, EPayConfig
 from .services.fulfillment import recovery_loop
-from .services.upstream import StubUpstreamClient, UpstreamClient
+from .services.purchasing import CommbitzPurchaser, DemoPurchaser, Purchaser
 from .web.payment import register_epay_routes
 from .web.telegram import register_telegram_routes, validate_webhook_secret
 
@@ -30,43 +30,36 @@ DEMO_PRODUCTS = [
 ]
 
 
-def build_upstream() -> UpstreamClient:
-    """发货仍是模拟客户端（开发方案规则 10：采购记录与人工核对机制就绪前，
-    不得把模拟上游替换为 Commbitz，否则重启恢复会盲目重复采购）。"""
-    return StubUpstreamClient()
-
-
-async def sync_upstream_catalog(db: Database, settings: Settings) -> None:
-    """配置了 Commbitz 时同步上游目录到本地商品表；失败只记日志，不阻塞启动。
-
-    同步是只读操作（目录查询），新商品 0 价且下架，不影响现有在售商品。
-    """
+def build_commbitz_client(settings: Settings) -> CommbitzClient | None:
+    """配置了 Commbitz 且密钥齐全时返回共享客户端；否则返回 None（模拟采购模式）。"""
     cfg = settings.upstream
     if cfg.provider != "commbitz":
-        return
+        return None
     if not (cfg.api_key and cfg.secret_key):
-        logger.warning("upstream provider is commbitz but api_key/secret_key missing, skip catalog sync")
-        return
+        logger.warning("upstream provider is commbitz but api_key/secret_key missing")
+        return None
     base_url = cfg.base_url or base_url_for(cfg.environment)
-    client = CommbitzClient(base_url, cfg.api_key, cfg.secret_key, timeout=cfg.timeout)
-    try:
-        await sync_catalog(db, client)
-    except CommbitzError as exc:
-        logger.warning("upstream catalog sync failed: %s", exc)
-    except Exception:
-        logger.exception("upstream catalog sync failed unexpectedly")
-    finally:
-        await client.close()
+    return CommbitzClient(base_url, cfg.api_key, cfg.secret_key, timeout=cfg.timeout)
 
 
-def build_dispatcher(db: Database, upstream: UpstreamClient, epay: EPayClient | None) -> Dispatcher:
+def build_purchaser(commbitz_client: CommbitzClient | None) -> Purchaser:
+    """开发方案规则 10：采购记录/状态机（阶段 B）已实现，配置 commbitz 即启用真实采购。"""
+    if commbitz_client is not None:
+        return CommbitzPurchaser(commbitz_client)
+    return DemoPurchaser()
+
+
+def build_dispatcher(
+    db: Database, purchaser: Purchaser, epay: EPayClient | None, commbitz: CommbitzClient | None
+) -> Dispatcher:
     # FSM 状态持久化到 SQLite，事件隔离用内存（同一 bot 实例内并发事件串行化）
     dp = Dispatcher(
         storage=FSMStorage(db),
         events_isolation=SimpleEventIsolation(),
         db=db,
-        upstream=upstream,
+        purchaser=purchaser,
         epay=epay,
+        commbitz=commbitz,
     )
     dp.include_router(start.router)
     dp.include_router(catalog.router)
@@ -93,8 +86,19 @@ async def amain() -> None:
         resources.push_async_callback(db.close)
         if not await db.list_products():
             await db.seed_products(DEMO_PRODUCTS)
-        await sync_upstream_catalog(db, settings)
-        upstream = build_upstream()
+
+        # Commbitz 共享客户端：目录同步 + 采购 + 人工核对共用，随进程生命周期关闭
+        commbitz_client = build_commbitz_client(settings)
+        if commbitz_client is not None:
+            resources.push_async_callback(commbitz_client.close)
+            try:
+                await sync_catalog(db, commbitz_client)
+            except CommbitzError as exc:
+                logger.warning("upstream catalog sync failed: %s", exc)
+            except Exception:
+                logger.exception("upstream catalog sync failed unexpectedly")
+        purchaser = build_purchaser(commbitz_client)
+
         bot = Bot(settings.bot_token)
         resources.push_async_callback(bot.session.close)
 
@@ -109,10 +113,11 @@ async def amain() -> None:
                 )
             )
             resources.push_async_callback(epay_client.close)
-        dp = build_dispatcher(db, upstream, epay_client)
+        dp = build_dispatcher(db, purchaser, epay_client, commbitz_client)
         app = aiohttp_web.Application()
         app["db"] = db
-        app["upstream"] = upstream
+        app["purchaser"] = purchaser
+        app["commbitz"] = commbitz_client
         app["bot"] = bot
         app["epay"] = epay_client
         register_telegram_routes(app, dp, bot, settings.webhook.path, settings.webhook.secret_token)
@@ -129,7 +134,7 @@ async def amain() -> None:
         resources.push_async_callback(bot.delete_webhook)
         logger.info("webhook registered: %s", webhook_url)
         logger.info("listening on %s:%d", settings.webhook.host, settings.webhook.port)
-        recovery_task = asyncio.create_task(recovery_loop(db, upstream, bot))
+        recovery_task = asyncio.create_task(recovery_loop(db, purchaser, bot))
         resources.push_async_callback(_stop_recovery, recovery_task)
         stop = asyncio.Event()
         if sys.platform != "win32":

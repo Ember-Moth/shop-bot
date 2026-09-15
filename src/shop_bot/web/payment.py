@@ -1,20 +1,22 @@
-"""EPay GET/POST 回调：验签、统一核单、幂等履约与私信通知。"""
+"""EPay GET/POST 回调：验签、统一核单、保存采购任务后快速应答（开发方案规则 1/2）。
+
+履约由后台恢复循环驱动（services/purchasing.py），回调不做耗时的上游请求。
+"""
 
 from aiohttp import web
 
 from ..db import Database
 from ..logging_config import get_logger
 from ..services.epay import EPayClient, EPayError
-from ..services.fulfillment import notify_owner
-from ..services.orders import DeliveryError, OrderError, mark_paid
-from ..services.upstream import UpstreamClient
+from ..services.orders import OrderError, mark_paid
+from ..services.purchasing import Purchaser
 
 logger = get_logger(__name__)
 
 
 async def epay_callback(request: web.Request) -> web.Response:
     db: Database = request.app["db"]
-    upstream: UpstreamClient = request.app["upstream"]
+    purchaser: Purchaser = request.app["purchaser"]
     epay: EPayClient = request.app["epay"]
     raw = request.query if request.method == "GET" else await request.post()
     # 重复键不能让验签与业务解析看到不同的字段值。
@@ -34,16 +36,14 @@ async def epay_callback(request: web.Request) -> web.Response:
         return web.Response(text="fail", status=404)
     try:
         epay.validate_payment(order, payment)
-        await mark_paid(db, upstream, order.id, trade_no=payment.trade_no)
     except EPayError:
         logger.warning("payment validation failed", extra={"order_id": order_id})
         return web.Response(text="fail", status=422)
-    except DeliveryError:
-        # 收款已持久化。履约失败由管理员重试，不能要求用户再次付款。
-        return web.Response(text="success")
+    try:
+        await mark_paid(db, purchaser, order.id, trade_no=payment.trade_no)
     except OrderError:
         return web.Response(text="fail", status=422)
-    await notify_owner(db, request.app["bot"], order.id)
+    # 收款已持久化、采购任务已建立；重复成功回调幂等返回 success，不重复履约。
     return web.Response(text="success")
 
 

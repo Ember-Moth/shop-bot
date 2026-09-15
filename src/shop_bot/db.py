@@ -10,7 +10,7 @@ from weakref import WeakValueDictionary
 import aiosqlite
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
 
-from .models import Order, OrderStatus, Product, User
+from .models import Order, OrderStatus, Product, Purchase, PurchaseState, User
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -55,6 +55,21 @@ CREATE TABLE IF NOT EXISTS order_events (
     to_status TEXT NOT NULL,
     note TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS purchases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL UNIQUE REFERENCES orders(id),
+    state TEXT NOT NULL DEFAULT 'ready',
+    request_type TEXT NOT NULL,
+    sku TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    upstream_request_id TEXT,
+    upstream_order_no TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
@@ -107,7 +122,7 @@ class Database:
             await conn.execute("ALTER TABLE orders ADD COLUMN notification_pending INTEGER NOT NULL DEFAULT 0")
         async with conn.execute("PRAGMA table_info(products)") as cur:
             product_columns = {row["name"] for row in await cur.fetchall()}
-        for column in ("sku", "upstream_plan_id"):
+        for column in ("sku", "upstream_plan_id", "request_type"):
             if column not in product_columns:
                 await conn.execute(f"ALTER TABLE products ADD COLUMN {column} TEXT")
         # 部分唯一索引：手工商品 sku 为 NULL，不参与唯一约束
@@ -214,7 +229,7 @@ class Database:
             )
 
     async def upsert_product_from_upstream(
-        self, *, sku: str, name: str, description: str, upstream_plan_id: str
+        self, *, sku: str, name: str, description: str, upstream_plan_id: str, request_type: str | None
     ) -> bool:
         """按 SKU 同步上游商品；只更新名称/描述/上游 ID，不动本店价格与上架状态。
 
@@ -226,16 +241,92 @@ class Database:
                 row = await cur.fetchone()
             if row is None:
                 await conn.execute(
-                    """INSERT INTO products (name, description, price_cents, currency, active, sku, upstream_plan_id)
-                    VALUES (?, ?, 0, 'CNY', 0, ?, ?)""",
-                    (name, description, sku, upstream_plan_id),
+                    """INSERT INTO products
+                        (name, description, price_cents, currency, active, sku, upstream_plan_id, request_type)
+                    VALUES (?, ?, 0, 'CNY', 0, ?, ?, ?)""",
+                    (name, description, sku, upstream_plan_id, request_type),
                 )
                 return True
             await conn.execute(
-                "UPDATE products SET name = ?, description = ?, upstream_plan_id = ? WHERE id = ?",
-                (name, description, upstream_plan_id, row["id"]),
+                """UPDATE products SET name = ?, description = ?, upstream_plan_id = ?, request_type = ?
+                WHERE id = ?""",
+                (name, description, upstream_plan_id, request_type, row["id"]),
             )
             return False
+
+    # ---- purchases ----
+
+    async def ensure_purchase(
+        self, order_id: int, *, request_type: str, sku: str, quantity: int
+    ) -> Purchase:
+        """按订单建立采购任务（幂等，order_id 唯一）。已存在时原样返回。"""
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT * FROM purchases WHERE order_id = ?", (order_id,)) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                await conn.execute(
+                    "INSERT INTO purchases (order_id, request_type, sku, quantity) VALUES (?, ?, ?, ?)",
+                    (order_id, request_type, sku, quantity),
+                )
+                async with conn.execute("SELECT * FROM purchases WHERE order_id = ?", (order_id,)) as cur:
+                    row = await cur.fetchone()
+        assert row is not None
+        return _row_to_purchase(row)
+
+    async def get_purchase_by_order(self, order_id: int) -> Purchase | None:
+        row = await self._one("SELECT * FROM purchases WHERE order_id = ?", (order_id,))
+        return _row_to_purchase(row) if row else None
+
+    async def list_purchases_by_states(self, states: tuple[PurchaseState, ...]) -> list[Purchase]:
+        # placeholders 只由 len(states) 生成，无外部输入参与拼接
+        placeholders = ",".join("?" for _ in states)
+        rows = await self._all(
+            f"SELECT * FROM purchases WHERE state IN ({placeholders}) ORDER BY id",  # noqa: S608
+            tuple(state.value for state in states),
+        )
+        return [_row_to_purchase(r) for r in rows]
+
+    async def transition_purchase(
+        self,
+        purchase_id: int,
+        to_state: PurchaseState,
+        *,
+        from_state: PurchaseState | None = None,
+        upstream_request_id: str | None = None,
+        upstream_order_no: str | None = None,
+        last_error: str | None = None,
+        bump_attempt: bool = False,
+    ) -> Purchase | None:
+        """采购状态机转换。条件 UPDATE 保证并发下只有一个协程推进成功。"""
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT * FROM purchases WHERE id = ?", (purchase_id,)) as cur:
+                row = await cur.fetchone()
+            if row is None or (from_state is not None and row["state"] != from_state):
+                return None
+            attempts = row["attempts"] + (1 if bump_attempt else 0)
+            async with conn.execute(
+                """UPDATE purchases SET state = ?,
+                upstream_request_id = COALESCE(?, upstream_request_id),
+                upstream_order_no = COALESCE(?, upstream_order_no),
+                last_error = ?, attempts = ?, updated_at = datetime('now')
+                WHERE id = ? RETURNING *""",
+                (to_state, upstream_request_id, upstream_order_no, last_error, attempts, purchase_id),
+            ) as cur:
+                updated = await cur.fetchone()
+        assert updated is not None
+        return _row_to_purchase(updated)
+
+    async def add_order_note(self, order_id: int, note: str) -> None:
+        """向 order_events 写一条人工操作审计记录（状态不变）。"""
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT status FROM orders WHERE id = ?", (order_id,)) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                return
+            await conn.execute(
+                "INSERT INTO order_events (order_id, from_status, to_status, note) VALUES (?, ?, ?, ?)",
+                (order_id, row["status"], row["status"], note),
+            )
 
     async def create_order(
         self, user_id: int, product_id: int, quantity: int, amount_cents: int, currency: str
@@ -345,6 +436,24 @@ def _row_to_product(row: aiosqlite.Row) -> Product:
         active=bool(row["active"]),
         sku=row["sku"],
         upstream_plan_id=row["upstream_plan_id"],
+        request_type=row["request_type"],
+    )
+
+
+def _row_to_purchase(row: aiosqlite.Row) -> Purchase:
+    return Purchase(
+        id=row["id"],
+        order_id=row["order_id"],
+        state=PurchaseState(row["state"]),
+        request_type=row["request_type"],
+        sku=row["sku"],
+        quantity=row["quantity"],
+        upstream_request_id=row["upstream_request_id"],
+        upstream_order_no=row["upstream_order_no"],
+        attempts=row["attempts"],
+        last_error=row["last_error"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 

@@ -1,11 +1,12 @@
-"""目录同步测试：同步只维护名称/SKU/上游 ID，不动本店价格与上架状态。"""
+"""目录同步测试：同步只维护名称/SKU/上游 ID/业务类型，不动本店价格与上架状态。"""
 
 import aiosqlite
 
-from shop_bot import sync_upstream_catalog
+from shop_bot import build_commbitz_client, build_purchaser
 from shop_bot.config import Settings
 from shop_bot.db import Database
 from shop_bot.services.catalog_sync import sync_catalog
+from shop_bot.services.purchasing import CommbitzPurchaser, DemoPurchaser
 
 
 class FakeCommbitz:
@@ -40,6 +41,7 @@ async def test_sync_creates_inactive_products(db):
     assert row["price_cents"] == 0
     assert row["currency"] == "CNY"
     assert row["upstream_plan_id"] == "id-US-1"
+    assert row["request_type"] == "esim"  # simCategory 推导业务类型
     assert row["name"] == "US 1GB"
 
 
@@ -90,7 +92,7 @@ async def test_legacy_products_table_migrates(tmp_path):
     await db.connect()
     try:
         created = await db.upsert_product_from_upstream(
-            sku="S1", name="n", description="d", upstream_plan_id="p1"
+            sku="S1", name="n", description="d", upstream_plan_id="p1", request_type="esim"
         )
         assert created is True
         row = await db._one("SELECT * FROM products WHERE sku = 'S1'")
@@ -99,51 +101,26 @@ async def test_legacy_products_table_migrates(tmp_path):
         await db.close()
 
 
-# ---- 启动接线 sync_upstream_catalog ----
-
-TOKEN_RESPONSE = {
-    "message": "ok",
-    "statusCode": 201,
-    "data": {"accessToken": "acc-1", "refreshToken": "ref-1", "expiresIn": 3600},
-}
+# ---- 启动接线：build_commbitz_client / build_purchaser ----
 
 
-def _wired_settings(**upstream) -> Settings:
+def _settings(**upstream) -> Settings:
     return Settings(upstream=upstream)
 
 
-async def test_wiring_noop_without_provider(db, httpx_mock):
-    await sync_upstream_catalog(db, _wired_settings())
-    # 未发任何 HTTP 请求（httpx_mock 对未匹配请求会报错）
+def test_wiring_noop_without_provider():
+    assert build_commbitz_client(_settings()) is None
+    assert isinstance(build_purchaser(None), DemoPurchaser)
 
 
-async def test_wiring_requires_credentials(db, httpx_mock):
-    await sync_upstream_catalog(db, _wired_settings(provider="commbitz"))
-    # 缺密钥时不发请求，只记警告
+def test_wiring_requires_credentials():
+    assert build_commbitz_client(_settings(provider="commbitz")) is None
+    assert isinstance(build_purchaser(None), DemoPurchaser)
 
 
-async def test_wiring_syncs_catalog(db, httpx_mock):
-    httpx_mock.add_response(json=TOKEN_RESPONSE)
-    httpx_mock.add_response(
-        json={
-            "statusCode": 200,
-            "data": {
-                "plans": [
-                    {
-                        "_id": "p1",
-                        "sku": "US-1",
-                        "name": "US 1GB",
-                        "simCategory": "esim",
-                        "planIsFor": 3,
-                        "pricing": {"currency": {"code": "USD"}},
-                    }
-                ],
-                "pagination": {"hasNextPage": False},
-            },
-        }
-    )
-    await sync_upstream_catalog(db, _wired_settings(provider="commbitz", api_key="k", secret_key="s"))
-    row = await db._one("SELECT * FROM products WHERE sku = 'US-1'")
-    assert row is not None
-    assert row["upstream_plan_id"] == "p1"
-    assert row["active"] == 0
+def test_wiring_builds_shared_client_and_real_purchaser():
+    client = build_commbitz_client(_settings(provider="commbitz", api_key="k", secret_key="s"))
+    assert client is not None
+    purchaser = build_purchaser(client)
+    assert isinstance(purchaser, CommbitzPurchaser)
+    assert purchaser.client is client

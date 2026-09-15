@@ -1,11 +1,15 @@
-"""订单生命周期服务：唯一修改订单状态的地方。"""
+"""订单收款状态服务：唯一修改订单收款状态的地方。
+
+履约（采购）由 services/purchasing.py 的 Purchaser 驱动，与本模块分离：
+收款事实一旦落库，采购失败、等待、通知失败都不会让订单退回未付款。
+"""
 
 from __future__ import annotations
 
 from ..db import Database
 from ..logging_config import get_logger
 from ..models import Order, OrderStatus, Product
-from .upstream import DeliveryResult, UpstreamClient
+from .purchasing import Purchaser
 
 logger = get_logger(__name__)
 
@@ -14,10 +18,6 @@ class OrderError(Exception):
     def __init__(self, message: str, order: Order | None = None) -> None:
         super().__init__(message)
         self.order = order
-
-
-class DeliveryError(OrderError):
-    """付款已记录，但履约需要恢复或管理员重试。"""
 
 
 async def create_order(db: Database, user_id: int, product: Product, quantity: int) -> Order:
@@ -37,15 +37,17 @@ async def create_order(db: Database, user_id: int, product: Product, quantity: i
 
 async def mark_paid(
     db: Database,
-    upstream: UpstreamClient,
+    purchaser: Purchaser,
     order_id: int,
     trade_no: str | None = None,
     *,
     retry_failed: bool = False,
-) -> tuple[Order, DeliveryResult]:
-    """幂等确认付款并履约。PAID 可恢复；失败订单由管理员明确重试。
+) -> Order:
+    """幂等确认付款并建立采购任务；履约由采购状态机异步推进（开发方案规则 2）。
 
-    上游必须按 order.id 幂等履约，以覆盖上游成功但本地尚未落盘就中断的窗口。
+    - pending_payment → paid：确认收款，保留付款事实。
+    - delivery_failed（旧数据）仅在 retry_failed=True 时回退重试。
+    - trade_no 一致性由 db.transition_order 校验（一交易一订单）。
     """
     async with db.order_operation(order_id):
         order = await db.get_order(order_id)
@@ -60,47 +62,14 @@ async def mark_paid(
             raise OrderError(str(exc), order) from None
         if confirmed is None:
             raise OrderError("order state changed", order)
-        if confirmed.status == OrderStatus.DELIVERED:
-            return confirmed, DeliveryResult(ok=True, upstream_ref=confirmed.upstream_ref, payload=confirmed.payload)
-        if confirmed.status == OrderStatus.DELIVERY_FAILED:
-            if not retry_failed:
-                raise DeliveryError("delivery failed; administrator retry required", confirmed)
+        if confirmed.status == OrderStatus.DELIVERY_FAILED and retry_failed:
             retried = await db.transition_order(order_id, OrderStatus.PAID, from_status=OrderStatus.DELIVERY_FAILED)
-            assert retried is not None
+            if retried is None:
+                raise OrderError("order state changed", confirmed)
             confirmed = retried
-        return await _deliver(db, upstream, confirmed)
-
-
-async def _deliver(db: Database, upstream: UpstreamClient, paid: Order) -> tuple[Order, DeliveryResult]:
-    product = await db.get_product(paid.product_id)
-    if product is None:
-        await db.transition_order(
-            paid.id, OrderStatus.DELIVERY_FAILED, from_status=OrderStatus.PAID, note="product record missing"
-        )
-        raise DeliveryError("product record missing", paid)
-    try:
-        result = await upstream.deliver(paid, product)
-    except Exception as exc:
-        logger.warning("upstream delivery failed", extra={"order_id": paid.id, "error": type(exc).__name__})
-        await db.transition_order(
-            paid.id, OrderStatus.DELIVERY_FAILED, from_status=OrderStatus.PAID, note=type(exc).__name__
-        )
-        raise DeliveryError("upstream delivery unavailable", paid) from None
-    if not result.ok:
-        final = await db.transition_order(
-            paid.id, OrderStatus.DELIVERY_FAILED, from_status=OrderStatus.PAID, note="upstream rejected delivery"
-        )
-        raise DeliveryError("upstream rejected delivery", final)
-    final = await db.transition_order(
-        paid.id,
-        OrderStatus.DELIVERED,
-        from_status=OrderStatus.PAID,
-        upstream_ref=result.upstream_ref,
-        payload=result.payload,
-    )
-    assert final is not None
-    logger.info("order delivered", extra={"order_id": paid.id})
-    return final, result
+        await purchaser.ensure_purchase(db, confirmed)
+        logger.info("payment confirmed", extra={"order_id": order_id})
+        return confirmed
 
 
 async def cancel_order(db: Database, order_id: int) -> Order:

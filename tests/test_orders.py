@@ -2,10 +2,9 @@ import asyncio
 
 import pytest
 
-from shop_bot.models import OrderStatus
+from shop_bot.models import OrderStatus, PurchaseState
 from shop_bot.services import orders
 from shop_bot.services.orders import OrderError
-from shop_bot.services.upstream import DeliveryResult, StubUpstreamClient
 
 
 async def test_create_order_computes_amount(db, user, product):
@@ -15,63 +14,49 @@ async def test_create_order_computes_amount(db, user, product):
     assert order.currency == product.currency
 
 
-async def test_mark_paid_delivers_and_notifies(db, user, product):
+async def test_mark_paid_confirms_payment_and_creates_purchase(db, user, product, purchaser):
     order = await orders.create_order(db, user.id, product, 1)
-    final, result = await orders.mark_paid(db, StubUpstreamClient(), order.id)
-    assert final.status == OrderStatus.DELIVERED
-    assert final.upstream_ref == f"STUB-{order.id:06d}"
-    assert result.ok
-    assert result.payload is not None
+    final = await orders.mark_paid(db, purchaser, order.id)
+    assert final.status == OrderStatus.PAID
+    purchase = await db.get_purchase_by_order(order.id)
+    assert purchase is not None
+    assert purchase.state.value == "ready"
+    assert purchase.sku  # 演示商品也有兜底 SKU
 
 
-async def test_double_pay_reuses_persisted_delivery(db, user, product):
+async def test_double_mark_paid_is_idempotent(db, user, product, purchaser):
     order = await orders.create_order(db, user.id, product, 1)
-    await orders.mark_paid(db, StubUpstreamClient(), order.id)
-    final, result = await orders.mark_paid(db, StubUpstreamClient(), order.id)
-    assert final.payload == result.payload
-    assert final.status == OrderStatus.DELIVERED
+    await orders.mark_paid(db, purchaser, order.id, trade_no="T1")
+    final = await orders.mark_paid(db, purchaser, order.id, trade_no="T1")
+    assert final.status == OrderStatus.PAID
+    assert final.trade_no == "T1"
+    purchases = await db.list_purchases_by_states(tuple(PurchaseState))
+    assert len(purchases) == 1  # 采购任务不重复
 
 
-async def test_concurrent_mark_paid_only_delivers_once(db, user, product):
-    calls = []
-
-    class CountingStub(StubUpstreamClient):
-        async def deliver(self, order, product):
-            calls.append(order.id)
-            return await super().deliver(order, product)
-
+async def test_concurrent_mark_paid_single_payment_and_purchase(db, user, product, purchaser):
     order = await orders.create_order(db, user.id, product, 1)
     results = await asyncio.gather(
-        orders.mark_paid(db, CountingStub(), order.id),
-        orders.mark_paid(db, CountingStub(), order.id),
+        orders.mark_paid(db, purchaser, order.id, trade_no="T1"),
+        orders.mark_paid(db, purchaser, order.id, trade_no="T1"),
+        return_exceptions=True,
     )
-    assert all(order.status == OrderStatus.DELIVERED for order, _ in results)
-    assert results[0][1].payload == results[1][1].payload
-    assert len(calls) == 1
+    # 同交易重复确认幂等成功，采购任务只建一份
+    assert all(not isinstance(r, Exception) for r in results)
+    purchases = await db.list_purchases_by_states(tuple(PurchaseState))
+    assert len(purchases) == 1
 
 
-async def test_upstream_failure_marks_delivery_failed(db, user, product):
-    class FailStub(StubUpstreamClient):
-        async def deliver(self, order, product):
-            return DeliveryResult(ok=False, error="out of stock")
-
+async def test_mark_paid_rejects_mismatched_trade_no(db, user, product, purchaser):
     order = await orders.create_order(db, user.id, product, 1)
-    with pytest.raises(OrderError, match="upstream rejected delivery"):
-        await orders.mark_paid(db, FailStub(), order.id)
-    final = await db.get_order(order.id)
-    assert final.status == OrderStatus.DELIVERY_FAILED
+    await orders.mark_paid(db, purchaser, order.id, trade_no="T1")
+    with pytest.raises(OrderError, match="does not match"):
+        await orders.mark_paid(db, purchaser, order.id, trade_no="T2")
 
 
-async def test_upstream_exception_marks_delivery_failed(db, user, product):
-    class CrashStub(StubUpstreamClient):
-        async def deliver(self, order, product):
-            raise RuntimeError("network down")
-
-    order = await orders.create_order(db, user.id, product, 1)
-    with pytest.raises(OrderError, match="upstream delivery unavailable"):
-        await orders.mark_paid(db, CrashStub(), order.id)
-    final = await db.get_order(order.id)
-    assert final.status == OrderStatus.DELIVERY_FAILED
+async def test_mark_paid_not_found(db, purchaser):
+    with pytest.raises(OrderError, match="not found"):
+        await orders.mark_paid(db, purchaser, 999)
 
 
 async def test_cancel_pending_order(db, user, product):
@@ -80,8 +65,21 @@ async def test_cancel_pending_order(db, user, product):
     assert cancelled.status == OrderStatus.CANCELLED
 
 
-async def test_cancel_paid_order_rejected(db, user, product):
+async def test_cancel_paid_order_rejected(db, user, product, purchaser):
     order = await orders.create_order(db, user.id, product, 1)
-    await orders.mark_paid(db, StubUpstreamClient(), order.id)
+    await orders.mark_paid(db, purchaser, order.id)
     with pytest.raises(OrderError, match="cannot be cancelled"):
         await orders.cancel_order(db, order.id)
+
+
+async def test_demo_fulfill_delivers_and_purchases_once(db, user, product, purchaser):
+    order = await orders.create_order(db, user.id, product, 1)
+    await orders.mark_paid(db, purchaser, order.id)
+    first = await purchaser.fulfill(db, order.id)
+    assert first is not None and first.status == OrderStatus.DELIVERED
+    assert first.payload == f"[stub goods for order #{order.id}]"
+    second = await purchaser.fulfill(db, order.id)
+    assert second is not None and second.status == OrderStatus.DELIVERED
+    purchase = await db.get_purchase_by_order(order.id)
+    assert purchase is not None and purchase.state == PurchaseState.FULFILLED
+    assert purchase.attempts == 0  # 模拟模式不经过提交

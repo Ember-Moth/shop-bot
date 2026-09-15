@@ -4,6 +4,7 @@ from aiogram import Bot
 from shop_bot.db import Database
 from shop_bot.models import Product
 from shop_bot.services.epay import EPayClient, EPayConfig
+from shop_bot.services.purchasing import DemoPurchaser
 
 from .fakes import FakeSession
 
@@ -23,7 +24,7 @@ async def user(db):
 
 @pytest.fixture
 async def product(db):
-    await db.seed_products([Product(id=1, name="demo", description="d", price_cents=999, currency="USD")])
+    await db.seed_products([Product(1, "demo", description="d", price_cents=999, currency="CNY")])
     return (await db.list_products())[0]
 
 
@@ -32,6 +33,11 @@ async def epay():
     client = EPayClient(EPayConfig(pid="1000", key="audit-secret", url="https://pay.example.com"))
     yield client
     await client.close()
+
+
+@pytest.fixture
+async def purchaser():
+    return DemoPurchaser()
 
 
 @pytest.fixture

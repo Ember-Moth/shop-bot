@@ -34,6 +34,19 @@ PAGE_LIMIT = 100  # /v1/plans 单页上限（文档规定最大 100）
 class CommbitzError(Exception):
     """上游请求失败。消息已脱敏，不含凭据。"""
 
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+    @property
+    def definite_rejection(self) -> bool:
+        """4xx（除鉴权/超时/限流）代表上游明确拒绝本次请求，重试无意义。"""
+        return (
+            self.status_code is not None
+            and 400 <= self.status_code < 500
+            and self.status_code not in (401, 408, 429)
+        )
+
 
 def base_url_for(environment: str) -> str:
     env = environment.strip().lower()
@@ -153,7 +166,10 @@ class CommbitzClient:
             except ValueError:
                 pass
             detail = f": {message}" if message else ""
-            raise CommbitzError(f"commbitz HTTP {resp.status_code} {request.method} {request.url.path}{detail}")
+            raise CommbitzError(
+                f"commbitz HTTP {resp.status_code} {request.method} {request.url.path}{detail}",
+                status_code=resp.status_code,
+            )
         try:
             body = resp.json()
         except ValueError as exc:
@@ -162,14 +178,22 @@ class CommbitzClient:
             raise CommbitzError(f"commbitz unexpected response shape from {request.url.path}")
         return body
 
-    async def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         token = await self._ensure_token()
         headers = {"Authorization": f"Bearer {token}"}
-        resp = await self._http.request(method, path, params=params, headers=headers)
+        resp = await self._http.request(method, path, params=params, json=json, headers=headers)
         if resp.status_code == 401:
-            # 令牌在服务端提前失效：强制刷新后重试一次；再失败由 _unwrap 抛错
+            # 令牌在服务端提前失效：强制刷新后重试一次；再失败由 _unwrap 抛错。
+            # 401 发生在业务处理之前，这里重试不构成重复提交。
             headers = {"Authorization": f"Bearer {await self._force_refresh()}"}
-            resp = await self._http.request(method, path, params=params, headers=headers)
+            resp = await self._http.request(method, path, params=params, json=json, headers=headers)
         return self._unwrap(resp)
 
     # ---- 目录与详情（只读） ----
@@ -208,4 +232,19 @@ class CommbitzClient:
     async def get_order_details(self, request_id: str) -> dict[str, Any]:
         """查询单据详情。业务数据在 data.data，不要递归剥离所有 data 层。"""
         body = await self._request("GET", f"/v1/details/{request_id}")
+        return dict(body["data"]["data"])
+
+    async def create_request(
+        self, *, request_type: str, sku: str, quantity: int, notes: str | None = None
+    ) -> dict[str, Any]:
+        """提交采购请求——本客户端唯一会创建上游订单的方法。
+
+        上游没有幂等键（PDF 14.2 节）：调用方必须先持久化提交意图（开发方案规则 3），
+        且不得因超时/5xx 重试本方法。客户端只做 401 鉴权重试（发生在业务处理之前，
+        不构成重复提交）。响应业务数据在 data.data，成功时取 `_id` 立即持久化。
+        """
+        payload: dict[str, Any] = {"requestType": request_type, "sku": sku, "quantity": quantity}
+        if notes:
+            payload["notes"] = notes
+        body = await self._request("POST", "/v1/request", json=payload)
         return dict(body["data"]["data"])

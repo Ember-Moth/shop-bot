@@ -12,7 +12,7 @@ from ..services import orders
 from ..services.epay import EPayClient, EPayError
 from ..services.fulfillment import notify_owner
 from ..services.orders import OrderError
-from ..services.upstream import UpstreamClient
+from ..services.purchasing import Purchaser
 
 router = Router()
 logger = get_logger(__name__)
@@ -64,7 +64,7 @@ async def cb_my_orders(callback: CallbackQuery, db: Database) -> None:
 
 @router.message(Command("query"))
 async def cmd_query(
-    message: Message, db: Database, epay: EPayClient | None, upstream: UpstreamClient, bot: Bot
+    message: Message, db: Database, epay: EPayClient | None, purchaser: Purchaser, bot: Bot
 ) -> None:
     """用户主动查询订单支付状态（回调可能延迟或丢失时兜底）。"""
     text = message.text
@@ -115,9 +115,15 @@ async def cmd_query(
     else:
         trade_no = order.trade_no
     try:
-        await orders.mark_paid(db, upstream, order.id, trade_no=trade_no)
+        order = await orders.mark_paid(db, purchaser, order.id, trade_no=trade_no)
+        # 查询即触发一次履约推进（提交一次/查询一次），不阻塞在等待状态
+        order = await purchaser.fulfill(db, order.id)
     except OrderError:
         await message.answer(f"订单 #{order.id} 暂时无法发货，请联系管理员")
+        return
+    assert order is not None
+    if order.status != OrderStatus.DELIVERED:
+        await message.answer(f"订单 #{order.id} 已支付，正在履约（状态：{order.status}），请稍等")
         return
     notified = await notify_owner(db, bot, order.id, resend=True)
     if notified:

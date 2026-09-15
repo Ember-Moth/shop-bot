@@ -31,6 +31,16 @@ class SyncResult:
     skipped: int
 
 
+def _request_type_for(sim_category: str) -> str | None:
+    # planIsFor 枚举未完全定义（开发方案 7.3），先用 simCategory 推导可确定的两类；
+    # 其他类型等业务确认后再启用。
+    if sim_category == "esim":
+        return "esim"
+    if sim_category == "physicalsim":
+        return "physical"
+    return None
+
+
 async def sync_catalog(db: Database, client: PlanSource) -> SyncResult:
     result = SyncResult(total=0, created=0, updated=0, skipped=0)
     raw_plans = await client.get_all_plans()
@@ -53,6 +63,7 @@ async def sync_catalog(db: Database, client: PlanSource) -> SyncResult:
             name=plan.name,
             description=description,
             upstream_plan_id=plan.plan_id,
+            request_type=_request_type_for(plan.sim_category),
         )
         if created:
             result.created += 1
