@@ -12,6 +12,7 @@
 | `database_path` | `SHOP_BOT_DATABASE_PATH` | SQLite 文件路径 |
 | `webhook.host` | `SHOP_BOT_WEBHOOK__HOST` | 监听地址 |
 | `webhook.port` | `SHOP_BOT_WEBHOOK__PORT` | 监听端口 |
+| `webhook.secret_token` | `SHOP_BOT_WEBHOOK__SECRET_TOKEN` | 必填，请求来源校验密钥，1–256 个字母/数字/下划线/连字符 |
 | `webhook.path` | `SHOP_BOT_WEBHOOK__PATH` | Telegram 更新回调路径 |
 | `webhook.url` | `SHOP_BOT_WEBHOOK__URL` | 公网 HTTPS 地址（必填，如 `https://bot.example.com`） |
 | `payment.callback_path` | `SHOP_BOT_PAYMENT__CALLBACK_PATH` | 支付网关回调路径 |
@@ -100,3 +101,15 @@ journalctl -u shop-bot -f   # 看日志
 1. 读 `WorkingDirectory` 下的 `config.yaml`（默认）
 2. 设 `SHOP_BOT_CONFIG` 环境变量指向其他路径
 3. 完全用 `Environment=` 行注入（适合 secret 管理）
+
+## 升级与恢复
+
+升级前备份数据库；程序会事务性补齐订单字段、合并旧 FSM 重复行后再建立唯一索引。
+FSM 保留旧版本实际读取的最早行，避免被后续重复行中的空字段覆盖。
+环境变量只覆盖指定字段，例如注入 `SHOP_BOT_EPAY__KEY` 会保留 YAML 中的 `pid/url/type`。
+
+仅部署一个 bot 进程。恢复任务在启动后及每 30 秒处理已付款未完成的订单和通知失败的订单。
+升级前已发货订单不会主动重发，可用 `/query` 补发已保存的货品。
+发货失败需要管理员 `/paid` 重试；`/query` 与 `/paid` 补发的货品都只私信订单买家。
+接入真实上游前必须验证 `order.id` 幂等性，包括“上游已成功、本地进程中断后重试”的场景。
+EPay V1 查询在 URL 中携带密钥，因此 HTTPX/HTTPCORE 请求调试日志被禁用，支付错误只输出安全的业务信息。

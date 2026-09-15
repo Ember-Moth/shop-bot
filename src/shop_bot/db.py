@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from typing import Any
+from weakref import WeakValueDictionary
 
 import aiosqlite
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
@@ -37,6 +40,8 @@ CREATE TABLE IF NOT EXISTS orders (
     upstream_ref TEXT,
     trade_no TEXT,
     payload TEXT,
+    notified_at TEXT,
+    notification_pending INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -66,151 +71,183 @@ CREATE TABLE IF NOT EXISTS fsm_state (
     PRIMARY KEY (bot_id, chat_id, user_id, thread_id, business_connection_id, destiny)
 );
 
--- SQLite 复合主键里 NULL 不参与唯一性约束，导致 thread_id=NULL 的行可以重复插入。
--- 用唯一索引 + IFNULL 归一化解决。
-CREATE UNIQUE INDEX IF NOT EXISTS idx_fsm_state_unique ON fsm_state (
-    bot_id, chat_id, user_id, IFNULL(thread_id, -1), IFNULL(business_connection_id, ''), destiny
-);
 """
 
 
 class Database:
+    """单连接数据库。所有读写通过锁保护的连接上下文，事务不能跨请求共享。"""
+
     def __init__(self, path: str) -> None:
         self._path = path
         self._conn: aiosqlite.Connection | None = None
+        self._lock = asyncio.Lock()
+        self._order_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
     async def connect(self) -> None:
-        self._conn = await aiosqlite.connect(self._path)
+        self._conn = await aiosqlite.connect(self._path, isolation_level=None)
         self._conn.row_factory = aiosqlite.Row
-        await self._conn.executescript(SCHEMA)
-        await self._migrate()
-        await self._conn.commit()
+        try:
+            await self._conn.executescript(SCHEMA)
+            async with self.transaction() as conn:
+                await self._migrate(conn)
+        except BaseException:
+            await self.close()
+            raise
 
-    async def _migrate(self) -> None:
-        """给老库补新增字段，CREATE TABLE IF NOT EXISTS 不会更新已有表。"""
-        conn = self.conn  # 用 property 保证非 None
+    async def _migrate(self, conn: aiosqlite.Connection) -> None:
         async with conn.execute("PRAGMA table_info(orders)") as cur:
             columns = {row["name"] for row in await cur.fetchall()}
-        if "trade_no" not in columns:
-            await conn.execute("ALTER TABLE orders ADD COLUMN trade_no TEXT")
-        if "payload" not in columns:
-            await conn.execute("ALTER TABLE orders ADD COLUMN payload TEXT")
+        for column in ("trade_no", "payload", "notified_at"):
+            if column not in columns:
+                await conn.execute(f"ALTER TABLE orders ADD COLUMN {column} TEXT")
+        if "notification_pending" not in columns:
+            # 旧版没有通知结果证据。历史已发货订单只允许主动补发，避免升级时群发旧货品。
+            await conn.execute("ALTER TABLE orders ADD COLUMN notification_pending INTEGER NOT NULL DEFAULT 0")
+        # 旧实现读取最早一行；它包含后续 set_state/set_data 更新的完整会话。
+        # 后插入的重复行可能只包含 state 或 data，不能简单保留最新行。
+        await conn.execute("DROP INDEX IF EXISTS idx_fsm_state_unique")
+        await conn.execute("""
+            DELETE FROM fsm_state WHERE rowid NOT IN (
+                SELECT MIN(rowid) FROM fsm_state
+                GROUP BY bot_id, chat_id, user_id, thread_id, business_connection_id, destiny
+            )
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX idx_fsm_state_unique ON fsm_state (
+                bot_id, chat_id, user_id, thread_id IS NULL, IFNULL(thread_id, 0),
+                business_connection_id IS NULL, IFNULL(business_connection_id, ''), destiny
+            )
+        """)
+        # 恢复上一版已提交事件、但还未写 orders.payload 时中断的订单。
+        await conn.execute("""
+            UPDATE orders SET payload = (
+                SELECT note FROM order_events WHERE order_id = orders.id
+                AND to_status = 'delivered' AND note IS NOT NULL ORDER BY id DESC LIMIT 1
+            ) WHERE status = 'delivered' AND payload IS NULL
+        """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_trade_no ON orders(trade_no)")
 
     async def close(self) -> None:
-        if self._conn is not None:
-            await self._conn.close()
-            self._conn = None
+        async with self._lock:
+            if self._conn is not None:
+                await self._conn.close()
+                self._conn = None
 
-    @property
-    def conn(self) -> aiosqlite.Connection:
-        if self._conn is None:
-            raise RuntimeError("Database.connect() must be called first")
-        return self._conn
+    @asynccontextmanager
+    async def connection(self) -> AsyncIterator[aiosqlite.Connection]:
+        """持有连接期间不得调用其他 Database 方法；业务代码使用 DAO。"""
+        async with self._lock:
+            if self._conn is None:
+                raise RuntimeError("Database.connect() must be called first")
+            yield self._conn
 
-    # ---- users ----
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        async with self.connection() as conn:
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+                yield conn
+                await conn.commit()
+            except BaseException:
+                # 包括任务取消；先清理事务，再允许下一个协程访问连接。
+                await conn.rollback()
+                raise
+
+    @asynccontextmanager
+    async def order_operation(self, order_id: int) -> AsyncIterator[None]:
+        """单进程内串行处理同一订单的履约和通知，不占用数据库连接。"""
+        lock = self._order_locks.setdefault(order_id, asyncio.Lock())
+        async with lock:
+            yield
+
+    async def _one(self, sql: str, params: tuple = ()) -> aiosqlite.Row | None:
+        async with self.connection() as conn, conn.execute(sql, params) as cur:
+            return await cur.fetchone()
+
+    async def _all(self, sql: str, params: tuple = ()) -> list[aiosqlite.Row]:
+        async with self.connection() as conn, conn.execute(sql, params) as cur:
+            return list(await cur.fetchall())
 
     async def upsert_user(self, telegram_id: int, username: str | None) -> User:
-        await self.conn.execute(
-            """
-            INSERT INTO users (telegram_id, username) VALUES (?, ?)
-            ON CONFLICT(telegram_id) DO UPDATE SET username = excluded.username
-            """,
-            (telegram_id, username),
-        )
-        await self.conn.commit()
-        async with self.conn.execute(
-            "SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)
-        ) as cur:
-            row = await cur.fetchone()
-            assert row is not None  # 刚 upsert 过，必然存在
-            return _row_to_user(row)
+        async with self.transaction() as conn:
+            async with conn.execute(
+                """INSERT INTO users (telegram_id, username) VALUES (?, ?)
+                ON CONFLICT(telegram_id) DO UPDATE SET username = excluded.username RETURNING *""",
+                (telegram_id, username),
+            ) as cur:
+                row = await cur.fetchone()
+        assert row is not None
+        return _row_to_user(row)
 
     async def get_user(self, user_id: int) -> User | None:
-        async with self.conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)) as cur:
-            row = await cur.fetchone()
+        row = await self._one("SELECT * FROM users WHERE id = ?", (user_id,))
         return _row_to_user(row) if row else None
 
     async def get_user_by_telegram_id(self, telegram_id: int) -> User | None:
-        async with self.conn.execute(
-            "SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)
-        ) as cur:
-            row = await cur.fetchone()
+        row = await self._one("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
         return _row_to_user(row) if row else None
 
-    # ---- products ----
-
     async def list_products(self) -> list[Product]:
-        async with self.conn.execute(
-            "SELECT * FROM products WHERE active = 1 ORDER BY id"
-        ) as cur:
-            rows = await cur.fetchall()
-        return [_row_to_product(r) for r in rows]
+        return [_row_to_product(r) for r in await self._all("SELECT * FROM products WHERE active = 1 ORDER BY id")]
 
     async def get_product(self, product_id: int) -> Product | None:
-        async with self.conn.execute(
-            "SELECT * FROM products WHERE id = ?", (product_id,)
-        ) as cur:
-            row = await cur.fetchone()
+        row = await self._one("SELECT * FROM products WHERE id = ?", (product_id,))
         return _row_to_product(row) if row else None
 
     async def seed_products(self, products: list[Product]) -> None:
-        """插入演示商品，供首次启动时调用。"""
-        for p in products:
-            await self.conn.execute(
-                """
-                INSERT OR IGNORE INTO products (id, name, description, price_cents, currency)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (p.id, p.name, p.description, p.price_cents, p.currency),
+        async with self.transaction() as conn:
+            await conn.executemany(
+                """INSERT OR IGNORE INTO products (id, name, description, price_cents, currency)
+                VALUES (?, ?, ?, ?, ?)""",
+                [(p.id, p.name, p.description, p.price_cents, p.currency) for p in products],
             )
-        await self.conn.commit()
-
-    # ---- orders ----
 
     async def create_order(
         self, user_id: int, product_id: int, quantity: int, amount_cents: int, currency: str
     ) -> Order:
-        cur = await self.conn.execute(
-            """
-            INSERT INTO orders (user_id, product_id, quantity, amount_cents, currency)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (user_id, product_id, quantity, amount_cents, currency),
-        )
-        await self.conn.commit()
-        order_id = cur.lastrowid
-        assert order_id is not None
-        order = await self.get_order(order_id)
-        assert order is not None  # 刚插入，必然存在
-        return order
+        async with self.transaction() as conn:
+            async with conn.execute(
+                """INSERT INTO orders (user_id, product_id, quantity, amount_cents, currency)
+                VALUES (?, ?, ?, ?, ?) RETURNING *""",
+                (user_id, product_id, quantity, amount_cents, currency),
+            ) as cur:
+                row = await cur.fetchone()
+        assert row is not None
+        return _row_to_order(row)
 
     async def get_order(self, order_id: int) -> Order | None:
-        async with self.conn.execute(
-            "SELECT * FROM orders WHERE id = ?", (order_id,)
-        ) as cur:
-            row = await cur.fetchone()
+        row = await self._one("SELECT * FROM orders WHERE id = ?", (order_id,))
         return _row_to_order(row) if row else None
 
-    async def list_orders(
-        self, status: OrderStatus | None = None, limit: int = 20
-    ) -> list[Order]:
+    async def list_orders(self, status: OrderStatus | None = None, limit: int = 20) -> list[Order]:
         if status is None:
-            query = "SELECT * FROM orders ORDER BY id DESC LIMIT ?"
-            params: tuple = (limit,)
+            rows = await self._all("SELECT * FROM orders ORDER BY id DESC LIMIT ?", (limit,))
         else:
-            query = "SELECT * FROM orders WHERE status = ? ORDER BY id DESC LIMIT ?"
-            params = (status.value, limit)
-        async with self.conn.execute(query, params) as cur:
-            rows = await cur.fetchall()
+            rows = await self._all("SELECT * FROM orders WHERE status = ? ORDER BY id DESC LIMIT ?", (status, limit))
         return [_row_to_order(r) for r in rows]
 
     async def list_orders_for_user(self, user_id: int, limit: int = 20) -> list[Order]:
-        async with self.conn.execute(
-            "SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT ?",
-            (user_id, limit),
-        ) as cur:
-            rows = await cur.fetchall()
+        rows = await self._all("SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit))
         return [_row_to_order(r) for r in rows]
+
+    async def list_recovery_orders(self) -> list[Order]:
+        rows = await self._all("""SELECT * FROM orders WHERE status = 'paid'
+            OR (status = 'delivered' AND notification_pending = 1) ORDER BY id""")
+        return [_row_to_order(r) for r in rows]
+
+    async def mark_notified(self, order_id: int) -> None:
+        async with self.transaction() as conn:
+            await conn.execute(
+                """UPDATE orders SET notified_at = datetime('now'), notification_pending = 0
+                WHERE id = ? AND status = 'delivered'""",
+                (order_id,),
+            )
+
+    async def request_notification(self, order_id: int) -> None:
+        async with self.transaction() as conn:
+            await conn.execute(
+                "UPDATE orders SET notification_pending = 1 WHERE id = ? AND status = 'delivered'", (order_id,)
+            )
 
     async def transition_order(
         self,
@@ -221,47 +258,37 @@ class Database:
         upstream_ref: str | None = None,
         trade_no: str | None = None,
         note: str | None = None,
+        payload: str | None = None,
     ) -> Order | None:
-        """应用状态转换；订单不存在或当前状态与 from_status 不匹配时返回 None。
-
-        「读状态 → 条件 UPDATE → 写审计日志 → commit」四步，条件 UPDATE 保证并发转换
-        只有一个成功，显式事务保证状态变更和审计日志同时落盘。
-        """
-        # 显式开事务，防止其他协程的 commit 把中间状态提前落盘
-        await self.conn.execute("BEGIN")
-        try:
-            async with self.conn.execute(
-                "SELECT status FROM orders WHERE id = ?", (order_id,)
-            ) as cur:
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cur:
                 row = await cur.fetchone()
-            if row is None:
-                await self.conn.execute("ROLLBACK")
+            if row is None or (from_status is not None and row["status"] != from_status):
                 return None
-            current = OrderStatus(row["status"])
-            if from_status is not None and current != from_status:
-                await self.conn.execute("ROLLBACK")
-                return None
-
-            cursor = await self.conn.execute(
-                """
-                UPDATE orders SET status = ?, upstream_ref = COALESCE(?, upstream_ref),
-                    trade_no = COALESCE(?, trade_no), updated_at = datetime('now')
-                WHERE id = ? AND status = ?
-                """,
-                (to_status.value, upstream_ref, trade_no, order_id, current.value),
-            )
-            if cursor.rowcount != 1:
-                await self.conn.execute("ROLLBACK")
-                return None
-            await self.conn.execute(
-                "INSERT INTO order_events (order_id, from_status, to_status, note) VALUES (?, ?, ?, ?)",
-                (order_id, current.value, to_status.value, note),
-            )
-            await self.conn.commit()
-        except Exception:
-            await self.conn.execute("ROLLBACK")
-            raise
-        return await self.get_order(order_id)
+            if trade_no is not None:
+                if not trade_no.strip() or (row["trade_no"] and row["trade_no"] != trade_no):
+                    raise ValueError("payment transaction does not match order")
+                async with conn.execute(
+                    "SELECT id FROM orders WHERE trade_no = ? AND id != ?", (trade_no, order_id)
+                ) as cur:
+                    if await cur.fetchone() is not None:
+                        raise ValueError("payment transaction belongs to another order")
+            async with conn.execute(
+                """UPDATE orders SET status = ?, upstream_ref = COALESCE(?, upstream_ref),
+                trade_no = COALESCE(?, trade_no), payload = COALESCE(?, payload), updated_at = datetime('now'),
+                notification_pending = CASE WHEN ? = 'delivered' AND status != 'delivered'
+                    THEN 1 ELSE notification_pending END
+                WHERE id = ? RETURNING *""",
+                (to_status, upstream_ref, trade_no, payload, to_status, order_id),
+            ) as cur:
+                updated = await cur.fetchone()
+            if row["status"] != to_status:
+                await conn.execute(
+                    "INSERT INTO order_events (order_id, from_status, to_status, note) VALUES (?, ?, ?, ?)",
+                    (order_id, row["status"], to_status, note),
+                )
+        assert updated is not None
+        return _row_to_order(updated)
 
 
 def _row_to_user(row: aiosqlite.Row) -> User:
@@ -296,6 +323,8 @@ def _row_to_order(row: aiosqlite.Row) -> Order:
         upstream_ref=row["upstream_ref"],
         trade_no=row["trade_no"],
         payload=row["payload"],
+        notified_at=row["notified_at"],
+        notification_pending=bool(row["notification_pending"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -322,68 +351,74 @@ class FSMStorage(BaseStorage):
         if state is not None:
             state_str = state if isinstance(state, str) else state.state
 
-        # 先尝试 INSERT，已存在则忽略；再 UPDATE，保证并发安全
-        await self._db.conn.execute(
-            """
-            INSERT OR IGNORE INTO fsm_state
-                (bot_id, chat_id, user_id, thread_id, business_connection_id, destiny, state, data)
-            VALUES (?, ?, ?, ?, ?, ?, ?, '{}')
-            """,
-            (*self._key_tuple(key), state_str),
-        )
-        await self._db.conn.execute(
-            """
-            UPDATE fsm_state SET state = ?, updated_at = datetime('now')
-            WHERE bot_id = ? AND chat_id = ? AND user_id = ?
-              AND thread_id IS ? AND business_connection_id IS ? AND destiny = ?
-            """,
-            (state_str, *self._key_tuple(key)),
-        )
-        await self._db.conn.commit()
+        async with self._db.transaction() as conn:
+            # 先尝试 INSERT，已存在则忽略；再 UPDATE，保证并发安全
+            await conn.execute(
+                """
+                INSERT OR IGNORE INTO fsm_state
+                    (bot_id, chat_id, user_id, thread_id, business_connection_id, destiny, state, data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, '{}')
+                """,
+                (*self._key_tuple(key), state_str),
+            )
+            await conn.execute(
+                """
+                UPDATE fsm_state SET state = ?, updated_at = datetime('now')
+                WHERE bot_id = ? AND chat_id = ? AND user_id = ?
+                  AND thread_id IS ? AND business_connection_id IS ? AND destiny = ?
+                """,
+                (state_str, *self._key_tuple(key)),
+            )
 
     async def get_state(self, key: StorageKey) -> str | None:
-        async with self._db.conn.execute(
-            """
+        async with (
+            self._db.connection() as conn,
+            conn.execute(
+                """
             SELECT state FROM fsm_state
             WHERE bot_id = ? AND chat_id = ? AND user_id = ?
               AND thread_id IS ? AND business_connection_id IS ? AND destiny = ?
             """,
-            self._key_tuple(key),
-        ) as cur:
+                self._key_tuple(key),
+            ) as cur,
+        ):
             row = await cur.fetchone()
         return row["state"] if row else None
 
     async def set_data(self, key: StorageKey, data: Mapping[str, Any]) -> None:
         data_json = json.dumps(dict(data))
 
-        # 先尝试 INSERT，已存在则忽略；再 UPDATE，保证并发安全
-        await self._db.conn.execute(
-            """
-            INSERT OR IGNORE INTO fsm_state
-                (bot_id, chat_id, user_id, thread_id, business_connection_id, destiny, state, data)
-            VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
-            """,
-            (*self._key_tuple(key), data_json),
-        )
-        await self._db.conn.execute(
-            """
-            UPDATE fsm_state SET data = ?, updated_at = datetime('now')
-            WHERE bot_id = ? AND chat_id = ? AND user_id = ?
-              AND thread_id IS ? AND business_connection_id IS ? AND destiny = ?
-            """,
-            (data_json, *self._key_tuple(key)),
-        )
-        await self._db.conn.commit()
+        async with self._db.transaction() as conn:
+            # 先尝试 INSERT，已存在则忽略；再 UPDATE，保证并发安全
+            await conn.execute(
+                """
+                INSERT OR IGNORE INTO fsm_state
+                    (bot_id, chat_id, user_id, thread_id, business_connection_id, destiny, state, data)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (*self._key_tuple(key), data_json),
+            )
+            await conn.execute(
+                """
+                UPDATE fsm_state SET data = ?, updated_at = datetime('now')
+                WHERE bot_id = ? AND chat_id = ? AND user_id = ?
+                  AND thread_id IS ? AND business_connection_id IS ? AND destiny = ?
+                """,
+                (data_json, *self._key_tuple(key)),
+            )
 
     async def get_data(self, key: StorageKey) -> dict[str, Any]:
-        async with self._db.conn.execute(
-            """
+        async with (
+            self._db.connection() as conn,
+            conn.execute(
+                """
             SELECT data FROM fsm_state
             WHERE bot_id = ? AND chat_id = ? AND user_id = ?
               AND thread_id IS ? AND business_connection_id IS ? AND destiny = ?
             """,
-            self._key_tuple(key),
-        ) as cur:
+                self._key_tuple(key),
+            ) as cur,
+        ):
             row = await cur.fetchone()
         return json.loads(row["data"]) if row else {}
 

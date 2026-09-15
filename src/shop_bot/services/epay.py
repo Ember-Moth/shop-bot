@@ -2,7 +2,7 @@
 
 协议要点：
 - 创建支付：GET submit.php，参数带 MD5 签名
-- 异步回调：POST notify_url，form-urlencoded，带签名验证
+- 异步回调：GET 或 POST notify_url，带签名验证
 - 查询订单：GET api.php?act=order，返回 JSON
 
 金额单位：元，保留两位小数（下游转成「分」存库）。
@@ -12,32 +12,35 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
+import re
 from dataclasses import dataclass
-from typing import Any
+from decimal import Decimal
 from urllib.parse import urlencode
 
 import httpx
 
 from ..logging_config import get_logger
+from ..models import Order
 
 logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
 class EPayConfig:
-    pid: str      # 商户 ID
-    key: str      # 商户密钥
-    url: str      # 网关地址，例如 https://pay.example.com
+    pid: str  # 商户 ID
+    key: str  # 商户密钥
+    url: str  # 网关地址，例如 https://pay.example.com
     type: str = "alipay"  # 默认支付方式
 
 
 @dataclass(slots=True)
 class EPayOrder:
-    name: str         # 商品名称
-    order_no: str     # 商户订单号（我们的 order_id）
-    amount: float     # 金额，元
-    notify_url: str   # 异步回调地址
-    return_url: str   # 同步跳转地址
+    name: str  # 商品名称
+    order_no: str  # 商户订单号（我们的 order_id）
+    amount: float  # 金额，元
+    notify_url: str  # 异步回调地址
+    return_url: str  # 同步跳转地址
 
 
 @dataclass(slots=True)
@@ -47,6 +50,11 @@ class EPayQueryResult:
     money: str
     paid: bool
     message: str
+    pid: str = ""
+
+
+class EPayError(Exception):
+    """可安全记录的支付错误，不携带含密钥的 HTTP 请求或响应。"""
 
 
 def _md5(text: str) -> str:
@@ -83,6 +91,9 @@ def _format_money(amount: float) -> str:
 class EPayClient:
     def __init__(self, config: EPayConfig) -> None:
         self._config = config
+        # V1 查询必须把商户密钥放在 URL 中，禁用第三方请求/线路调试日志。
+        for name in ("httpx", "httpcore"):
+            logging.getLogger(name).setLevel(logging.WARNING)
         self._http = httpx.AsyncClient(timeout=5.0)
 
     async def close(self) -> None:
@@ -105,48 +116,54 @@ class EPayClient:
         return f"{base}/submit.php?{urlencode(params)}"
 
     async def query_order(self, order_no: str) -> EPayQueryResult:
-        """主动查询订单支付状态。"""
+        """查询由本客户端商户凭据授权的订单，不向调用方暴露底层 URL。"""
         base = self._config.url.rstrip("/")
-        resp = await self._http.get(
-            f"{base}/api.php",
-            params={
-                "act": "order",
-                "pid": self._config.pid,
-                "key": self._config.key,
-                "out_trade_no": order_no,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("code") != 1:
-            raise RuntimeError(f"EPay query failed: code={data.get('code')}")
+        try:
+            resp = await self._http.get(
+                f"{base}/api.php",
+                params={"act": "order", "pid": self._config.pid, "key": self._config.key, "out_trade_no": order_no},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPError, ValueError:
+            raise EPayError("payment query unavailable") from None
+        if not isinstance(data, dict) or data.get("code") not in (1, "1"):
+            raise EPayError("payment query rejected")
         return EPayQueryResult(
-            trade_no=data.get("trade_no", ""),
-            order_no=data.get("out_trade_no", ""),
-            money=data.get("money", ""),
-            paid=data.get("status") == 1,
-            message=data.get("msg", ""),
+            trade_no=str(data.get("trade_no") or ""),
+            order_no=str(data.get("out_trade_no", "")),
+            money=str(data.get("money", "")),
+            paid=data.get("status") in (1, "1"),
+            message="",
+            # 部分 V1 网关不回传 pid；此时商户身份来自已鉴权的查询上下文。
+            pid=str(data.get("pid", self._config.pid)),
         )
+
+    def validate_payment(self, order: Order, payment: EPayQueryResult) -> None:
+        """回调与主动查询共用核单规则；验签/鉴权必须在调用此方法前完成。"""
+        if not payment.paid or payment.order_no != str(order.id):
+            raise EPayError("payment order does not match")
+        if payment.pid != self._config.pid:
+            raise EPayError("payment merchant does not match")
+        if not payment.trade_no.strip() or payment.trade_no != payment.trade_no.strip():
+            raise EPayError("payment transaction is missing or invalid")
+        if order.trade_no and order.trade_no != payment.trade_no:
+            raise EPayError("payment transaction does not match")
+        if order.currency != "CNY" or not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", payment.money):
+            raise EPayError("payment currency or amount is invalid")
+        if Decimal(payment.money) <= 0 or Decimal(payment.money) * 100 != order.amount_cents:
+            raise EPayError("payment amount does not match")
 
     def verify_callback(self, params: dict[str, str]) -> bool:
         """验证异步回调的签名。"""
         return _verify_sign(params, self._config.key)
 
-    def parse_callback(self, params: dict[str, str]) -> dict[str, Any]:
-        """解析回调参数，返回标准化字段。
-
-        回调是 form-urlencoded，字段名和 EPay 协议一致：
-        - out_trade_no: 商户订单号
-        - trade_no: 网关交易号
-        - money: 金额（元，字符串）
-        - trade_status: TRADE_SUCCESS 表示支付成功
-        - type: 支付方式
-        """
-        return {
-            "order_no": params.get("out_trade_no", ""),
-            "trade_no": params.get("trade_no", ""),
-            "money": params.get("money", ""),
-            "trade_status": params.get("trade_status", ""),
-            "type": params.get("type", ""),
-            "paid": params.get("trade_status") == "TRADE_SUCCESS",
-        }
+    def parse_callback(self, params: dict[str, str]) -> EPayQueryResult:
+        return EPayQueryResult(
+            order_no=params.get("out_trade_no", ""),
+            trade_no=params.get("trade_no", ""),
+            money=params.get("money", ""),
+            pid=params.get("pid", ""),
+            paid=params.get("trade_status") == "TRADE_SUCCESS",
+            message="",
+        )

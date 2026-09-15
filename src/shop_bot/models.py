@@ -38,9 +38,11 @@ class Order:
     status: OrderStatus
     upstream_ref: str | None
     trade_no: str | None  # 支付网关交易号（EPay 回调时写入）
-    payload: str | None   # 上游发货内容（卡密等），通知失败可恢复
+    payload: str | None  # 上游发货内容（卡密等），通知失败可恢复
     created_at: datetime
     updated_at: datetime
+    notified_at: str | None = None
+    notification_pending: bool = False
 
     @property
     def amount_text(self) -> str:

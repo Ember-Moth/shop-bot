@@ -1,10 +1,12 @@
 import asyncio
+import signal
 import sys
+from contextlib import AsyncExitStack
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import SimpleEventIsolation
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
+from aiogram.webhook.aiohttp_server import setup_application
+from aiohttp import web as aiohttp_web
 
 from .config import get_settings
 from .db import Database, FSMStorage
@@ -12,8 +14,10 @@ from .handlers import admin, catalog, order, start
 from .logging_config import get_logger, setup_logging
 from .models import Product
 from .services.epay import EPayClient, EPayConfig
+from .services.fulfillment import recovery_loop
 from .services.upstream import StubUpstreamClient, UpstreamClient
 from .web.payment import register_epay_routes
+from .web.telegram import register_telegram_routes, validate_webhook_secret
 
 logger = get_logger(__name__)
 
@@ -55,70 +59,62 @@ async def amain() -> None:
     if not settings.bot_token:
         raise SystemExit("SHOP_BOT_BOT_TOKEN is not set")
 
-    db = Database(settings.database_path)
-    await db.connect()
-    if not await db.list_products():
-        await db.seed_products(DEMO_PRODUCTS)
-        logger.info("seeded %d demo products", len(DEMO_PRODUCTS))
-    upstream = build_upstream()
-    bot = Bot(settings.bot_token)
+    validate_webhook_secret(settings.webhook.secret_token)
 
-    # EPay 客户端（如果配置了的话）
-    epay_client = None
-    if settings.epay.pid and settings.epay.key and settings.epay.url:
-        epay_client = EPayClient(
-            EPayConfig(
-                pid=settings.epay.pid,
-                key=settings.epay.key,
-                url=settings.epay.url,
-                type=settings.epay.type,
+    async with AsyncExitStack() as resources:
+        db = Database(settings.database_path)
+        await db.connect()
+        resources.push_async_callback(db.close)
+        if not await db.list_products():
+            await db.seed_products(DEMO_PRODUCTS)
+        upstream = build_upstream()
+        bot = Bot(settings.bot_token)
+        resources.push_async_callback(bot.session.close)
+
+        epay_client = None
+        if settings.epay.pid and settings.epay.key and settings.epay.url:
+            epay_client = EPayClient(
+                EPayConfig(
+                    pid=settings.epay.pid,
+                    key=settings.epay.key,
+                    url=settings.epay.url,
+                    type=settings.epay.type,
+                )
             )
-        )
-        logger.info("epay client initialized")
-
-    dp = build_dispatcher(db, upstream, epay_client)
-
-    app = web.Application()
-    app["db"] = db
-    app["upstream"] = upstream
-    app["bot"] = bot
-    app["epay"] = epay_client
-
-    # Telegram bot webhook 端点
-    handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-    if settings.webhook.secret_token:
-        handler.register(app, path=settings.webhook.path, secret_token=settings.webhook.secret_token)
-    else:
-        handler.register(app, path=settings.webhook.path)
-    setup_application(app, dp, bot=bot)
-
-    # EPay 支付回调端点
-    if epay_client is not None:
-        register_epay_routes(app, settings.payment.callback_path)
-        logger.info("epay callback registered: %s", settings.payment.callback_path)
-
-    # 告诉 Telegram 往哪里推更新
-    webhook_url = f"{settings.webhook.url.rstrip('/')}{settings.webhook.path}"
-    if settings.webhook.secret_token:
-        await bot.set_webhook(webhook_url, secret_token=settings.webhook.secret_token)
-    else:
-        await bot.set_webhook(webhook_url)
-    logger.info("webhook registered: %s", webhook_url)
-    logger.info("payment callback: %s", settings.payment.callback_path)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, settings.webhook.host, settings.webhook.port)
-    try:
-        await site.start()
-        logger.info("listening on %s:%d", settings.webhook.host, settings.webhook.port)
-        await asyncio.Event().wait()  # 一直跑
-    finally:
-        await bot.delete_webhook()
+            resources.push_async_callback(epay_client.close)
+        dp = build_dispatcher(db, upstream, epay_client)
+        app = aiohttp_web.Application()
+        app["db"] = db
+        app["upstream"] = upstream
+        app["bot"] = bot
+        app["epay"] = epay_client
+        register_telegram_routes(app, dp, bot, settings.webhook.path, settings.webhook.secret_token)
+        setup_application(app, dp, bot=bot)
         if epay_client is not None:
-            await epay_client.close()
-        await runner.cleanup()
-        await db.close()
+            register_epay_routes(app, settings.payment.callback_path)
+
+        runner = aiohttp_web.AppRunner(app)
+        resources.push_async_callback(runner.cleanup)
+        await runner.setup()
+        await aiohttp_web.TCPSite(runner, settings.webhook.host, settings.webhook.port).start()
+        webhook_url = f"{settings.webhook.url.rstrip('/')}{settings.webhook.path}"
+        await bot.set_webhook(webhook_url, secret_token=settings.webhook.secret_token)
+        resources.push_async_callback(bot.delete_webhook)
+        logger.info("webhook registered: %s", webhook_url)
+        logger.info("listening on %s:%d", settings.webhook.host, settings.webhook.port)
+        recovery_task = asyncio.create_task(recovery_loop(db, upstream, bot))
+        resources.push_async_callback(_stop_recovery, recovery_task)
+        stop = asyncio.Event()
+        if sys.platform != "win32":
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGTERM, stop.set)
+            resources.callback(loop.remove_signal_handler, signal.SIGTERM)
+        await stop.wait()
+
+
+async def _stop_recovery(task: asyncio.Task[None]) -> None:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 def main() -> None:

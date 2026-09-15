@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
 class UpstreamSettings(BaseSettings):
@@ -43,9 +43,9 @@ class PaymentSettings(BaseSettings):
 class EPaySettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SHOP_BOT_EPAY_")
 
-    pid: str = ""      # 商户 ID
-    key: str = ""      # 商户密钥
-    url: str = ""      # 网关地址，例如 https://pay.example.com
+    pid: str = ""  # 商户 ID
+    key: str = ""  # 商户密钥
+    url: str = ""  # 网关地址，例如 https://pay.example.com
     type: str = "alipay"  # 默认支付方式
 
 
@@ -69,6 +69,18 @@ class Settings(BaseSettings):
     epay: EPaySettings = Field(default_factory=EPaySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # Pydantic 对不同来源的嵌套字典递归合并，环境变量仅覆盖指定字段。
+        return env_settings, init_settings, dotenv_settings, file_secret_settings
+
 
 def _config_path() -> Path:
     return Path(os.environ.get("SHOP_BOT_CONFIG", "config.yaml"))
@@ -84,17 +96,4 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 @lru_cache
 def get_settings() -> Settings:
-    # YAML 里显式存在的键（含嵌套），若环境变量已设置则跳过，保证环境变量的覆盖优先级
-    yaml_data = _load_yaml(_config_path())
-    merged = {
-        k: v
-        for k, v in yaml_data.items()
-        if not _has_env_override(k)
-    }
-    return Settings(**merged)
-
-
-def _has_env_override(key: str) -> bool:
-    """检查某个顶层键是否有环境变量覆盖（含嵌套键的前缀匹配）。"""
-    prefix = f"SHOP_BOT_{key.upper()}"
-    return any(e == prefix or e.startswith(prefix + "__") for e in os.environ)
+    return Settings(**_load_yaml(_config_path()))

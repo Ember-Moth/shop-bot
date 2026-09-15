@@ -10,7 +10,7 @@ webhook:                     # Telegram 推送更新的公网 HTTPS 端点
   port: 8080
   path: /webhook             # bot 更新路径
   url: ""                    # 公网地址，例如 https://bot.example.com
-  secret_token: ""           # webhook 密钥，防伪造请求（生产环境必填）
+  secret_token: ""           # 必填；随机密钥，1–256 个字母/数字/下划线/连字符
 
 payment:                     # 支付网关回调
   callback_path: /payment/callback

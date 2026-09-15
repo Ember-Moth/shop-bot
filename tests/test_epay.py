@@ -12,10 +12,11 @@ from shop_bot.services.epay import (
 
 
 @pytest.fixture
-def epay_client():
-    return EPayClient(
-        EPayConfig(pid="1000", key="test-key", url="https://pay.example.com", type="alipay")
-    )
+async def epay_client():
+    client = EPayClient(EPayConfig(pid="1000", key="test-key", url="https://pay.example.com", type="alipay"))
+
+    yield client
+    await client.close()
 
 
 def test_md5():
@@ -70,10 +71,10 @@ def test_parse_callback_paid(epay_client):
         "type": "alipay",
     }
     parsed = epay_client.parse_callback(params)
-    assert parsed["order_no"] == "123"
-    assert parsed["trade_no"] == "2024010123456789"
-    assert parsed["money"] == "9.99"
-    assert parsed["paid"] is True
+    assert parsed.order_no == "123"
+    assert parsed.trade_no == "2024010123456789"
+    assert parsed.money == "9.99"
+    assert parsed.paid is True
 
 
 def test_parse_callback_not_paid(epay_client):
@@ -85,7 +86,7 @@ def test_parse_callback_not_paid(epay_client):
         "type": "alipay",
     }
     parsed = epay_client.parse_callback(params)
-    assert parsed["paid"] is False
+    assert parsed.paid is False
 
 
 async def test_query_order(epay_client, httpx_mock):

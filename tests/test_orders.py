@@ -24,11 +24,12 @@ async def test_mark_paid_delivers_and_notifies(db, user, product):
     assert result.payload is not None
 
 
-async def test_double_pay_rejected(db, user, product):
+async def test_double_pay_reuses_persisted_delivery(db, user, product):
     order = await orders.create_order(db, user.id, product, 1)
     await orders.mark_paid(db, StubUpstreamClient(), order.id)
-    with pytest.raises(OrderError, match="not pending payment"):
-        await orders.mark_paid(db, StubUpstreamClient(), order.id)
+    final, result = await orders.mark_paid(db, StubUpstreamClient(), order.id)
+    assert final.payload == result.payload
+    assert final.status == OrderStatus.DELIVERED
 
 
 async def test_concurrent_mark_paid_only_delivers_once(db, user, product):
@@ -43,12 +44,9 @@ async def test_concurrent_mark_paid_only_delivers_once(db, user, product):
     results = await asyncio.gather(
         orders.mark_paid(db, CountingStub(), order.id),
         orders.mark_paid(db, CountingStub(), order.id),
-        return_exceptions=True,
     )
-    successes = [r for r in results if not isinstance(r, Exception)]
-    failures = [r for r in results if isinstance(r, Exception)]
-    assert len(successes) == 1
-    assert len(failures) == 1
+    assert all(order.status == OrderStatus.DELIVERED for order, _ in results)
+    assert results[0][1].payload == results[1][1].payload
     assert len(calls) == 1
 
 
@@ -58,7 +56,7 @@ async def test_upstream_failure_marks_delivery_failed(db, user, product):
             return DeliveryResult(ok=False, error="out of stock")
 
     order = await orders.create_order(db, user.id, product, 1)
-    with pytest.raises(OrderError, match="out of stock"):
+    with pytest.raises(OrderError, match="upstream rejected delivery"):
         await orders.mark_paid(db, FailStub(), order.id)
     final = await db.get_order(order.id)
     assert final.status == OrderStatus.DELIVERY_FAILED
@@ -70,7 +68,7 @@ async def test_upstream_exception_marks_delivery_failed(db, user, product):
             raise RuntimeError("network down")
 
     order = await orders.create_order(db, user.id, product, 1)
-    with pytest.raises(OrderError, match="network down"):
+    with pytest.raises(OrderError, match="upstream delivery unavailable"):
         await orders.mark_paid(db, CrashStub(), order.id)
     final = await db.get_order(order.id)
     assert final.status == OrderStatus.DELIVERY_FAILED

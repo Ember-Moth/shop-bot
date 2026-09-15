@@ -32,8 +32,11 @@ bot_token: "123456:ABC-DEF..."   # @BotFather 拿到的 token
 admin_ids: [123456789]           # 你的 telegram id，多个用逗号
 webhook:
   url: "https://bot.example.com" # 你的公网 HTTPS 地址
-payment:
-  secret: "随机字符串"            # 支付网关回调签名密钥
+  secret_token: "REPLACE_WITH_RANDOM_SECRET" # 必填，仅允许字母/数字/下划线/连字符
+epay:
+  pid: "1000"
+  key: "你的商户密钥"
+  url: "https://pay.example.com"
 ```
 
 ## 3. 配置 Nginx 反向代理
@@ -131,8 +134,8 @@ journalctl -u shop-bot -n 100
 |---|---|
 | `systemctl status` 显示 failed | `journalctl -u shop-bot -n 50` 看具体报错 |
 | bot 无响应 | 确认 `webhook.url` 是 HTTPS 且证书有效；`curl -I https://bot.example.com/webhook` |
-| 支付回调 401 | 确认 `payment.secret` 和网关侧一致；看 `journalctl` 里的 signature mismatch |
-| 订单卡住 | 管理员命令 `/orders` 看状态，`/paid <id>` 手动触发发货 |
+| 支付回调 401 | 确认 `epay.key` 和网关侧一致；看 `journalctl` 里的 signature mismatch |
+| 订单卡住 | 管理员命令 `/orders` 看状态；中断的已付款订单自动恢复，发货失败用 `/paid <id>` 重试 |
 
 ## 升级
 

@@ -25,7 +25,11 @@ class DeliveryResult:
 
 class UpstreamClient(Protocol):
     async def deliver(self, order: Order, product: Product) -> DeliveryResult:
-        """通过上游供应商 API 履约已支付订单。"""
+        """按 order.id 幂等履约，重复调用必须返回同一份货品。
+
+        网络中断可能发生在上游已完成、本地尚未持久化之间。真实实现必须把
+        order.id 作为上游幂等键，或先查询既有上游订单；不能直接重复购买。
+        """
         ...
 
 

@@ -16,9 +16,11 @@ class OrderError(Exception):
         self.order = order
 
 
-async def create_order(
-    db: Database, user_id: int, product: Product, quantity: int
-) -> Order:
+class DeliveryError(OrderError):
+    """付款已记录，但履约需要恢复或管理员重试。"""
+
+
+async def create_order(db: Database, user_id: int, product: Product, quantity: int) -> Order:
     order = await db.create_order(
         user_id=user_id,
         product_id=product.id,
@@ -34,86 +36,75 @@ async def create_order(
 
 
 async def mark_paid(
-    db: Database, upstream: UpstreamClient, order_id: int, trade_no: str | None = None
+    db: Database,
+    upstream: UpstreamClient,
+    order_id: int,
+    trade_no: str | None = None,
+    *,
+    retry_failed: bool = False,
 ) -> tuple[Order, DeliveryResult]:
-    """状态转换 pending_payment → paid → delivered（或 delivery_failed）。
+    """幂等确认付款并履约。PAID 可恢复；失败订单由管理员明确重试。
 
-    以后接 Telegram Payments 的 `successful_payment` 回调时也会调这个函数，
-    所以支付集成只需要调这一个入口。
+    上游必须按 order.id 幂等履约，以覆盖上游成功但本地尚未落盘就中断的窗口。
     """
-    order = await db.get_order(order_id)
-    if order is None:
-        raise OrderError(f"order {order_id} not found")
-    if order.status != OrderStatus.PENDING_PAYMENT:
-        raise OrderError(f"order {order_id} is not pending payment")
+    async with db.order_operation(order_id):
+        order = await db.get_order(order_id)
+        if order is None:
+            raise OrderError(f"order {order_id} not found")
+        if order.status == OrderStatus.CANCELLED:
+            raise OrderError(f"order {order_id} is cancelled", order)
+        status = OrderStatus.PAID if order.status == OrderStatus.PENDING_PAYMENT else order.status
+        try:
+            confirmed = await db.transition_order(order_id, status, from_status=order.status, trade_no=trade_no)
+        except ValueError as exc:
+            raise OrderError(str(exc), order) from None
+        if confirmed is None:
+            raise OrderError("order state changed", order)
+        if confirmed.status == OrderStatus.DELIVERED:
+            return confirmed, DeliveryResult(ok=True, upstream_ref=confirmed.upstream_ref, payload=confirmed.payload)
+        if confirmed.status == OrderStatus.DELIVERY_FAILED:
+            if not retry_failed:
+                raise DeliveryError("delivery failed; administrator retry required", confirmed)
+            retried = await db.transition_order(order_id, OrderStatus.PAID, from_status=OrderStatus.DELIVERY_FAILED)
+            assert retried is not None
+            confirmed = retried
+        return await _deliver(db, upstream, confirmed)
 
-    paid = await db.transition_order(
-        order_id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT, trade_no=trade_no
-    )
-    if paid is None:
-        raise OrderError(f"order {order_id} is not pending payment")
 
+async def _deliver(db: Database, upstream: UpstreamClient, paid: Order) -> tuple[Order, DeliveryResult]:
     product = await db.get_product(paid.product_id)
     if product is None:
         await db.transition_order(
-            order_id,
-            OrderStatus.DELIVERY_FAILED,
-            from_status=OrderStatus.PAID,
-            note="product record missing",
+            paid.id, OrderStatus.DELIVERY_FAILED, from_status=OrderStatus.PAID, note="product record missing"
         )
-        raise OrderError(f"product {paid.product_id} not found", paid)
-
+        raise DeliveryError("product record missing", paid)
     try:
         result = await upstream.deliver(paid, product)
-    except Exception as exc:  # 绝不让订单卡在 `paid` 状态
-        logger.exception(
-            "upstream deliver failed", extra={"order_id": order_id, "error": str(exc)}
-        )
+    except Exception as exc:
+        logger.warning("upstream delivery failed", extra={"order_id": paid.id, "error": type(exc).__name__})
         await db.transition_order(
-            order_id, OrderStatus.DELIVERY_FAILED, from_status=OrderStatus.PAID, note=f"upstream error: {exc}"
+            paid.id, OrderStatus.DELIVERY_FAILED, from_status=OrderStatus.PAID, note=type(exc).__name__
         )
-        raise OrderError(f"upstream delivery failed: {exc}", paid) from exc
-
-    if result.ok:
-        logger.info(
-            "order delivered",
-            extra={"order_id": order_id, "upstream_ref": result.upstream_ref},
-        )
-        # 先把 payload 入库，再标记已发货，通知失败也能恢复
+        raise DeliveryError("upstream delivery unavailable", paid) from None
+    if not result.ok:
         final = await db.transition_order(
-            order_id,
-            OrderStatus.DELIVERED,
-            from_status=OrderStatus.PAID,
-            upstream_ref=result.upstream_ref,
-            note=result.payload,  # payload 存到 order_events.note，同时更新到 orders.payload
+            paid.id, OrderStatus.DELIVERY_FAILED, from_status=OrderStatus.PAID, note="upstream rejected delivery"
         )
-        # 更新 orders.payload 字段
-        await db.conn.execute(
-            "UPDATE orders SET payload = ? WHERE id = ?",
-            (result.payload, order_id),
-        )
-        await db.conn.commit()
-    else:
-        logger.warning(
-            "upstream delivery rejected",
-            extra={"order_id": order_id, "error": result.error},
-        )
-        final = await db.transition_order(
-            order_id,
-            OrderStatus.DELIVERY_FAILED,
-            from_status=OrderStatus.PAID,
-            note=result.error,
-        )
-        raise OrderError(result.error or "upstream delivery rejected", final)
-
-    assert final is not None  # 从 PAID 转换到这里必然成功
+        raise DeliveryError("upstream rejected delivery", final)
+    final = await db.transition_order(
+        paid.id,
+        OrderStatus.DELIVERED,
+        from_status=OrderStatus.PAID,
+        upstream_ref=result.upstream_ref,
+        payload=result.payload,
+    )
+    assert final is not None
+    logger.info("order delivered", extra={"order_id": paid.id})
     return final, result
 
 
 async def cancel_order(db: Database, order_id: int) -> Order:
-    order = await db.transition_order(
-        order_id, OrderStatus.CANCELLED, from_status=OrderStatus.PENDING_PAYMENT
-    )
+    order = await db.transition_order(order_id, OrderStatus.CANCELLED, from_status=OrderStatus.PENDING_PAYMENT)
     if order is None:
         raise OrderError(f"order {order_id} cannot be cancelled")
     logger.info("order cancelled", extra={"order_id": order_id})

@@ -95,6 +95,9 @@ async def cb_confirm(
     if user is None:
         await callback.answer("请先发 /start 再下单", show_alert=True)
         return
+    if epay is not None and product.currency != "CNY":
+        await callback.answer("当前商品不支持在线支付，请联系管理员", show_alert=True)
+        return
     order = await orders.create_order(db, user.id, product, quantity)
     msg = callback.message
     if msg is None or isinstance(msg, InaccessibleMessage):
@@ -104,10 +107,6 @@ async def cb_confirm(
     settings = get_settings()
 
     if epay is not None:
-        # EPay 按人民币「元」计价，只支持 CNY 商品
-        if order.currency != "CNY":
-            await callback.answer("当前商品不支持在线支付，请联系管理员", show_alert=True)
-            return
         # 生成 EPay 支付链接，Web App 按钮直接打开收银台
         notify_url = f"{settings.webhook.url.rstrip('/')}{settings.payment.callback_path}"
         bot = callback.bot

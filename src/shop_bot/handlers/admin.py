@@ -6,6 +6,7 @@ from ..config import get_settings
 from ..db import Database
 from ..models import OrderStatus
 from ..services import orders
+from ..services.fulfillment import notify_owner
 from ..services.orders import OrderError
 from ..services.upstream import UpstreamClient
 
@@ -47,24 +48,14 @@ async def cmd_paid(message: Message, db: Database, upstream: UpstreamClient, bot
     if order_id is None:
         await message.answer("用法：/paid <订单号>")
         return
-    # 允许重试 delivery_failed 的订单
-    order = await db.get_order(order_id)
-    if order is not None and order.status == "delivery_failed":
-        await db.transition_order(order_id, OrderStatus.PENDING_PAYMENT, from_status=OrderStatus.DELIVERY_FAILED)
     try:
-        order, result = await orders.mark_paid(db, upstream, order_id)
+        order, _ = await orders.mark_paid(db, upstream, order_id, retry_failed=True)
     except OrderError as exc:
         await message.answer(f"❌ {exc}")
         return
-    await message.answer(
-        f"✅ 订单 #{order.id} 已发货（上游单号：{result.upstream_ref or '无'}）"
-    )
-    owner = await db.get_user(order.user_id)
-    if owner is not None:
-        text = f"🎉 你的订单 #{order.id} 已发货！"
-        if result.payload:
-            text += f"\n\n{result.payload}"
-        await bot.send_message(owner.telegram_id, text)
+    notified = await notify_owner(db, bot, order.id, resend=True)
+    detail = "货品已私信发送给买家" if notified else "货品已保存，私信发送失败，系统会重试"
+    await message.answer(f"✅ 订单 #{order.id} 已发货；{detail}")
 
 
 @router.message(Command("cancel"))

@@ -19,7 +19,7 @@ ExecStart=/opt/shop-bot/.venv/bin/shop-bot
 # Environment=SHOP_BOT_BOT_TOKEN=123456:ABC...
 # Environment=SHOP_BOT_ADMIN_IDS=[123456789]
 # Environment=SHOP_BOT_WEBHOOK__URL=https://bot.example.com
-# Environment=SHOP_BOT_PAYMENT__SECRET=your-webhook-secret
+# Environment=SHOP_BOT_WEBHOOK__SECRET_TOKEN=REPLACE_WITH_RANDOM_SECRET
 
 Restart=always
 RestartSec=5

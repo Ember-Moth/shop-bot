@@ -1,4 +1,4 @@
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InaccessibleMessage, Message
@@ -7,8 +7,10 @@ from ..config import get_settings
 from ..db import Database
 from ..keyboards import main_menu
 from ..logging_config import get_logger
+from ..models import OrderStatus
 from ..services import orders
-from ..services.epay import EPayClient
+from ..services.epay import EPayClient, EPayError
+from ..services.fulfillment import notify_owner
 from ..services.orders import OrderError
 from ..services.upstream import UpstreamClient
 
@@ -52,20 +54,18 @@ async def cb_my_orders(callback: CallbackQuery, db: Database) -> None:
         return
     orders = await db.list_orders_for_user(user.id)
     if not orders:
-        await _safe_edit(
-            callback, "你还没有订单。\n去商品目录看看吧！", reply_markup=main_menu()
-        )
+        await _safe_edit(callback, "你还没有订单。\n去商品目录看看吧！", reply_markup=main_menu())
         await callback.answer()
         return
     lines = [f"#{o.id} · 数量 x{o.quantity} · {o.amount_text} · {o.status}" for o in orders]
-    await _safe_edit(
-        callback, "📦 我的订单\n\n" + "\n".join(lines), reply_markup=main_menu()
-    )
+    await _safe_edit(callback, "📦 我的订单\n\n" + "\n".join(lines), reply_markup=main_menu())
     await callback.answer()
 
 
 @router.message(Command("query"))
-async def cmd_query(message: Message, db: Database, epay: EPayClient | None, upstream: UpstreamClient) -> None:
+async def cmd_query(
+    message: Message, db: Database, epay: EPayClient | None, upstream: UpstreamClient, bot: Bot
+) -> None:
     """用户主动查询订单支付状态（回调可能延迟或丢失时兜底）。"""
     text = message.text
     if text is None:
@@ -90,36 +90,37 @@ async def cmd_query(message: Message, db: Database, epay: EPayClient | None, ups
     from_user = message.from_user
     assert from_user is not None
     user = await db.get_user_by_telegram_id(from_user.id)
-    if user is None or (order.user_id != user.id and from_user.id not in get_settings().admin_ids):
+    if from_user.id not in get_settings().admin_ids and (user is None or order.user_id != user.id):
         await message.answer("只能查询自己的订单")
         return
 
-    if order.status != "pending_payment":
-        await message.answer(f"订单 #{order.id} 当前状态：{order.status}")
+    if order.status in (OrderStatus.CANCELLED, OrderStatus.DELIVERY_FAILED):
+        await message.answer(f"订单 #{order.id} 当前状态：{order.status}，如需协助请联系管理员")
         return
-
-    if epay is None:
-        await message.answer(f"订单 #{order.id} 待支付，请稍后再试或联系管理员")
-        return
-
+    if order.status == OrderStatus.PENDING_PAYMENT:
+        if epay is None:
+            await message.answer(f"订单 #{order.id} 待支付，请稍后再试或联系管理员")
+            return
+        try:
+            payment = await epay.query_order(str(order.id))
+            if not payment.paid:
+                await message.answer(f"订单 #{order.id} 尚未支付")
+                return
+            epay.validate_payment(order, payment)
+        except EPayError:
+            logger.warning("payment query or validation failed", extra={"order_id": order.id})
+            await message.answer("支付信息暂时无法确认，请稍后再试或联系管理员")
+            return
+        trade_no = payment.trade_no
+    else:
+        trade_no = order.trade_no
     try:
-        result = await epay.query_order(str(order.id))
-    except Exception:
-        logger.exception("query order failed", extra={"order_id": order.id})
-        await message.answer("查询失败，请稍后再试或联系管理员")
+        await orders.mark_paid(db, upstream, order.id, trade_no=trade_no)
+    except OrderError:
+        await message.answer(f"订单 #{order.id} 暂时无法发货，请联系管理员")
         return
-
-    if not result.paid:
-        await message.answer(f"订单 #{order.id} 尚未支付")
-        return
-
-    # 网关确认已支付，触发履约（回调丢失时的兜底）
-    try:
-        order, delivery = await orders.mark_paid(db, upstream, order.id, trade_no=result.trade_no)
-    except OrderError as exc:
-        await message.answer(f"订单 #{order.id} 已支付，但发货失败：{exc}")
-        return
-    text = f"🎉 你的订单 #{order.id} 已发货！"
-    if delivery.payload:
-        text += f"\n\n{delivery.payload}"
-    await message.answer(text)
+    notified = await notify_owner(db, bot, order.id, resend=True)
+    if notified:
+        await message.answer(f"订单 #{order.id} 的货品已私信发送给买家")
+    else:
+        await message.answer(f"订单 #{order.id} 的货品已保存，私信发送暂时失败，系统会重试")
