@@ -1,5 +1,7 @@
 # 架构
 
+本文描述当前代码；Commbitz 真实采购尚未接入。目标资金流、采购状态及开发改造见 [转售 Bot 开发方案](reseller-bot-development.md)。
+
 ## 模块划分
 
 ```
@@ -79,7 +81,7 @@ class MyUpstreamClient:
             ...
 ```
 
-拿到上游文档后填 `HttpUpstreamClient` 骨架即可，其余代码不用动。
+Commbitz 的正常请求接口已明确，但当前文档未承诺创建请求幂等。真实接入还需要商品 SKU/业务输入快照、采购记录、上游 `_id` 持久化，以及待处理/KYC/结果不明状态；不能仅在骨架中增加一次 POST 就启用自动恢复。
 
 ### 支付回调
 
@@ -104,4 +106,4 @@ EPay 网关 GET 或 POST 到 `/payment/callback`，form-urlencoded，带 MD5 签
 `services/fulfillment.py` 只向持久化订单的买家私信货品，记录 `notified_at` 与 `notification_pending`；启动和定时扫描处理 `paid` 与通知待重试的 `delivered`。
 `delivery_failed` 经管理员重试返回 `paid`，不退回 `pending_payment`。
 
-以上进程内订单锁对应单进程部署；上游必须支持 `order.id` 幂等性，才能安全恢复跨系统提交窗口。
+以上进程内订单锁对应单进程部署。当前 `UpstreamClient` 约定重试应幂等；Commbitz 尚无已验证的幂等承诺，因此真实适配器必须用持久化提交记录阻止盲目重购：已有 `_id` 则查询，提交结果不明则人工核对。

@@ -11,3 +11,4 @@ wheels/
 .zcode
 .pytest_cache
 .ruff_cache
+.DS_Store
