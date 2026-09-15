@@ -1,0 +1,76 @@
+[project]
+name = "shop-bot"
+version = "0.1.0"
+description = "Telegram shop bot: browse catalog, place orders, deliver via upstream API"
+readme = "README.md"
+authors = [
+    { name = "Ember Moth", email = "ember_moth@proton.me" }
+]
+requires-python = ">=3.14.7"
+dependencies = [
+    "aiogram>=3.15",
+    "aiosqlite>=0.21",
+    "httpx>=0.28",
+    "pydantic-settings>=2.7",
+    "pyyaml>=6.0",
+    "uvloop>=0.21; sys_platform != 'win32'",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "ruff>=0.14",
+    "ty>=0.0.1a10",
+]
+
+[project.scripts]
+shop-bot = "shop_bot:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+target-version = "py314"
+src = ["src", "tests"]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "ASYNC", # async
+    "B",   # bugbear
+    "A",   # builtins shadowing
+    "C4",  # comprehension
+    "DTZ", # datetime
+    "T10", # debugger
+    "S",   # bandit security
+    "PL",  # pylint
+    "TRY", # try/except
+    "RUF", # ruff-specific
+]
+ignore = [
+    "S101",  # assert used in tests
+    "TRY003", # long messages in exception
+    "PLR0913", # too many arguments
+    "PLR2004", # magic value in comparison
+    "RUF001", "RUF002", "RUF003",  # Chinese punctuation in user-facing strings
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "PLR0913"]
+"src/shop_bot/__init__.py" = ["PLC0415"]  # uvloop import inside main()
+
+[tool.ty]
+# Type checking configuration; ty auto-discovers src/ layout.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-v --tb=short"

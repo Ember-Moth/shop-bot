@@ -1,0 +1,21 @@
+# shop-bot configuration.
+# Environment variables with prefix SHOP_BOT_ override these values
+# (nested keys use double underscore, e.g. SHOP_BOT_UPSTREAM__BASE_URL).
+
+bot_token: ""                # Bot token from @BotFather; or set SHOP_BOT_BOT_TOKEN
+admin_ids: []                # Telegram user IDs with admin command access
+database_path: shop_bot.db
+
+webhook:                     # public HTTPS endpoint Telegram posts to
+  host: 127.0.0.1            # bind address (behind reverse proxy usually)
+  port: 8080
+  path: /webhook             # path segment for bot updates
+  url: ""                    # public base URL, e.g. https://bot.example.com
+
+payment:                     # payment gateway callback
+  callback_path: /payment/callback
+  secret: ""                 # shared secret for signature verification
+
+upstream:                    # fill in when the supplier API docs arrive
+  base_url: ""
+  api_key: ""

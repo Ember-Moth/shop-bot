@@ -1,0 +1,74 @@
+"""配置加载。
+
+默认从工作目录下的 ``config.yaml`` 读取；可用 ``SHOP_BOT_CONFIG`` 指定其他路径。
+环境变量（前缀 ``SHOP_BOT_``）优先级高于 YAML 文件，方便注入密钥而不提交到代码库。
+"""
+
+from __future__ import annotations
+
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+import yaml
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class UpstreamSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SHOP_BOT_UPSTREAM_")
+
+    base_url: str = ""
+    api_key: str = ""
+
+
+class WebhookSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SHOP_BOT_WEBHOOK_")
+
+    host: str = "127.0.0.1"  # 监听地址（通常前面有反向代理）
+    port: int = 8080
+    path: str = "/webhook"  # Telegram 推送更新的路径
+    url: str = ""  # 公网 HTTPS 地址，例如 https://bot.example.com
+
+
+class PaymentSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SHOP_BOT_PAYMENT_")
+
+    callback_path: str = "/payment/callback"  # 支付网关回调路径
+    secret: str = ""  # 签名验证共享密钥
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SHOP_BOT_", env_nested_delimiter="__")
+
+    bot_token: str = ""
+    admin_ids: list[int] = Field(default_factory=list)
+    database_path: str = "shop_bot.db"
+    upstream: UpstreamSettings = Field(default_factory=UpstreamSettings)
+    webhook: WebhookSettings = Field(default_factory=WebhookSettings)
+    payment: PaymentSettings = Field(default_factory=PaymentSettings)
+
+
+def _config_path() -> Path:
+    return Path(os.environ.get("SHOP_BOT_CONFIG", "config.yaml"))
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+    return data if isinstance(data, dict) else {}
+
+
+@lru_cache
+def get_settings() -> Settings:
+    # 只传 YAML 里存在且环境变量未设置的键，保证环境变量的覆盖优先级
+    yaml_data = _load_yaml(_config_path())
+    merged = {
+        k: v
+        for k, v in yaml_data.items()
+        if f"SHOP_BOT_{k.upper()}" not in os.environ
+    }
+    return Settings(**merged)

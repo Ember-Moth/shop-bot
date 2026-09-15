@@ -1,0 +1,41 @@
+[Unit]
+Description=shop-bot Telegram shop bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/shop-bot
+
+# 方式一：直接读项目根目录的 config.yaml
+ExecStart=/opt/shop-bot/.venv/bin/shop-bot
+
+# 方式二：指定其他路径的配置文件
+# Environment=SHOP_BOT_CONFIG=/etc/shop-bot/config.yaml
+# ExecStart=/opt/shop-bot/.venv/bin/shop-bot
+
+# 也可以完全用环境变量覆盖（不依赖 config.yaml）
+# Environment=SHOP_BOT_BOT_TOKEN=123456:ABC...
+# Environment=SHOP_BOT_ADMIN_IDS=[123456789]
+# Environment=SHOP_BOT_WEBHOOK__URL=https://bot.example.com
+# Environment=SHOP_BOT_PAYMENT__SECRET=your-webhook-secret
+
+Restart=always
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# 日志：stdout/stderr 走 journald，用 journalctl -u shop-bot -f 看
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=shop-bot
+
+# 安全加固（按需开启）
+# NoNewPrivileges=true
+# PrivateTmp=true
+# ProtectSystem=strict
+# ReadWritePaths=/opt/shop-bot
+
+[Install]
+WantedBy=multi-user.target
