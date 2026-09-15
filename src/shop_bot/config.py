@@ -39,6 +39,14 @@ class PaymentSettings(BaseSettings):
     secret: str = ""  # 签名验证共享密钥
 
 
+class LoggingSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SHOP_BOT_LOGGING_")
+
+    level: str = "INFO"  # DEBUG/INFO/WARNING/ERROR/CRITICAL
+    log_dir: str = ""  # 日志文件目录；空字符串表示只输出到 stdout
+    json_logs: bool = False  # 是否用 JSON 格式（生产环境建议开）
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SHOP_BOT_", env_nested_delimiter="__")
 
@@ -48,6 +56,7 @@ class Settings(BaseSettings):
     upstream: UpstreamSettings = Field(default_factory=UpstreamSettings)
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
     payment: PaymentSettings = Field(default_factory=PaymentSettings)
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
 
 def _config_path() -> Path:

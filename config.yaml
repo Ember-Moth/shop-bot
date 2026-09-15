@@ -1,21 +1,25 @@
-# shop-bot configuration.
-# Environment variables with prefix SHOP_BOT_ override these values
-# (nested keys use double underscore, e.g. SHOP_BOT_UPSTREAM__BASE_URL).
+# shop-bot 配置。
+# 环境变量（前缀 SHOP_BOT_）会覆盖这些值，嵌套键用双下划线，例如 SHOP_BOT_UPSTREAM__BASE_URL。
 
-bot_token: ""                # Bot token from @BotFather; or set SHOP_BOT_BOT_TOKEN
-admin_ids: []                # Telegram user IDs with admin command access
+bot_token: ""                # @BotFather 的 bot token；或设 SHOP_BOT_BOT_TOKEN
+admin_ids: []                # 有管理员命令权限的 telegram 用户 ID
 database_path: shop_bot.db
 
-webhook:                     # public HTTPS endpoint Telegram posts to
-  host: 127.0.0.1            # bind address (behind reverse proxy usually)
+webhook:                     # Telegram 推送更新的公网 HTTPS 端点
+  host: 127.0.0.1            # 监听地址（通常前面有反向代理）
   port: 8080
-  path: /webhook             # path segment for bot updates
-  url: ""                    # public base URL, e.g. https://bot.example.com
+  path: /webhook             # bot 更新路径
+  url: ""                    # 公网地址，例如 https://bot.example.com
 
-payment:                     # payment gateway callback
+payment:                     # 支付网关回调
   callback_path: /payment/callback
-  secret: ""                 # shared secret for signature verification
+  secret: ""                 # 签名验证共享密钥
 
-upstream:                    # fill in when the supplier API docs arrive
+logging:                     # 日志配置
+  level: INFO                # DEBUG/INFO/WARNING/ERROR/CRITICAL
+  log_dir: ""                # 日志文件目录；空表示只输出到 stdout
+  json_logs: false           # 生产环境建议改成 true
+
+upstream:                    # 拿到供应商 API 文档后填
   base_url: ""
   api_key: ""

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import logging
-
 from ..db import Database
+from ..logging_config import get_logger
 from ..models import Order, OrderStatus, Product
 from .upstream import DeliveryResult, UpstreamClient
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class OrderError(Exception):
@@ -20,13 +19,18 @@ class OrderError(Exception):
 async def create_order(
     db: Database, user_id: int, product: Product, quantity: int
 ) -> Order:
-    return await db.create_order(
+    order = await db.create_order(
         user_id=user_id,
         product_id=product.id,
         quantity=quantity,
         amount_cents=product.price_cents * quantity,
         currency=product.currency,
     )
+    logger.info(
+        "order created",
+        extra={"order_id": order.id, "user_id": user_id, "product_id": product.id},
+    )
+    return order
 
 
 async def mark_paid(
@@ -62,13 +66,19 @@ async def mark_paid(
     try:
         result = await upstream.deliver(paid, product)
     except Exception as exc:  # 绝不让订单卡在 `paid` 状态
-        logger.exception("upstream deliver failed for order %s", order_id)
+        logger.exception(
+            "upstream deliver failed", extra={"order_id": order_id, "error": str(exc)}
+        )
         await db.transition_order(
             order_id, OrderStatus.DELIVERY_FAILED, from_status=OrderStatus.PAID, note=f"upstream error: {exc}"
         )
         raise OrderError(f"upstream delivery failed: {exc}", paid) from exc
 
     if result.ok:
+        logger.info(
+            "order delivered",
+            extra={"order_id": order_id, "upstream_ref": result.upstream_ref},
+        )
         final = await db.transition_order(
             order_id,
             OrderStatus.DELIVERED,
@@ -76,6 +86,10 @@ async def mark_paid(
             upstream_ref=result.upstream_ref,
         )
     else:
+        logger.warning(
+            "upstream delivery rejected",
+            extra={"order_id": order_id, "error": result.error},
+        )
         final = await db.transition_order(
             order_id,
             OrderStatus.DELIVERY_FAILED,
@@ -94,4 +108,5 @@ async def cancel_order(db: Database, order_id: int) -> Order:
     )
     if order is None:
         raise OrderError(f"order {order_id} cannot be cancelled")
+    logger.info("order cancelled", extra={"order_id": order_id})
     return order

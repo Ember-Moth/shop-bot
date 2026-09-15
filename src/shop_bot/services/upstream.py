@@ -6,13 +6,13 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Protocol
 
+from ..logging_config import get_logger
 from ..models import Order, Product
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True)

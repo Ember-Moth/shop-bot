@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -10,11 +9,12 @@ from aiohttp import web
 from .config import get_settings
 from .db import Database
 from .handlers import admin, catalog, order, start
+from .logging_config import get_logger, setup_logging
 from .models import Product
 from .services.upstream import StubUpstreamClient, UpstreamClient
 from .web.payment import register_payment_routes
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 DEMO_PRODUCTS = [
     # 换成真实商品目录（或直接在数据库里管理商品）
@@ -38,8 +38,12 @@ def build_dispatcher(db: Database, upstream: UpstreamClient) -> Dispatcher:
 
 
 async def amain() -> None:
-    logging.basicConfig(level=logging.INFO)
     settings = get_settings()
+    setup_logging(
+        level=settings.logging.level,
+        log_dir=settings.logging.log_dir or None,
+        json_logs=settings.logging.json_logs,
+    )
     if not settings.bot_token:
         raise SystemExit("SHOP_BOT_BOT_TOKEN is not set")
 

@@ -16,6 +16,9 @@
 | `webhook.url` | `SHOP_BOT_WEBHOOK__URL` | 公网 HTTPS 地址（必填，如 `https://bot.example.com`） |
 | `payment.callback_path` | `SHOP_BOT_PAYMENT__CALLBACK_PATH` | 支付网关回调路径 |
 | `payment.secret` | `SHOP_BOT_PAYMENT__SECRET` | 回调签名共享密钥 |
+| `logging.level` | `SHOP_BOT_LOGGING__LEVEL` | 日志级别（默认 `INFO`） |
+| `logging.log_dir` | `SHOP_BOT_LOGGING__LOG_DIR` | 日志文件目录（空表示只输出到 stdout） |
+| `logging.json_logs` | `SHOP_BOT_LOGGING__JSON_LOGS` | 是否用 JSON 格式（生产建议 `true`） |
 | `upstream.base_url` | `SHOP_BOT_UPSTREAM__BASE_URL` | 上游 API 地址 |
 | `upstream.api_key` | `SHOP_BOT_UPSTREAM__API_KEY` | 上游 API 密钥 |
 
