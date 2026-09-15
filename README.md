@@ -1,6 +1,16 @@
 # shop-bot
 
-Telegram 商店 bot（webhook 模式）：用户浏览商品、下单，支付网关回调确认后通过上游供应商 API 发货。
+Telegram 商店 bot（webhook 模式）：用户浏览商品、下单，EPay 支付回调确认后通过上游供应商 API 发货。
+
+## 功能
+
+- 🛍 商品目录浏览、下单、订单查询
+- 💳 EPay 支付网关集成，Telegram Web App 内嵌收银台
+- 🔄 支付回调自动触发上游发货，私信通知买家
+- 📦 订单状态机（待支付 → 已支付 → 已发货 / 发货失败 / 已取消）
+- 👨‍💼 管理员命令（查单、手动发货、取消订单）
+- 📊 结构化日志（JSON 格式，按天轮转）
+- 🧪 完整测试（19 个用例，含并发竞态回归）
 
 ## 运行
 
@@ -42,10 +52,23 @@ epay:
 - `/paid <订单号>` — 手动标记已支付并触发发货
 - `/cancel <订单号>` — 取消待支付订单
 
-## 接入点（等你的上游 API 文档）
+## 日志
+
+`config.yaml` 的 `logging` 段控制：
+
+```yaml
+logging:
+  level: INFO        # DEBUG/INFO/WARNING/ERROR/CRITICAL
+  log_dir: ""        # 空 = 只输出 stdout；填路径 = 同时写文件
+  json_logs: false   # 生产环境建议改成 true
+```
+
+关键业务操作（下单、支付、发货）带上下文字段（`order_id`/`user_id`/`upstream_ref`），方便检索和告警。
+
+## 接入点
 
 - **上游发货**：`src/shop_bot/services/upstream.py` — `StubUpstreamClient` 打日志模拟；实现 `UpstreamClient` 协议后在 `build_upstream()` 替换。
-- **支付回调签名**：`src/shop_bot/web/payment.py` — 现在是标准 HMAC-SHA256，按网关实际方案改 `_verify_signature()`。
+- **支付网关**：`src/shop_bot/services/epay.py` — 已完整实现 EPay 协议；接其他网关时实现相同接口即可。
 
 ## 开发
 
@@ -59,11 +82,23 @@ uv run ty check        # 类型检查
 
 ```
 src/shop_bot/
-├── config.py        # pydantic-settings：config.yaml + SHOP_BOT_* 环境变量
-├── models.py        # Product / Order / OrderStatus
-├── db.py            # aiosqlite 连接与 DAO
-├── keyboards.py     # 内联键盘
-├── handlers/        # start / catalog / order(FSM) / admin
-├── services/        # upstream.py（上游接口+桩）, orders.py（订单状态机）
-└── web/             # payment.py（支付回调端点）
+├── config.py           # pydantic-settings：config.yaml + SHOP_BOT_* 环境变量
+├── models.py           # Product / Order / OrderStatus
+├── db.py               # aiosqlite 连接与 DAO（users / products / orders / order_events）
+├── keyboards.py        # 内联键盘（含 Web App 支付按钮）
+├── logging_config.py   # 日志系统（彩色开发格式 + JSON 生产格式）
+├── handlers/           # start / catalog / order(FSM) / admin
+├── services/           # upstream.py（上游接口+桩）, orders.py（订单状态机）, epay.py（EPay 协议）
+└── web/                # payment.py（EPay 回调端点）
 ```
+
+## 文档
+
+- [架构设计](docs/architecture.md) — 模块划分、数据流、订单状态机
+- [部署指南](docs/deployment.md) — 配置项、systemd、Nginx 示例
+- [部署教程](docs/deploy-tutorial.md) — 从零到上线的完整步骤
+- [功能进度](docs/progress.md) — 完成度、TODO、接入指南
+
+## 协议
+
+[MIT](LICENSE)

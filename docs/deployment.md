@@ -28,21 +28,29 @@
 
 ## 反向代理示例（Nginx）
 
+完整配置模板在 `examples/nginx.conf`，复制后只需改 `server_name` 和证书路径：
+
 ```nginx
 server {
     listen 443 ssl;
     server_name bot.example.com;
 
+    ssl_certificate     /etc/letsencrypt/live/bot.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bot.example.com/privkey.pem;
+
+    # Telegram bot webhook
     location /webhook {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
+    # EPay 支付回调
     location /payment/callback {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
-        proxy_set_header X-Payment-Signature $http_x_payment_signature;
+        # EPay 用 form-urlencoded，不需要额外传 Header
     }
 }
 ```

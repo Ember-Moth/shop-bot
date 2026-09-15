@@ -4,18 +4,45 @@
 
 ```
 shop_bot/
-├── config.py        # pydantic-settings：config.yaml + SHOP_BOT_* 环境变量
-├── models.py        # Product / Order / OrderStatus（StrEnum）
-├── db.py            # aiosqlite 连接 + DAO（users / products / orders / order_events）
-├── keyboards.py     # 内联键盘（目录、确认、订单操作）
+├── config.py           # pydantic-settings：config.yaml + SHOP_BOT_* 环境变量
+├── models.py           # Product / Order / OrderStatus（StrEnum）
+├── db.py               # aiosqlite 连接 + DAO（users / products / orders / order_events）
+├── keyboards.py        # 内联键盘（目录、确认、Web App 支付按钮）
+├── logging_config.py   # 日志系统（彩色开发格式 + JSON 生产格式，按天轮转）
 ├── handlers/
-│   ├── start.py     # /start、主菜单、我的订单
-│   ├── catalog.py   # 商品目录浏览
-│   ├── order.py     # FSM 下单流程（选商品 → 数量 → 确认）
-│   └── admin.py     # /orders、/paid、/cancel（管理员限定）
-└── services/
-    ├── upstream.py  # UpstreamClient 协议 + StubUpstreamClient + HttpUpstreamClient 骨架
-    └── orders.py    # 订单状态机（create → paid → delivered / failed / cancelled）
+│   ├── start.py        # /start、主菜单、我的订单、/query 查支付状态
+│   ├── catalog.py      # 商品目录浏览
+│   ├── order.py        # FSM 下单流程（选商品 → 数量 → 确认 → 生成支付链接）
+│   └── admin.py        # /orders、/paid、/cancel（管理员限定）
+├── services/
+│   ├── upstream.py     # UpstreamClient 协议 + StubUpstreamClient + HttpUpstreamClient 骨架
+│   ├── orders.py       # 订单状态机（create → paid → delivered / failed / cancelled）
+│   └── epay.py         # EPay 支付网关协议（MD5 签名、支付链接、回调验证、订单查询）
+└── web/
+    └── payment.py      # EPay 回调端点（form-urlencoded + MD5 签名验证）
+```
+
+## 数据流
+
+```
+用户 ──/start──> bot ──> 商品目录
+  │
+  └─选商品 ──> FSM 确认数量 ──> 创建订单 ──> 生成 EPay 支付链接
+                                              │
+                                              v
+                                    Web App 打开 EPay 收银台
+                                              │
+                                              v
+                                    用户完成支付
+                                              │
+                                              v
+EPay 网关 ──POST /payment/callback──> 验证 MD5 签名 ──> orders.mark_paid()
+                                              │
+                                              v
+                                    upstream.deliver() 发货
+                                              │
+                                              v
+                                    bot.send_message() 通知买家
 ```
 
 ## 订单生命周期
