@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS orders (
     status TEXT NOT NULL DEFAULT 'pending_payment',
     upstream_ref TEXT,
     trade_no TEXT,
+    payload TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -64,6 +65,12 @@ CREATE TABLE IF NOT EXISTS fsm_state (
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (bot_id, chat_id, user_id, thread_id, business_connection_id, destiny)
 );
+
+-- SQLite 复合主键里 NULL 不参与唯一性约束，导致 thread_id=NULL 的行可以重复插入。
+-- 用唯一索引 + IFNULL 归一化解决。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fsm_state_unique ON fsm_state (
+    bot_id, chat_id, user_id, IFNULL(thread_id, -1), IFNULL(business_connection_id, ''), destiny
+);
 """
 
 
@@ -76,7 +83,18 @@ class Database:
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        """给老库补新增字段，CREATE TABLE IF NOT EXISTS 不会更新已有表。"""
+        conn = self.conn  # 用 property 保证非 None
+        async with conn.execute("PRAGMA table_info(orders)") as cur:
+            columns = {row["name"] for row in await cur.fetchall()}
+        if "trade_no" not in columns:
+            await conn.execute("ALTER TABLE orders ADD COLUMN trade_no TEXT")
+        if "payload" not in columns:
+            await conn.execute("ALTER TABLE orders ADD COLUMN payload TEXT")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -207,33 +225,42 @@ class Database:
         """应用状态转换；订单不存在或当前状态与 from_status 不匹配时返回 None。
 
         「读状态 → 条件 UPDATE → 写审计日志 → commit」四步，条件 UPDATE 保证并发转换
-        只有一个成功，显式 commit 保证状态变更和审计日志同时落盘。
+        只有一个成功，显式事务保证状态变更和审计日志同时落盘。
         """
-        async with self.conn.execute(
-            "SELECT status FROM orders WHERE id = ?", (order_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        if row is None:
-            return None
-        current = OrderStatus(row["status"])
-        if from_status is not None and current != from_status:
-            return None
+        # 显式开事务，防止其他协程的 commit 把中间状态提前落盘
+        await self.conn.execute("BEGIN")
+        try:
+            async with self.conn.execute(
+                "SELECT status FROM orders WHERE id = ?", (order_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                await self.conn.execute("ROLLBACK")
+                return None
+            current = OrderStatus(row["status"])
+            if from_status is not None and current != from_status:
+                await self.conn.execute("ROLLBACK")
+                return None
 
-        cursor = await self.conn.execute(
-            """
-            UPDATE orders SET status = ?, upstream_ref = COALESCE(?, upstream_ref),
-                trade_no = COALESCE(?, trade_no), updated_at = datetime('now')
-            WHERE id = ? AND status = ?
-            """,
-            (to_status.value, upstream_ref, trade_no, order_id, current.value),
-        )
-        if cursor.rowcount != 1:
-            return None
-        await self.conn.execute(
-            "INSERT INTO order_events (order_id, from_status, to_status, note) VALUES (?, ?, ?, ?)",
-            (order_id, current.value, to_status.value, note),
-        )
-        await self.conn.commit()  # 保证状态变更和审计日志同时落盘
+            cursor = await self.conn.execute(
+                """
+                UPDATE orders SET status = ?, upstream_ref = COALESCE(?, upstream_ref),
+                    trade_no = COALESCE(?, trade_no), updated_at = datetime('now')
+                WHERE id = ? AND status = ?
+                """,
+                (to_status.value, upstream_ref, trade_no, order_id, current.value),
+            )
+            if cursor.rowcount != 1:
+                await self.conn.execute("ROLLBACK")
+                return None
+            await self.conn.execute(
+                "INSERT INTO order_events (order_id, from_status, to_status, note) VALUES (?, ?, ?, ?)",
+                (order_id, current.value, to_status.value, note),
+            )
+            await self.conn.commit()
+        except Exception:
+            await self.conn.execute("ROLLBACK")
+            raise
         return await self.get_order(order_id)
 
 
@@ -268,6 +295,7 @@ def _row_to_order(row: aiosqlite.Row) -> Order:
         status=OrderStatus(row["status"]),
         upstream_ref=row["upstream_ref"],
         trade_no=row["trade_no"],
+        payload=row["payload"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

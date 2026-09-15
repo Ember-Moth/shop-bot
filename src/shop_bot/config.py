@@ -30,6 +30,7 @@ class WebhookSettings(BaseSettings):
     port: int = 8080
     path: str = "/webhook"  # Telegram 推送更新的路径
     url: str = ""  # 公网 HTTPS 地址，例如 https://bot.example.com
+    secret_token: str = ""  # Telegram webhook 密钥，防伪造请求
 
 
 class PaymentSettings(BaseSettings):
@@ -83,11 +84,17 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 @lru_cache
 def get_settings() -> Settings:
-    # 只传 YAML 里存在且环境变量未设置的键，保证环境变量的覆盖优先级
+    # YAML 里显式存在的键（含嵌套），若环境变量已设置则跳过，保证环境变量的覆盖优先级
     yaml_data = _load_yaml(_config_path())
     merged = {
         k: v
         for k, v in yaml_data.items()
-        if f"SHOP_BOT_{k.upper()}" not in os.environ
+        if not _has_env_override(k)
     }
     return Settings(**merged)
+
+
+def _has_env_override(key: str) -> bool:
+    """检查某个顶层键是否有环境变量覆盖（含嵌套键的前缀匹配）。"""
+    prefix = f"SHOP_BOT_{key.upper()}"
+    return any(e == prefix or e.startswith(prefix + "__") for e in os.environ)

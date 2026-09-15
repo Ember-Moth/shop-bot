@@ -88,8 +88,8 @@ async def cb_confirm(
         await callback.answer("会话已过期，请重新下单", show_alert=True)
         return
     product = await db.get_product(product_id)
-    if product is None:
-        await callback.answer("下单失败，请重试", show_alert=True)
+    if product is None or not product.active:
+        await callback.answer("商品不存在或已下架，下单失败", show_alert=True)
         return
     user = await db.get_user_by_telegram_id(callback.from_user.id)
     if user is None:
@@ -104,6 +104,10 @@ async def cb_confirm(
     settings = get_settings()
 
     if epay is not None:
+        # EPay 按人民币「元」计价，只支持 CNY 商品
+        if order.currency != "CNY":
+            await callback.answer("当前商品不支持在线支付，请联系管理员", show_alert=True)
+            return
         # 生成 EPay 支付链接，Web App 按钮直接打开收银台
         notify_url = f"{settings.webhook.url.rstrip('/')}{settings.payment.callback_path}"
         bot = callback.bot

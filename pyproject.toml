@@ -61,6 +61,8 @@ ignore = [
     "PLR0913", # too many arguments
     "PLR2004", # magic value in comparison
     "PLR0911", # too many return statements (handlers need early returns)
+    "PLR0912", # too many branches (payment callback needs multiple validations)
+    "PLR0915", # too many statements (amain has many setup steps)
     "RUF001", "RUF002", "RUF003",  # Chinese punctuation in user-facing strings
 ]
 

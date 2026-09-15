@@ -79,12 +79,20 @@ async def mark_paid(
             "order delivered",
             extra={"order_id": order_id, "upstream_ref": result.upstream_ref},
         )
+        # 先把 payload 入库，再标记已发货，通知失败也能恢复
         final = await db.transition_order(
             order_id,
             OrderStatus.DELIVERED,
             from_status=OrderStatus.PAID,
             upstream_ref=result.upstream_ref,
+            note=result.payload,  # payload 存到 order_events.note，同时更新到 orders.payload
         )
+        # 更新 orders.payload 字段
+        await db.conn.execute(
+            "UPDATE orders SET payload = ? WHERE id = ?",
+            (result.payload, order_id),
+        )
+        await db.conn.commit()
     else:
         logger.warning(
             "upstream delivery rejected",

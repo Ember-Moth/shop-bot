@@ -54,9 +54,13 @@ def _md5(text: str) -> str:
 
 
 def _create_sign(params: dict[str, str], key: str) -> str:
-    """EPay 签名：按 key 排序拼接，末尾加商户密钥，MD5 摘要。"""
+    """EPay 签名：按 key 排序，直接拼接原始参数值，末尾加商户密钥，MD5 摘要。
+
+    注意：EPay V1 协议要求拼接原始值，不能用 urlencode 编码。
+    """
     filtered = {k: v for k, v in params.items() if v and k not in ("sign", "sign_type")}
-    query = urlencode(sorted(filtered.items()))
+    # 按 key 排序后直接拼接 key=value&，不做 URL 编码
+    query = "&".join(f"{k}={v}" for k, v in sorted(filtered.items()))
     return _md5(query + key)
 
 

@@ -6,9 +6,14 @@ from aiogram.types import CallbackQuery, InaccessibleMessage, Message
 from ..config import get_settings
 from ..db import Database
 from ..keyboards import main_menu
+from ..logging_config import get_logger
+from ..services import orders
 from ..services.epay import EPayClient
+from ..services.orders import OrderError
+from ..services.upstream import UpstreamClient
 
 router = Router()
+logger = get_logger(__name__)
 
 
 async def _safe_edit(callback: CallbackQuery, text: str, **kwargs) -> None:
@@ -60,7 +65,7 @@ async def cb_my_orders(callback: CallbackQuery, db: Database) -> None:
 
 
 @router.message(Command("query"))
-async def cmd_query(message: Message, db: Database, epay: EPayClient | None) -> None:
+async def cmd_query(message: Message, db: Database, epay: EPayClient | None, upstream: UpstreamClient) -> None:
     """用户主动查询订单支付状态（回调可能延迟或丢失时兜底）。"""
     text = message.text
     if text is None:
@@ -99,7 +104,22 @@ async def cmd_query(message: Message, db: Database, epay: EPayClient | None) -> 
 
     try:
         result = await epay.query_order(str(order.id))
-        reply = f"订单 #{order.id} 已支付成功，系统正在发货，请稍等" if result.paid else f"订单 #{order.id} 尚未支付"
-        await message.answer(reply)
-    except Exception as exc:
-        await message.answer(f"查询失败：{exc}")
+    except Exception:
+        logger.exception("query order failed", extra={"order_id": order.id})
+        await message.answer("查询失败，请稍后再试或联系管理员")
+        return
+
+    if not result.paid:
+        await message.answer(f"订单 #{order.id} 尚未支付")
+        return
+
+    # 网关确认已支付，触发履约（回调丢失时的兜底）
+    try:
+        order, delivery = await orders.mark_paid(db, upstream, order.id, trade_no=result.trade_no)
+    except OrderError as exc:
+        await message.answer(f"订单 #{order.id} 已支付，但发货失败：{exc}")
+        return
+    text = f"🎉 你的订单 #{order.id} 已发货！"
+    if delivery.payload:
+        text += f"\n\n{delivery.payload}"
+    await message.answer(text)

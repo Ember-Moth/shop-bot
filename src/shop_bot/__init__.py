@@ -2,6 +2,7 @@ import asyncio
 import sys
 
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
@@ -29,7 +30,14 @@ def build_upstream() -> UpstreamClient:
 
 
 def build_dispatcher(db: Database, upstream: UpstreamClient, epay: EPayClient | None) -> Dispatcher:
-    dp = Dispatcher(storage=FSMStorage(db), db=db, upstream=upstream, epay=epay)
+    # FSM 状态持久化到 SQLite，事件隔离用内存（同一 bot 实例内并发事件串行化）
+    dp = Dispatcher(
+        storage=FSMStorage(db),
+        events_isolation=SimpleEventIsolation(),
+        db=db,
+        upstream=upstream,
+        epay=epay,
+    )
     dp.include_router(start.router)
     dp.include_router(catalog.router)
     dp.include_router(order.router)
@@ -78,7 +86,10 @@ async def amain() -> None:
 
     # Telegram bot webhook 端点
     handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-    handler.register(app, path=settings.webhook.path)
+    if settings.webhook.secret_token:
+        handler.register(app, path=settings.webhook.path, secret_token=settings.webhook.secret_token)
+    else:
+        handler.register(app, path=settings.webhook.path)
     setup_application(app, dp, bot=bot)
 
     # EPay 支付回调端点
@@ -88,7 +99,10 @@ async def amain() -> None:
 
     # 告诉 Telegram 往哪里推更新
     webhook_url = f"{settings.webhook.url.rstrip('/')}{settings.webhook.path}"
-    await bot.set_webhook(webhook_url)
+    if settings.webhook.secret_token:
+        await bot.set_webhook(webhook_url, secret_token=settings.webhook.secret_token)
+    else:
+        await bot.set_webhook(webhook_url)
     logger.info("webhook registered: %s", webhook_url)
     logger.info("payment callback: %s", settings.payment.callback_path)
 

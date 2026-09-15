@@ -5,6 +5,7 @@ EPay 协议：POST form-urlencoded，带 MD5 签名。验证通过后触发上�
 
 from aiohttp import web
 
+from ..config import get_settings
 from ..db import Database
 from ..logging_config import get_logger
 from ..services import orders
@@ -20,9 +21,12 @@ async def epay_callback(request: web.Request) -> web.Response:
     upstream: UpstreamClient = request.app["upstream"]
     epay: EPayClient = request.app["epay"]
 
-    # EPay 回调是 form-urlencoded；aiohttp 返回 MultiDict，可能含文件字段，统一转成 str
-    raw = await request.post()
-    params = {k: str(v) for k, v in raw.items()}
+    # EPay 回调支持 GET 和 POST；GET 参数在 query string，POST 是 form-urlencoded
+    if request.method == "GET":
+        params = dict(request.query)
+    else:
+        raw = await request.post()
+        params = {k: str(v) for k, v in raw.items()}
 
     if not epay.verify_callback(params):
         logger.warning("epay callback signature mismatch")
@@ -43,6 +47,33 @@ async def epay_callback(request: web.Request) -> web.Response:
     except ValueError:
         logger.warning("epay callback invalid order_no", extra={"order_no": order_no})
         return web.Response(text="fail", status=400)
+
+    # 核对订单金额、商户 ID、交易号
+    order = await db.get_order(order_id)
+    if order is None:
+        logger.warning("epay callback order not found", extra={"order_id": order_id})
+        return web.Response(text="fail", status=404)
+
+    expected_amount = f"{order.amount_cents / 100:.2f}"
+    if parsed["money"] != expected_amount:
+        logger.warning(
+            "epay callback amount mismatch",
+            extra={"order_id": order_id, "expected": expected_amount, "received": parsed["money"]},
+        )
+        return web.Response(text="fail", status=422)
+
+    if parsed["trade_no"] == "":
+        logger.warning("epay callback missing trade_no", extra={"order_id": order_id})
+        return web.Response(text="fail", status=400)
+
+    # 商户 ID 校验（如果配置了的话）
+    settings = get_settings()
+    if settings.epay.pid and params.get("pid") != settings.epay.pid:
+        logger.warning(
+            "epay callback pid mismatch",
+            extra={"order_id": order_id, "expected": settings.epay.pid, "received": params.get("pid")},
+        )
+        return web.Response(text="fail", status=422)
 
     try:
         order, result = await orders.mark_paid(db, upstream, order_id, trade_no=parsed["trade_no"])
@@ -70,4 +101,6 @@ async def epay_callback(request: web.Request) -> web.Response:
 
 
 def register_epay_routes(app: web.Application, callback_path: str) -> None:
+    # EPay 回调同时支持 GET 和 POST
+    app.router.add_get(callback_path, epay_callback)
     app.router.add_post(callback_path, epay_callback)

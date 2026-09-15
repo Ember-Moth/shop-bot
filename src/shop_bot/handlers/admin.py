@@ -47,6 +47,10 @@ async def cmd_paid(message: Message, db: Database, upstream: UpstreamClient, bot
     if order_id is None:
         await message.answer("用法：/paid <订单号>")
         return
+    # 允许重试 delivery_failed 的订单
+    order = await db.get_order(order_id)
+    if order is not None and order.status == "delivery_failed":
+        await db.transition_order(order_id, OrderStatus.PENDING_PAYMENT, from_status=OrderStatus.DELIVERY_FAILED)
     try:
         order, result = await orders.mark_paid(db, upstream, order_id)
     except OrderError as exc:
