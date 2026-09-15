@@ -1,10 +1,12 @@
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InaccessibleMessage, Message
 
+from ..config import get_settings
 from ..db import Database
 from ..keyboards import main_menu
+from ..services.epay import EPayClient
 
 router = Router()
 
@@ -55,3 +57,49 @@ async def cb_my_orders(callback: CallbackQuery, db: Database) -> None:
         callback, "📦 我的订单\n\n" + "\n".join(lines), reply_markup=main_menu()
     )
     await callback.answer()
+
+
+@router.message(Command("query"))
+async def cmd_query(message: Message, db: Database, epay: EPayClient | None) -> None:
+    """用户主动查询订单支付状态（回调可能延迟或丢失时兜底）。"""
+    text = message.text
+    if text is None:
+        await message.answer("消息内容为空")
+        return
+    parts = text.split(maxsplit=1)
+    if len(parts) != 2:
+        await message.answer("用法：/query <订单号>")
+        return
+    try:
+        order_id = int(parts[1].strip())
+    except ValueError:
+        await message.answer("订单号必须是数字")
+        return
+
+    order = await db.get_order(order_id)
+    if order is None:
+        await message.answer("订单不存在")
+        return
+
+    # 只能查自己的订单（管理员除外）
+    from_user = message.from_user
+    assert from_user is not None
+    user = await db.get_user_by_telegram_id(from_user.id)
+    if user is None or (order.user_id != user.id and from_user.id not in get_settings().admin_ids):
+        await message.answer("只能查询自己的订单")
+        return
+
+    if order.status != "pending_payment":
+        await message.answer(f"订单 #{order.id} 当前状态：{order.status}")
+        return
+
+    if epay is None:
+        await message.answer(f"订单 #{order.id} 待支付，请稍后再试或联系管理员")
+        return
+
+    try:
+        result = await epay.query_order(str(order.id))
+        reply = f"订单 #{order.id} 已支付成功，系统正在发货，请稍等" if result.paid else f"订单 #{order.id} 尚未支付"
+        await message.answer(reply)
+    except Exception as exc:
+        await message.answer(f"查询失败：{exc}")

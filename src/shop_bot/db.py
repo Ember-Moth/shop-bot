@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS orders (
     currency TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending_payment',
     upstream_ref TEXT,
+    trade_no TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -182,6 +183,7 @@ class Database:
         *,
         from_status: OrderStatus | None = None,
         upstream_ref: str | None = None,
+        trade_no: str | None = None,
         note: str | None = None,
     ) -> Order | None:
         """应用状态转换；订单不存在或当前状态与 from_status 不匹配时返回 None。
@@ -202,10 +204,10 @@ class Database:
         cursor = await self.conn.execute(
             """
             UPDATE orders SET status = ?, upstream_ref = COALESCE(?, upstream_ref),
-                updated_at = datetime('now')
+                trade_no = COALESCE(?, trade_no), updated_at = datetime('now')
             WHERE id = ? AND status = ?
             """,
-            (to_status.value, upstream_ref, order_id, current.value),
+            (to_status.value, upstream_ref, trade_no, order_id, current.value),
         )
         if cursor.rowcount != 1:
             return None
@@ -247,6 +249,7 @@ def _row_to_order(row: aiosqlite.Row) -> Order:
         currency=row["currency"],
         status=OrderStatus(row["status"]),
         upstream_ref=row["upstream_ref"],
+        trade_no=row["trade_no"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

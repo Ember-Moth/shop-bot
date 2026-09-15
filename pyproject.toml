@@ -20,6 +20,7 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
+    "pytest-httpx>=0.35",
     "ruff>=0.14",
     "ty>=0.0.1a10",
 ]
@@ -59,6 +60,7 @@ ignore = [
     "TRY003", # long messages in exception
     "PLR0913", # too many arguments
     "PLR2004", # magic value in comparison
+    "PLR0911", # too many return statements (handlers need early returns)
     "RUF001", "RUF002", "RUF003",  # Chinese punctuation in user-facing strings
 ]
 

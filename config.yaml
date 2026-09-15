@@ -13,7 +13,13 @@ webhook:                     # Telegram 推送更新的公网 HTTPS 端点
 
 payment:                     # 支付网关回调
   callback_path: /payment/callback
-  secret: ""                 # 签名验证共享密钥
+  secret: ""                 # 签名验证共享密钥（EPay 用不到，走自己的 MD5 签名）
+
+epay:                        # EPay（易支付）网关配置
+  pid: ""                    # 商户 ID
+  key: ""                    # 商户密钥
+  url: ""                    # 网关地址，例如 https://pay.example.com
+  type: alipay               # 默认支付方式
 
 logging:                     # 日志配置
   level: INFO                # DEBUG/INFO/WARNING/ERROR/CRITICAL

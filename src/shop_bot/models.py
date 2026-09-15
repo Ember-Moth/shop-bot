@@ -37,6 +37,7 @@ class Order:
     currency: str
     status: OrderStatus
     upstream_ref: str | None
+    trade_no: str | None  # 支付网关交易号（EPay 回调时写入）
     created_at: datetime
     updated_at: datetime
 

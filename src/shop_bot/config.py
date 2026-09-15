@@ -39,6 +39,15 @@ class PaymentSettings(BaseSettings):
     secret: str = ""  # 签名验证共享密钥
 
 
+class EPaySettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SHOP_BOT_EPAY_")
+
+    pid: str = ""      # 商户 ID
+    key: str = ""      # 商户密钥
+    url: str = ""      # 网关地址，例如 https://pay.example.com
+    type: str = "alipay"  # 默认支付方式
+
+
 class LoggingSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SHOP_BOT_LOGGING_")
 
@@ -56,6 +65,7 @@ class Settings(BaseSettings):
     upstream: UpstreamSettings = Field(default_factory=UpstreamSettings)
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
     payment: PaymentSettings = Field(default_factory=PaymentSettings)
+    epay: EPaySettings = Field(default_factory=EPaySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
 

@@ -21,15 +21,20 @@ shop_bot/
 ## 订单生命周期
 
 ```
-pending_payment --paid--> paid --deliver--> delivered
-      |                    |
-      |                    +--deliver_fail--> delivery_failed
+pending_payment --epay_callback--> paid --deliver--> delivered
+      |                                |
+      |                                +--deliver_fail--> delivery_failed
       +--cancel--> cancelled
 ```
 
-- 状态转换在 `db.transition_order()` 里用原子 `UPDATE ... WHERE status = ?` 完成，
-  并发双击不会导致重复发货。
-- 每次转换写入 `order_events` 表做审计。
+- 用户下单后，bot 返回「立即支付」按钮（Telegram Web App）
+- Web App 直接打开 EPay 收银台（`submit.php`），用户在 Telegram 内完成支付
+- 支付成功后，EPay 网关 POST 到 `/payment/callback`，带 MD5 签名
+- 验证通过后 `orders.mark_paid()` 触发上游发货，成功则通知买家
+- 用户可用 `/query <订单号>` 主动查询支付状态（兜底）
+
+- 状态转换在 `db.transition_order()` 里用条件 UPDATE 保证并发安全，
+  每次转换写入 `order_events` 表做审计。
 
 ## 接入点
 
@@ -50,11 +55,11 @@ class MyUpstreamClient:
 
 ### 支付回调
 
-支付网关 POST 到 `/payment/callback`，带 `X-Payment-Signature` 头（HMAC-SHA256）。
-`web/payment.py` 里的 `_verify_signature()` 做验证，拿到网关文档后按实际方案调整。
+EPay 网关 POST 到 `/payment/callback`，form-urlencoded，带 MD5 签名。
+`web/payment.py` 里的 `epay_callback()` 做验证和分发，`services/epay.py` 封装协议细节。
 
 回调处理流程：
-1. 验证签名 → 2. 解析 `order_id` → 3. `orders.mark_paid()` 触发上游发货 →
+1. 验证 MD5 签名 → 2. 解析 `out_trade_no` 拿订单号 → 3. `orders.mark_paid()` 触发上游发货 →
 4. 成功则 `bot.send_message()` 通知买家。
 
 ### Telegram 原生支付（备选）

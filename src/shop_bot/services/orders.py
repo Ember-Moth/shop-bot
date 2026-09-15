@@ -34,7 +34,7 @@ async def create_order(
 
 
 async def mark_paid(
-    db: Database, upstream: UpstreamClient, order_id: int
+    db: Database, upstream: UpstreamClient, order_id: int, trade_no: str | None = None
 ) -> tuple[Order, DeliveryResult]:
     """状态转换 pending_payment → paid → delivered（或 delivery_failed）。
 
@@ -48,7 +48,7 @@ async def mark_paid(
         raise OrderError(f"order {order_id} is not pending payment")
 
     paid = await db.transition_order(
-        order_id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT
+        order_id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT, trade_no=trade_no
     )
     if paid is None:
         raise OrderError(f"order {order_id} is not pending payment")

@@ -15,7 +15,11 @@
 | `webhook.path` | `SHOP_BOT_WEBHOOK__PATH` | Telegram 更新回调路径 |
 | `webhook.url` | `SHOP_BOT_WEBHOOK__URL` | 公网 HTTPS 地址（必填，如 `https://bot.example.com`） |
 | `payment.callback_path` | `SHOP_BOT_PAYMENT__CALLBACK_PATH` | 支付网关回调路径 |
-| `payment.secret` | `SHOP_BOT_PAYMENT__SECRET` | 回调签名共享密钥 |
+| `payment.secret` | `SHOP_BOT_PAYMENT__SECRET` | 回调签名共享密钥（EPay 用不到） |
+| `epay.pid` | `SHOP_BOT_EPAY__PID` | EPay 商户 ID |
+| `epay.key` | `SHOP_BOT_EPAY__KEY` | EPay 商户密钥 |
+| `epay.url` | `SHOP_BOT_EPAY__URL` | EPay 网关地址 |
+| `epay.type` | `SHOP_BOT_EPAY__TYPE` | 默认支付方式（`alipay`/`wxpay` 等） |
 | `logging.level` | `SHOP_BOT_LOGGING__LEVEL` | 日志级别（默认 `INFO`） |
 | `logging.log_dir` | `SHOP_BOT_LOGGING__LOG_DIR` | 日志文件目录（空表示只输出到 stdout） |
 | `logging.json_logs` | `SHOP_BOT_LOGGING__JSON_LOGS` | 是否用 JSON 格式（生产建议 `true`） |

@@ -11,8 +11,9 @@ from .db import Database
 from .handlers import admin, catalog, order, start
 from .logging_config import get_logger, setup_logging
 from .models import Product
+from .services.epay import EPayClient, EPayConfig
 from .services.upstream import StubUpstreamClient, UpstreamClient
-from .web.payment import register_payment_routes
+from .web.payment import register_epay_routes
 
 logger = get_logger(__name__)
 
@@ -28,8 +29,8 @@ def build_upstream() -> UpstreamClient:
     return StubUpstreamClient()
 
 
-def build_dispatcher(db: Database, upstream: UpstreamClient) -> Dispatcher:
-    dp = Dispatcher(storage=MemoryStorage(), db=db, upstream=upstream)
+def build_dispatcher(db: Database, upstream: UpstreamClient, epay: EPayClient | None) -> Dispatcher:
+    dp = Dispatcher(storage=MemoryStorage(), db=db, upstream=upstream, epay=epay)
     dp.include_router(start.router)
     dp.include_router(catalog.router)
     dp.include_router(order.router)
@@ -53,22 +54,38 @@ async def amain() -> None:
         await db.seed_products(DEMO_PRODUCTS)
         logger.info("seeded %d demo products", len(DEMO_PRODUCTS))
     upstream = build_upstream()
-    dp = build_dispatcher(db, upstream)
     bot = Bot(settings.bot_token)
+
+    # EPay 客户端（如果配置了的话）
+    epay_client = None
+    if settings.epay.pid and settings.epay.key and settings.epay.url:
+        epay_client = EPayClient(
+            EPayConfig(
+                pid=settings.epay.pid,
+                key=settings.epay.key,
+                url=settings.epay.url,
+                type=settings.epay.type,
+            )
+        )
+        logger.info("epay client initialized")
+
+    dp = build_dispatcher(db, upstream, epay_client)
 
     app = web.Application()
     app["db"] = db
     app["upstream"] = upstream
     app["bot"] = bot
-    app["payment_secret"] = settings.payment.secret
+    app["epay"] = epay_client
 
     # Telegram bot webhook 端点
     handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     handler.register(app, path=settings.webhook.path)
     setup_application(app, dp, bot=bot)
 
-    # 支付网关回调端点
-    register_payment_routes(app, settings.payment.callback_path)
+    # EPay 支付回调端点
+    if epay_client is not None:
+        register_epay_routes(app, settings.payment.callback_path)
+        logger.info("epay callback registered: %s", settings.payment.callback_path)
 
     # 告诉 Telegram 往哪里推更新
     webhook_url = f"{settings.webhook.url.rstrip('/')}{settings.webhook.path}"
@@ -85,6 +102,8 @@ async def amain() -> None:
         await asyncio.Event().wait()  # 一直跑
     finally:
         await bot.delete_webhook()
+        if epay_client is not None:
+            await epay_client.close()
         await runner.cleanup()
         await db.close()
 

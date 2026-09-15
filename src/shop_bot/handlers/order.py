@@ -4,9 +4,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InaccessibleMessage, Message
 
 from .. import keyboards
+from ..config import get_settings
 from ..db import Database
 from ..models import Product
 from ..services import orders
+from ..services.epay import EPayClient, EPayOrder
 
 router = Router()
 
@@ -75,7 +77,9 @@ async def msg_quantity(message: Message, state: FSMContext, db: Database) -> Non
 
 
 @router.callback_query(F.data == keyboards.CB_CONFIRM_ORDER)
-async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+async def cb_confirm(
+    callback: CallbackQuery, state: FSMContext, db: Database, epay: EPayClient | None
+) -> None:
     data = await state.get_data()
     await state.clear()
     product_id = data.get("product_id")
@@ -96,11 +100,37 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database) -
     if msg is None or isinstance(msg, InaccessibleMessage):
         await callback.answer()
         return
-    await msg.edit_text(
-        f"✅ 下单成功！\n\n订单号：`{order.id}`\n金额：{order.amount_text}\n\n"
-        "付款完成后我们会立即为你发货。",
-        parse_mode="Markdown",
-    )
+
+    settings = get_settings()
+
+    if epay is not None:
+        # 生成 EPay 支付链接，Web App 按钮直接打开收银台
+        notify_url = f"{settings.webhook.url.rstrip('/')}{settings.payment.callback_path}"
+        bot = callback.bot
+        assert bot is not None  # aiogram 保证非空
+        me = await bot.get_me()
+        return_url = f"https://t.me/{me.username}"
+        pay_url = epay.create_pay_url(
+            EPayOrder(
+                name=product.name,
+                order_no=str(order.id),
+                amount=order.amount_cents / 100,
+                notify_url=notify_url,
+                return_url=return_url,
+            )
+        )
+        await msg.edit_text(
+            f"✅ 下单成功！\n\n订单号：`{order.id}`\n金额：{order.amount_text}\n\n"
+            "点击下方按钮在 Telegram 内完成支付：",
+            parse_mode="Markdown",
+            reply_markup=keyboards.order_created(order.id, pay_url),
+        )
+    else:
+        await msg.edit_text(
+            f"✅ 下单成功！\n\n订单号：`{order.id}`\n金额：{order.amount_text}\n\n"
+            "付款完成后我们会立即为你发货。",
+            parse_mode="Markdown",
+        )
     await callback.answer()
 
 

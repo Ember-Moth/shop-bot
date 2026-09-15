@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 CB_PRODUCT_PREFIX = "p:"
 CB_ORDER_PREFIX = "o:"
@@ -46,9 +46,12 @@ def confirm_order() -> InlineKeyboardMarkup:
     )
 
 
-def order_created(order_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📦 查看我的订单", callback_data="myorders")],
-        ]
-    )
+def order_created(order_id: int, pay_url: str | None = None) -> InlineKeyboardMarkup:
+    rows = []
+    if pay_url:
+        # Web App 按钮：在 Telegram 内嵌打开支付页面
+        rows.append(
+            [InlineKeyboardButton(text="💳 立即支付", web_app=WebAppInfo(url=pay_url))]
+        )
+    rows.append([InlineKeyboardButton(text="📦 查看我的订单", callback_data="myorders")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
