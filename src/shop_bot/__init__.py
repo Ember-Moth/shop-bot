@@ -2,12 +2,11 @@ import asyncio
 import sys
 
 from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
 from .config import get_settings
-from .db import Database
+from .db import Database, FSMStorage
 from .handlers import admin, catalog, order, start
 from .logging_config import get_logger, setup_logging
 from .models import Product
@@ -30,7 +29,7 @@ def build_upstream() -> UpstreamClient:
 
 
 def build_dispatcher(db: Database, upstream: UpstreamClient, epay: EPayClient | None) -> Dispatcher:
-    dp = Dispatcher(storage=MemoryStorage(), db=db, upstream=upstream, epay=epay)
+    dp = Dispatcher(storage=FSMStorage(db), db=db, upstream=upstream, epay=epay)
     dp.include_router(start.router)
     dp.include_router(catalog.router)
     dp.include_router(order.router)

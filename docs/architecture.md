@@ -6,7 +6,8 @@
 shop_bot/
 ├── config.py           # pydantic-settings：config.yaml + SHOP_BOT_* 环境变量
 ├── models.py           # Product / Order / OrderStatus（StrEnum）
-├── db.py               # aiosqlite 连接 + DAO（users / products / orders / order_events）
+├── db.py               # aiosqlite 连接 + DAO（users / products / orders / order_events / fsm_state）
+│                       # 含 FSMStorage：SQLite 持久化 FSM 存储，重启后对话状态恢复
 ├── keyboards.py        # 内联键盘（目录、确认、Web App 支付按钮）
 ├── logging_config.py   # 日志系统（彩色开发格式 + JSON 生产格式，按天轮转）
 ├── handlers/
