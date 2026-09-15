@@ -21,6 +21,8 @@ class Product:
     price_cents: int
     currency: str
     active: bool = True
+    sku: str | None = None  # 上游 SKU（Commbitz 目录同步写入；手工商品为 None）
+    upstream_plan_id: str | None = None  # 上游套餐 _id，用于交付时映射回上游请求
 
     @property
     def price_text(self) -> str:

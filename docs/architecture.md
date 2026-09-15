@@ -20,7 +20,9 @@ shop_bot/
 ├── services/
 │   ├── upstream.py     # UpstreamClient 协议 + StubUpstreamClient + HttpUpstreamClient 骨架
 │   ├── orders.py       # 订单状态机（create → paid → delivered / failed / cancelled）
-│   └── epay.py         # EPay 支付网关协议（MD5 签名、支付链接、回调验证、订单查询）
+│   ├── epay.py         # EPay 支付网关协议（MD5 签名、支付链接、回调验证、订单查询）
+│   ├── commbitz_api.py # Commbitz 分销 API 只读客户端（令牌缓存/刷新、目录、订单详情）
+│   └── catalog_sync.py # 上游套餐同步为本地商品（SKU 映射；新商品 0 价下架待人工定价）
 └── web/
     └── payment.py      # EPay 回调端点（form-urlencoded + MD5 签名验证）
 ```

@@ -1,6 +1,6 @@
 # 功能进度
 
-上游已确定为 Commbitz。当前真实联调仅覆盖鉴权和目录读取，生产发货仍使用模拟客户端。开发路线见 [转售 Bot 开发方案](reseller-bot-development.md)。
+上游已确定为 Commbitz。客户端（鉴权/目录/详情，只读）与商品目录同步已实现；生产发货仍使用模拟客户端。开发路线见 [转售 Bot 开发方案](reseller-bot-development.md)。
 
 ## 已完成 ✅
 
@@ -50,16 +50,18 @@
 - [x] 已取得 Commbitz PDF 并整理为 Markdown
 - [x] 已读取公开 Live/UAT Swagger，核对 21/22 个接口路径及环境差异
 - [x] Live 鉴权、刷新令牌、目录及全部 11 个套餐详情只读联调成功
-- [ ] 实现 `HttpUpstreamClient`（`services/upstream.py` 里的骨架）
-- [ ] 在 `build_upstream()` 里替换 `StubUpstreamClient`
-- [ ] 采购记录、上游 `_id` 持久化及提交结果不明的人工核对流程
+- [x] Commbitz 只读客户端（`services/commbitz_api.py`）：令牌缓存/刷新、401 恢复、并发刷新协调、目录/详情查询
+- [x] 商品目录同步（`services/catalog_sync.py`）：套餐按 SKU 同步为本地商品，新商品 0 价下架待管理员定价上架
+- [ ] 采购适配器（开发方案阶段 B）：采购记录、上游 `_id` 持久化及提交结果不明的人工核对流程
+- [ ] 在 `build_upstream()` 里替换 `StubUpstreamClient`（采购记录就绪后）
 - [ ] 全部业务的输入、KYC、异步等待和用量查询
 - [ ] 确认 Live 实际扣款、幂等/核对和失败退款规则
 - [ ] 授权范围内的真实支付、采购和交付验收
 
 ### 商品管理
-- [ ] 替换 `DEMO_PRODUCTS`（`src/shop_bot/__init__.py`）为真实商品目录
-- [ ] 可选：加管理员命令 `/add_product` / `/del_product` 动态管理商品
+- [x] 商品 SKU / 上游套餐 ID 字段及旧库迁移（`products.sku` / `products.upstream_plan_id`）
+- [ ] 管理员为本店同步来的商品定价并上架
+- [ ] 可选：管理员命令 `/add_product` / `/del_product` 动态管理商品
 
 ### 支付网关扩展（可选）
 - [ ] 接其他支付网关时，实现和 `services/epay.py` 相同的接口
@@ -77,9 +79,9 @@
 
 ## 接入上游 API 清单
 
-资料准备已达到开发条件，接下来按 [开发阶段与验收](reseller-bot-development.md#8-开发阶段与验收) 实施：
+阶段 A（协议与目录）已完成：只读客户端 + 目录同步。接下来按 [开发阶段与验收](reseller-bot-development.md#8-开发阶段与验收) 实施：
 
-1. 实现 Commbitz 客户端及商品 SKU/业务类型映射，本店人民币售价独立维护。
+1. ~~实现 Commbitz 客户端及商品 SKU 映射~~（阶段 A 完成；本店人民币售价独立维护，同步商品需人工定价上架）
 2. 在真实请求前建立持久化采购记录；已有上游 ID 时只查询，未知结果转人工核对。
 3. 实现 eSIM、激活、充值、兑换券、实体 SIM 受理、KYC 和用量查询。
 4. 改造现有 `paid` 恢复逻辑后，再启用真实上游适配器，避免重启时盲目再次采购。
@@ -93,6 +95,8 @@ tests/
 ├── test_epay.py                # 支付协议
 ├── test_orders.py              # 生命周期、幂等与并发
 ├── test_fsm.py                 # 对话状态持久化
+├── test_commbitz.py            # 上游客户端：鉴权、刷新、401 恢复、并发刷新、目录解析
+├── test_catalog_sync.py        # 目录同步、定价保留、旧库迁移、启动接线
 ├── test_database_recovery.py   # 事务隔离、回滚、旧库迁移
 ├── test_payment_flow.py        # 核单、权限、私信、恢复
 └── test_startup.py             # 实际启动鉴权和资源清理

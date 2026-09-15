@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS products (
     description TEXT NOT NULL DEFAULT '',
     price_cents INTEGER NOT NULL,
     currency TEXT NOT NULL DEFAULT 'USD',
-    active INTEGER NOT NULL DEFAULT 1
+    active INTEGER NOT NULL DEFAULT 1,
+    sku TEXT,
+    upstream_plan_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -103,6 +105,15 @@ class Database:
         if "notification_pending" not in columns:
             # 旧版没有通知结果证据。历史已发货订单只允许主动补发，避免升级时群发旧货品。
             await conn.execute("ALTER TABLE orders ADD COLUMN notification_pending INTEGER NOT NULL DEFAULT 0")
+        async with conn.execute("PRAGMA table_info(products)") as cur:
+            product_columns = {row["name"] for row in await cur.fetchall()}
+        for column in ("sku", "upstream_plan_id"):
+            if column not in product_columns:
+                await conn.execute(f"ALTER TABLE products ADD COLUMN {column} TEXT")
+        # 部分唯一索引：手工商品 sku 为 NULL，不参与唯一约束
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku ON products(sku) WHERE sku IS NOT NULL"
+        )
         # 旧实现读取最早一行；它包含后续 set_state/set_data 更新的完整会话。
         # 后插入的重复行可能只包含 state 或 data，不能简单保留最新行。
         await conn.execute("DROP INDEX IF EXISTS idx_fsm_state_unique")
@@ -201,6 +212,30 @@ class Database:
                 VALUES (?, ?, ?, ?, ?)""",
                 [(p.id, p.name, p.description, p.price_cents, p.currency) for p in products],
             )
+
+    async def upsert_product_from_upstream(
+        self, *, sku: str, name: str, description: str, upstream_plan_id: str
+    ) -> bool:
+        """按 SKU 同步上游商品；只更新名称/描述/上游 ID，不动本店价格与上架状态。
+
+        返回 True 表示新建。新商品 0 价且下架（目录可见不等于可售，开发方案 7.3），
+        需管理员定价并上架后才对用户可见。
+        """
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT id FROM products WHERE sku = ?", (sku,)) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                await conn.execute(
+                    """INSERT INTO products (name, description, price_cents, currency, active, sku, upstream_plan_id)
+                    VALUES (?, ?, 0, 'CNY', 0, ?, ?)""",
+                    (name, description, sku, upstream_plan_id),
+                )
+                return True
+            await conn.execute(
+                "UPDATE products SET name = ?, description = ?, upstream_plan_id = ? WHERE id = ?",
+                (name, description, upstream_plan_id, row["id"]),
+            )
+            return False
 
     async def create_order(
         self, user_id: int, product_id: int, quantity: int, amount_cents: int, currency: str
@@ -308,6 +343,8 @@ def _row_to_product(row: aiosqlite.Row) -> Product:
         price_cents=row["price_cents"],
         currency=row["currency"],
         active=bool(row["active"]),
+        sku=row["sku"],
+        upstream_plan_id=row["upstream_plan_id"],
     )
 
 

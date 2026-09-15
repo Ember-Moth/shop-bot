@@ -19,8 +19,12 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 class UpstreamSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SHOP_BOT_UPSTREAM_")
 
-    base_url: str = ""
+    provider: str = ""  # "commbitz" 启用上游目录同步；发货仍为模拟，见 docs/reseller-bot-development.md
+    environment: str = "uat"  # uat / live
     api_key: str = ""
+    secret_key: str = ""
+    timeout: float = 15.0  # 上游请求超时（秒）
+    base_url: str = ""  # 可选覆盖；留空按 environment 选择
 
 
 class WebhookSettings(BaseSettings):

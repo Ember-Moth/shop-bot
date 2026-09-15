@@ -8,11 +8,13 @@ from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.webhook.aiohttp_server import setup_application
 from aiohttp import web as aiohttp_web
 
-from .config import get_settings
+from .config import Settings, get_settings
 from .db import Database, FSMStorage
 from .handlers import admin, catalog, order, start
 from .logging_config import get_logger, setup_logging
 from .models import Product
+from .services.catalog_sync import sync_catalog
+from .services.commbitz_api import CommbitzClient, CommbitzError, base_url_for
 from .services.epay import EPayClient, EPayConfig
 from .services.fulfillment import recovery_loop
 from .services.upstream import StubUpstreamClient, UpstreamClient
@@ -29,8 +31,32 @@ DEMO_PRODUCTS = [
 
 
 def build_upstream() -> UpstreamClient:
-    """接入真实上游后，把 StubUpstreamClient 换成真实 HTTP 客户端。"""
+    """发货仍是模拟客户端（开发方案规则 10：采购记录与人工核对机制就绪前，
+    不得把模拟上游替换为 Commbitz，否则重启恢复会盲目重复采购）。"""
     return StubUpstreamClient()
+
+
+async def sync_upstream_catalog(db: Database, settings: Settings) -> None:
+    """配置了 Commbitz 时同步上游目录到本地商品表；失败只记日志，不阻塞启动。
+
+    同步是只读操作（目录查询），新商品 0 价且下架，不影响现有在售商品。
+    """
+    cfg = settings.upstream
+    if cfg.provider != "commbitz":
+        return
+    if not (cfg.api_key and cfg.secret_key):
+        logger.warning("upstream provider is commbitz but api_key/secret_key missing, skip catalog sync")
+        return
+    base_url = cfg.base_url or base_url_for(cfg.environment)
+    client = CommbitzClient(base_url, cfg.api_key, cfg.secret_key, timeout=cfg.timeout)
+    try:
+        await sync_catalog(db, client)
+    except CommbitzError as exc:
+        logger.warning("upstream catalog sync failed: %s", exc)
+    except Exception:
+        logger.exception("upstream catalog sync failed unexpectedly")
+    finally:
+        await client.close()
 
 
 def build_dispatcher(db: Database, upstream: UpstreamClient, epay: EPayClient | None) -> Dispatcher:
@@ -67,6 +93,7 @@ async def amain() -> None:
         resources.push_async_callback(db.close)
         if not await db.list_products():
             await db.seed_products(DEMO_PRODUCTS)
+        await sync_upstream_catalog(db, settings)
         upstream = build_upstream()
         bot = Bot(settings.bot_token)
         resources.push_async_callback(bot.session.close)

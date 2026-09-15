@@ -27,6 +27,10 @@ logging:                     # 日志配置
   log_dir: ""                # 日志文件目录；空表示只输出到 stdout
   json_logs: false           # 生产环境建议改成 true
 
-upstream:                    # 拿到供应商 API 文档后填
-  base_url: ""
-  api_key: ""
+upstream:                    # 上游供应商（Commbitz 分销 API）
+  provider: ""               # commbitz = 启动时同步上游目录；留空 = 仅模拟发货
+  environment: uat           # uat / live
+  api_key: ""                # Commbitz 分销商 API Key
+  secret_key: ""             # Commbitz 分销商 Secret Key
+  timeout: 15                # 上游请求超时（秒）
+  base_url: ""               # 可选覆盖；留空按 environment 选择

@@ -24,8 +24,12 @@
 | `logging.level` | `SHOP_BOT_LOGGING__LEVEL` | 日志级别（默认 `INFO`） |
 | `logging.log_dir` | `SHOP_BOT_LOGGING__LOG_DIR` | 日志文件目录（空表示只输出到 stdout） |
 | `logging.json_logs` | `SHOP_BOT_LOGGING__JSON_LOGS` | 是否用 JSON 格式（生产建议 `true`） |
-| `upstream.base_url` | `SHOP_BOT_UPSTREAM__BASE_URL` | 上游 API 地址 |
-| `upstream.api_key` | `SHOP_BOT_UPSTREAM__API_KEY` | 上游 API 密钥 |
+| `upstream.provider` | `SHOP_BOT_UPSTREAM__PROVIDER` | 上游供应商；`commbitz` 启动时同步目录，留空仅模拟发货 |
+| `upstream.environment` | `SHOP_BOT_UPSTREAM__ENVIRONMENT` | `uat` / `live`（默认 uat） |
+| `upstream.api_key` | `SHOP_BOT_UPSTREAM__API_KEY` | Commbitz 分销商 API Key |
+| `upstream.secret_key` | `SHOP_BOT_UPSTREAM__SECRET_KEY` | Commbitz 分销商 Secret Key |
+| `upstream.timeout` | `SHOP_BOT_UPSTREAM__TIMEOUT` | 上游请求超时秒数（默认 15） |
+| `upstream.base_url` | `SHOP_BOT_UPSTREAM__BASE_URL` | 可选覆盖；留空按 environment 选择 |
 
 ## 反向代理示例（Nginx）
 
