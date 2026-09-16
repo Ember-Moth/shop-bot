@@ -61,38 +61,52 @@ EPay 网关 ──GET/POST /payment/callback──> 验签核单 ──> mark_pa
 
 ## 订单生命周期
 
+订单收款状态（orders.status）与采购状态（purchases.state）分开保存；收款事实一旦落库，
+采购等待、KYC、通知失败都不会让订单退回未付款。
+
 ```
-pending_payment --epay_callback--> paid --deliver--> delivered
-      |                                |
-      |                                +--deliver_fail--> delivery_failed
+pending_payment --epay_callback--> paid --采购+交付--> delivered
+      |                                |                  （订单与采购终态同一事务落账）
+      |                                +--履约需人工--> awaiting_dispatch（实体卡，/dispatch 确认）
       +--cancel--> cancelled
+```
+
+采购状态机（`services/purchasing.py`，规则详见 [开发方案](reseller-bot-development.md) 5.3/6 节）：
+
+```
+ready → submitting → upstream_pending → fulfilled
+            │              │
+            │              ├── awaiting_kyc → kyc_submitted（INR/强制 KYC，审核释放后才交付）
+            │              └── awaiting_dispatch（实体 SIM 受理成功 ≠ 已发货）
+            └── 超时/5xx/缺 _id → submission_unknown（停止自动重购，/bind 人工核对）
+     4xx 明确拒绝 → rejected（/retry 仅允许无上游单号的记录重试）
 ```
 
 - 用户下单后，bot 返回「立即支付」按钮（Telegram Web App）
 - Web App 直接打开 EPay 收银台（`submit.php`），用户在 Telegram 内完成支付
 - 支付成功后，EPay 网关 GET 或 POST 到 `/payment/callback`，带 MD5 签名
-- 验证通过后 `orders.mark_paid()` 触发上游发货，成功则通知买家
-- 用户可用 `/query <订单号>` 主动查询支付状态（兜底）
+- 回调只做验签、核单、确认收款并建立采购任务（ready），随即应答（规则 2）
+- 后台恢复循环（5 秒）驱动采购：提交一次先留痕，立即持久化上游 `_id`，
+  已知 ID 只查询详情；货品校验完整后与采购终态同一事务落账并私信买家
+- 用户可用 `/query <订单号>` 主动查询支付状态（兜底，同样触发一次履约推进）
 
-- 状态转换在 `db.transition_order()` 里持有连接锁、在写事务中核验前置状态，
-  每次转换写入 `order_events` 表做审计。
+- 状态转换持有连接锁、在写事务中核验前置状态，每次转换写入 `order_events` 审计；
+  交付与采购终态通过 `db.finalize_delivery()` 原子落账，中断后恢复循环幂等收敛。## 接入点
 
-## 接入点
+### 上游采购（已实现，配置 `upstream.provider: commbitz` 启用）
 
-### 上游发货 API
+`services/purchasing.py` 提供 `Purchaser` 协议的两个实现：
 
-实现 `UpstreamClient` 协议（`services/upstream.py`），在 `build_upstream()` 里替换
-`StubUpstreamClient`：
+- `DemoPurchaser`：未配置上游时的模拟交付（本地开发/测试）。
+- `CommbitzPurchaser`：真实 Commbitz 采购，协议细节封装在 `services/commbitz_api.py`
+  （令牌缓存/刷新、目录、`create_request`、KYC 双模式上传、用量查询）。
 
-```python
-class MyUpstreamClient:
-    async def deliver(self, order, product) -> DeliveryResult:
-        async with httpx.AsyncClient(...) as client:
-            resp = await client.post(...)
-            ...
-```
+采购安全规则：创建请求前先持久化提交意图；收到响应立即保存上游 `_id`；
+已有 ID 只查询；超时/5xx/缺 `_id` 转 `submission_unknown` 人工核对（上游无幂等键，
+绝不自动重购）；rejected 仅无上游单号的记录可受控重试。
 
-Commbitz 的正常请求接口已明确，但当前文档未承诺创建请求幂等。真实接入还需要商品 SKU/业务输入快照、采购记录、上游 `_id` 持久化，以及待处理/KYC/结果不明状态；不能仅在骨架中增加一次 POST 就启用自动恢复。
+人工核对入口：`/purchases` 列表、`/retry <订单号>`、`/bind <订单号> <上游请求ID>`
+（事务内复核上游单唯一性，并按下单快照核对业务类型/数量/套餐）。
 
 ### 支付回调
 
@@ -114,7 +128,11 @@ EPay 网关 GET 或 POST 到 `/payment/callback`，form-urlencoded，带 MD5 签
 订单状态、事件和货品在一个事务提交。网络请求期间不持有数据库连接锁，同一订单的履约/通知按订单锁串行执行。
 
 `EPayClient.validate_payment()` 统一核验回调和主动查询结果；数据库事务检查交易号与订单绑定。
-`services/fulfillment.py` 只向持久化订单的买家私信货品，记录 `notified_at` 与 `notification_pending`；启动和定时扫描处理 `paid` 与通知待重试的 `delivered`。
-`delivery_failed` 经管理员重试返回 `paid`，不退回 `pending_payment`。
+`services/fulfillment.py` 只向持久化订单的买家私信货品（多张 eSIM 分条），记录
+`notified_at` 与 `notification_pending`；恢复循环每 5 秒推进 `paid` 订单采购、收敛
+「已交付但采购未终态」的历史残留（人工状态 submission_unknown/rejected 除外）、
+补发未成功的私信。`delivery_failed` 经管理员重试返回 `paid`，不退回 `pending_payment`。
 
-以上进程内订单锁对应单进程部署。当前 `UpstreamClient` 约定重试应幂等；Commbitz 尚无已验证的幂等承诺，因此真实适配器必须用持久化提交记录阻止盲目重购：已有 `_id` 则查询，提交结果不明则人工核对。
+以上进程内订单锁对应单进程部署。Commbitz 无幂等承诺，采购适配器用持久化提交记录
+阻止盲目重购：已有 `_id` 则查询，提交结果不明则人工核对；绑定上游单在事务内复核
+唯一性，历史重复数据迁移时冻结为人工状态。
