@@ -112,9 +112,7 @@ def _esim_content_complete(esim: dict[str, Any]) -> bool:
     return bool(esim.get("iccid") and esim.get("lpa") and esim.get("qrCode"))
 
 
-def _delivery_content(
-    request_type: str, details: dict[str, Any], quantity: int
-) -> tuple[bool, str | None, str | None]:
+def _delivery_content(request_type: str, details: dict[str, Any], quantity: int) -> tuple[bool, str | None, str | None]:
     """按业务类型校验交付内容完整性（审计 P1-2）。
 
     返回 (是否完整, payload, 缺失原因)。不完整时不交付，继续轮询等待补齐。
@@ -165,8 +163,10 @@ async def ensure_purchase_for_order(db: Database, order: Order) -> Purchase:
             request_type = request_type or product.request_type
     if not sku or not request_type:
         return await db.ensure_purchase(
-            order.id, request_type=request_type or "unknown",
-            sku=sku or f"UNMAPPED-PRODUCT-{order.product_id}", quantity=order.quantity,
+            order.id,
+            request_type=request_type or "unknown",
+            sku=sku or f"UNMAPPED-PRODUCT-{order.product_id}",
+            quantity=order.quantity,
         )
     return await db.ensure_purchase(order.id, request_type=request_type, sku=sku, quantity=order.quantity)
 
@@ -180,21 +180,33 @@ class DemoPurchaser:
     async def fulfill(self, db: Database, order_id: int) -> Order | None:
         async with db.order_operation(order_id):
             order = await db.get_order(order_id)
-            if order is None or order.status == OrderStatus.DELIVERED:
+            if order is None:
+                return None
+            if order.status == OrderStatus.DELIVERED:
                 # 已交付：补齐采购终态后返回（幂等收敛；人工状态不自动翻转）
                 purchase = await db.get_purchase_by_order(order_id)
                 if purchase is not None and purchase.state not in (
-                    PurchaseState.FULFILLED, PurchaseState.REJECTED, PurchaseState.SUBMISSION_UNKNOWN,
+                    PurchaseState.FULFILLED,
+                    PurchaseState.REJECTED,
+                    PurchaseState.SUBMISSION_UNKNOWN,
                 ):
-                    await db.transition_purchase(purchase.id, PurchaseState.FULFILLED, last_error=None)
+                    await db.finalize_delivery(
+                        order_id,
+                        purchase.id,
+                        from_purchase_state=purchase.state,
+                        upstream_ref=f"STUB-{order_id:06d}",
+                        payload=order.payload,
+                    )
                 return order
             if order.status != OrderStatus.PAID:
                 return order
             purchase = await self.ensure_purchase(db, order)
+            if purchase.state not in (PurchaseState.READY, PurchaseState.FULFILLED):
+                return order
             final = await db.finalize_delivery(
                 order_id,
                 purchase.id,
-                from_purchase_state=PurchaseState.READY,
+                from_purchase_state=purchase.state,
                 upstream_ref=f"STUB-{order_id:06d}",
                 payload=f"[stub goods for order #{order_id}]",
             )
@@ -256,15 +268,10 @@ class CommbitzPurchaser:
         if order is None:
             return None
         if order.status == OrderStatus.DELIVERED:
-            # 历史中断窗口残留（订单已交付、采购未落终态）：幂等收敛，不影响已发内容。
-            # submission_unknown/rejected 属人工核对范畴，不由收敛自动翻转。
-            purchase = await db.get_purchase_by_order(order_id)
-            if purchase is not None and purchase.state not in (
-                PurchaseState.FULFILLED, PurchaseState.REJECTED, PurchaseState.SUBMISSION_UNKNOWN,
-            ):
-                await db.transition_purchase(purchase.id, PurchaseState.FULFILLED, last_error=None)
-            return order
-        if order.status != OrderStatus.PAID:
+            # 只收敛同一引用的历史中断；旧版本已重绑但仍保存旧货品时回到 paid，
+            # 从当前采购的上游 ID 重新查询，绝不把旧 payload 当成新单已交付。
+            order = await db.reconcile_delivery(order_id)
+        if order is None or order.status != OrderStatus.PAID:
             return order
         purchase = await db.get_purchase_by_order(order_id)
         if purchase is None:
@@ -273,7 +280,9 @@ class CommbitzPurchaser:
         if purchase.state == PurchaseState.SUBMITTING:
             purchase = (
                 await db.transition_purchase(
-                    purchase.id, PurchaseState.SUBMISSION_UNKNOWN, from_state=PurchaseState.SUBMITTING,
+                    purchase.id,
+                    PurchaseState.SUBMISSION_UNKNOWN,
+                    from_state=PurchaseState.SUBMITTING,
                     last_error="interrupted while submitting",
                 )
                 or purchase
@@ -281,9 +290,15 @@ class CommbitzPurchaser:
         if purchase.state == PurchaseState.READY:
             await self._submit(db, order, purchase)
             purchase = await db.get_purchase_by_order(order_id) or purchase
-        if purchase.state in (
-            PurchaseState.UPSTREAM_PENDING, PurchaseState.AWAITING_KYC, PurchaseState.KYC_SUBMITTED,
-        ) and purchase.upstream_request_id is not None:
+        if (
+            purchase.state
+            in (
+                PurchaseState.UPSTREAM_PENDING,
+                PurchaseState.AWAITING_KYC,
+                PurchaseState.KYC_SUBMITTED,
+            )
+            and purchase.upstream_request_id is not None
+        ):
             # 提交后立即轮询一次（eSIM 通常即时出货）；仍 pending/KYC 待审则留给下次恢复。
             # awaiting_kyc 且尚无上游单（账户级 KYC 待证件）时不轮询，等重新创建。
             await self._poll(db, order, purchase)
@@ -292,8 +307,11 @@ class CommbitzPurchaser:
 
     async def _submit(self, db: Database, order: Order, purchase: Purchase) -> None:
         submitted = await db.transition_purchase(
-            purchase.id, PurchaseState.SUBMITTING, from_state=PurchaseState.READY,
-            last_error=None, bump_attempt=True,
+            purchase.id,
+            PurchaseState.SUBMITTING,
+            from_state=PurchaseState.READY,
+            last_error=None,
+            bump_attempt=True,
         )
         if submitted is None:
             return  # 并发下其他协程已接管
@@ -318,13 +336,12 @@ class CommbitzPurchaser:
         except CommbitzError as exc:
             # 仅 HTTP 400 且明确要求证件时才转等待证件（审计 P1-3：500/未知错误
             # 携带相同消息时不得允许重购，必须保持 submission_unknown）
-            if (
-                exc.status_code == 400
-                and "kycdocuments is mandatory" in str(exc).lower()
-            ):
+            if exc.status_code == 400 and "kycdocuments is mandatory" in str(exc).lower():
                 logger.warning("purchase requires kyc documents before creation", extra={"order_id": order.id})
                 await db.transition_purchase(
-                    purchase.id, PurchaseState.AWAITING_KYC, from_state=PurchaseState.SUBMITTING,
+                    purchase.id,
+                    PurchaseState.AWAITING_KYC,
+                    from_state=PurchaseState.SUBMITTING,
                     last_error=str(exc),
                 )
             elif exc.definite_rejection:
@@ -333,18 +350,20 @@ class CommbitzPurchaser:
                     purchase.id, PurchaseState.REJECTED, from_state=PurchaseState.SUBMITTING, last_error=str(exc)
                 )
             else:
-                logger.warning(
-                    "purchase submission unknown", extra={"order_id": order.id, "error": type(exc).__name__}
-                )
+                logger.warning("purchase submission unknown", extra={"order_id": order.id, "error": type(exc).__name__})
                 await db.transition_purchase(
-                    purchase.id, PurchaseState.SUBMISSION_UNKNOWN, from_state=PurchaseState.SUBMITTING,
+                    purchase.id,
+                    PurchaseState.SUBMISSION_UNKNOWN,
+                    from_state=PurchaseState.SUBMITTING,
                     last_error=str(exc),
                 )
             return
         except Exception as exc:  # 网络/超时：上游可能已建单，转人工
             logger.warning("purchase submission error", extra={"order_id": order.id, "error": type(exc).__name__})
             await db.transition_purchase(
-                purchase.id, PurchaseState.SUBMISSION_UNKNOWN, from_state=PurchaseState.SUBMITTING,
+                purchase.id,
+                PurchaseState.SUBMISSION_UNKNOWN,
+                from_state=PurchaseState.SUBMITTING,
                 last_error=f"network: {type(exc).__name__}",
             )
             return
@@ -352,7 +371,9 @@ class CommbitzPurchaser:
         if not upstream_id:
             logger.warning("purchase response missing _id", extra={"order_id": order.id})
             await db.transition_purchase(
-                purchase.id, PurchaseState.SUBMISSION_UNKNOWN, from_state=PurchaseState.SUBMITTING,
+                purchase.id,
+                PurchaseState.SUBMISSION_UNKNOWN,
+                from_state=PurchaseState.SUBMITTING,
                 last_error="response missing _id",
             )
             return
@@ -360,7 +381,9 @@ class CommbitzPurchaser:
         kyc_pending = str(created.get("kycStatus") or "").lower() == "pending"
         next_state = PurchaseState.AWAITING_KYC if kyc_pending else PurchaseState.UPSTREAM_PENDING
         await db.transition_purchase(
-            purchase.id, next_state, from_state=PurchaseState.SUBMITTING,
+            purchase.id,
+            next_state,
+            from_state=PurchaseState.SUBMITTING,
             upstream_request_id=str(upstream_id),
             upstream_order_no=str(created["orderId"]) if created.get("orderId") else None,
             last_error=None,
@@ -368,21 +391,19 @@ class CommbitzPurchaser:
         if kyc_pending:
             logger.info("purchase awaiting kyc", extra={"order_id": order.id, "upstream_ref": str(upstream_id)})
         else:
-            logger.info(
-                "purchase submitted", extra={"order_id": order.id, "upstream_ref": str(upstream_id)}
-            )
+            logger.info("purchase submitted", extra={"order_id": order.id, "upstream_ref": str(upstream_id)})
 
     async def _poll(self, db: Database, order: Order, purchase: Purchase) -> None:
         assert purchase.upstream_request_id is not None
         try:
             details = await self.client.get_order_details(purchase.upstream_request_id)
         except CommbitzError as exc:
-            logger.warning(
-                "purchase detail query failed", extra={"order_id": order.id, "error": type(exc).__name__}
-            )
+            logger.warning("purchase detail query failed", extra={"order_id": order.id, "error": type(exc).__name__})
             if exc.definite_rejection and purchase.state == PurchaseState.UPSTREAM_PENDING:
                 await db.transition_purchase(
-                    purchase.id, PurchaseState.SUBMISSION_UNKNOWN, from_state=PurchaseState.UPSTREAM_PENDING,
+                    purchase.id,
+                    PurchaseState.SUBMISSION_UNKNOWN,
+                    from_state=PurchaseState.UPSTREAM_PENDING,
                     last_error=str(exc),
                 )
             return  # 其他失败下次轮询重试
@@ -392,7 +413,9 @@ class CommbitzPurchaser:
         status = classify_status(details.get("status"))
         if status == "failure":
             await db.transition_purchase(
-                purchase.id, PurchaseState.REJECTED, from_state=purchase.state,
+                purchase.id,
+                PurchaseState.REJECTED,
+                from_state=purchase.state,
                 last_error=f"upstream status: {details.get('status')}",
             )
             return
@@ -404,7 +427,10 @@ class CommbitzPurchaser:
         if purchase.request_type == "physical":
             # 实体 SIM：上游受理成功 ≠ 已发货；转人工物流确认（开发方案第 3 节）
             await db.transition_purchase(
-                purchase.id, PurchaseState.AWAITING_DISPATCH, from_state=purchase.state, last_error=None,
+                purchase.id,
+                PurchaseState.AWAITING_DISPATCH,
+                from_state=purchase.state,
+                last_error=None,
             )
             return
         complete, payload, reason = _delivery_content(purchase.request_type, details, purchase.quantity)
@@ -417,23 +443,35 @@ class CommbitzPurchaser:
             return
         assert payload is not None
         # 同一事务内完成订单交付与采购终态，中断后可由恢复循环收敛（审计 P2）
-        await db.finalize_delivery(
+        final = await db.finalize_delivery(
             order.id,
             purchase.id,
             from_purchase_state=purchase.state,
             upstream_ref=purchase.upstream_request_id,
             payload=payload,
         )
+        if final is None:
+            logger.warning("delivery not finalized: purchase state or reference changed", extra={"order_id": order.id})
+            return
         logger.info("order delivered", extra={"order_id": order.id, "upstream_ref": purchase.upstream_request_id})
 
     async def _track_kyc(self, db: Database, purchase: Purchase, details: dict[str, Any]) -> None:
-        """跟踪 KYC 审核进展：pending → submitted（买家已补交）→ 等待 verified。"""
-        if purchase.state != PurchaseState.AWAITING_KYC:
+        """重绑的已有订单也可能需要 KYC；根据详情进入买家可补交的状态。"""
+        if purchase.state not in (PurchaseState.UPSTREAM_PENDING, PurchaseState.AWAITING_KYC):
             return
         kyc_status = str(details.get("kycStatus") or "").lower()
         if kyc_status == "submitted" or details.get("isKycVerified") is True:
+            target = PurchaseState.KYC_SUBMITTED
+        elif kyc_status == "pending":
+            target = PurchaseState.AWAITING_KYC
+        else:
+            return
+        if target != purchase.state:
             await db.transition_purchase(
-                purchase.id, PurchaseState.KYC_SUBMITTED, from_state=PurchaseState.AWAITING_KYC, last_error=None,
+                purchase.id,
+                target,
+                from_state=purchase.state,
+                last_error=None,
             )
 
     async def submit_kyc(
@@ -465,8 +503,11 @@ class CommbitzPurchaser:
             if not documents:
                 return False, "请至少提供一个证件链接"
             updated = await db.transition_purchase(
-                purchase.id, PurchaseState.READY, from_state=PurchaseState.AWAITING_KYC,
-                last_error=None, set_kyc_documents=json.dumps(documents),
+                purchase.id,
+                PurchaseState.READY,
+                from_state=PurchaseState.AWAITING_KYC,
+                last_error=None,
+                set_kyc_documents=json.dumps(documents),
             )
             if updated is None:
                 return False, "采购状态已变化，请重试"
@@ -483,7 +524,10 @@ class CommbitzPurchaser:
             # "already verified" 说明审核已过：转入等待交付，由轮询继续
             if "already verified" in str(exc).lower():
                 await db.transition_purchase(
-                    purchase.id, PurchaseState.KYC_SUBMITTED, from_state=PurchaseState.AWAITING_KYC, last_error=None,
+                    purchase.id,
+                    PurchaseState.KYC_SUBMITTED,
+                    from_state=PurchaseState.AWAITING_KYC,
+                    last_error=None,
                 )
                 return True, "证件此前已审核通过，系统会继续跟进交付"
             logger.warning("kyc submit failed", extra={"order_id": order_id, "error": type(exc).__name__})
@@ -491,7 +535,10 @@ class CommbitzPurchaser:
         kyc_status = str(response.get("kycStatus") or "").lower()
         if purchase.state == PurchaseState.AWAITING_KYC and kyc_status == "submitted":
             await db.transition_purchase(
-                purchase.id, PurchaseState.KYC_SUBMITTED, from_state=PurchaseState.AWAITING_KYC, last_error=None,
+                purchase.id,
+                PurchaseState.KYC_SUBMITTED,
+                from_state=PurchaseState.AWAITING_KYC,
+                last_error=None,
             )
         await db.add_order_note(order_id, "buyer submitted kyc documents")
         return True, "证件已提交，等待上游审核；通过后系统会自动发货"
@@ -503,13 +550,15 @@ class CommbitzPurchaser:
             return False, "该订单没有采购记录"
         if purchase.state != PurchaseState.AWAITING_DISPATCH:
             return False, f"采购状态为 {purchase.state.value}，只有 awaiting_dispatch 需要确认发货"
-        await db.finalize_delivery(
+        final = await db.finalize_delivery(
             order_id,
             purchase.id,
             from_purchase_state=PurchaseState.AWAITING_DISPATCH,
             upstream_ref=purchase.upstream_request_id,
             payload="实体 SIM 已由管理员确认发出；物流信息请联系客服跟进。",
         )
+        if final is None:
+            return False, "订单或采购状态已变化，请重新核对"
         await db.add_order_note(order_id, "admin confirmed physical sim dispatch")
         return True, f"订单 #{order_id} 已确认发货并通知买家"
 
@@ -526,8 +575,7 @@ class CommbitzPurchaser:
             return False, f"采购状态为 {purchase.state.value}，只有 rejected 可以重试"
         if purchase.upstream_request_id is not None:
             return False, (
-                f"该订单已存在上游单 {purchase.upstream_request_id}，不能重新购买；"
-                "请人工核对上游订单状态后处理"
+                f"该订单已存在上游单 {purchase.upstream_request_id}，不能重新购买；请人工核对上游订单状态后处理"
             )
         updated = await db.transition_purchase(purchase.id, PurchaseState.READY, from_state=PurchaseState.REJECTED)
         if updated is None:
@@ -535,10 +583,14 @@ class CommbitzPurchaser:
         await db.add_order_note(order_id, "admin retried rejected purchase")
         return True, f"订单 #{order_id} 已重新排队采购"
 
-    async def bind_unknown_purchase(
+    async def bind_unknown_purchase(self, db: Database, order_id: int, upstream_request_id: str) -> tuple[bool, str]:
+        """人工核对绑定与履约/通知共用订单锁，成功后重新核验交付资料。"""
+        async with db.order_operation(order_id):
+            return await self._bind_unknown_purchase_locked(db, order_id, upstream_request_id)
+
+    async def _bind_unknown_purchase_locked(
         self, db: Database, order_id: int, upstream_request_id: str
     ) -> tuple[bool, str]:
-        """人工核对绑定（规则 6）：核对业务类型、数量、套餐归属后绑定为已知 ID。"""
         purchase = await db.get_purchase_by_order(order_id)
         if purchase is None:
             return False, "该订单没有采购记录"
@@ -554,7 +606,8 @@ class CommbitzPurchaser:
             return False, f"上游查询失败：{exc}"
         # 套餐核验：使用下单时的套餐/SKU 快照，而非可能已被修改的当前商品
         order = await db.get_order(order_id)
-        assert order is not None  # 前置状态检查已确认采购存在，订单必然存在
+        if order is None or order.status not in (OrderStatus.PAID, OrderStatus.DELIVERED):
+            return False, "订单不存在或当前状态不允许绑定"
         mismatches = _verify_details(purchase, details, order)
         if mismatches:
             return False, "上游订单与本店订单不匹配：" + "；".join(mismatches)
@@ -569,8 +622,7 @@ class CommbitzPurchaser:
             return False, f"上游单 {upstream_request_id} 已绑定到订单 #{conflict_order_id}"
         if updated is None:
             return False, "采购状态已变化，请刷新后重试"
-        await db.add_order_note(order_id, f"admin bound upstream request {upstream_request_id}")
-        return True, f"订单 #{order_id} 已绑定上游单 {upstream_request_id}，等待交付"
+        return True, f"订单 #{order_id} 已绑定上游单 {upstream_request_id}，等待重新核验交付资料"
 
 
 def _verify_details(purchase: Purchase, details: dict[str, Any], order: Order) -> list[str]:

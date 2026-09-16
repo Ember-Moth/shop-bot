@@ -141,9 +141,7 @@ class Database:
             if column not in product_columns:
                 await conn.execute(f"ALTER TABLE products ADD COLUMN {column} TEXT")
         # 部分唯一索引：手工商品 sku 为 NULL，不参与唯一约束
-        await conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku ON products(sku) WHERE sku IS NOT NULL"
-        )
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku ON products(sku) WHERE sku IS NOT NULL")
         # 旧实现读取最早一行；它包含后续 set_state/set_data 更新的完整会话。
         # 后插入的重复行可能只包含 state 或 data，不能简单保留最新行。
         await conn.execute("DROP INDEX IF EXISTS idx_fsm_state_unique")
@@ -311,9 +309,7 @@ class Database:
 
     # ---- purchases ----
 
-    async def ensure_purchase(
-        self, order_id: int, *, request_type: str, sku: str, quantity: int
-    ) -> Purchase:
+    async def ensure_purchase(self, order_id: int, *, request_type: str, sku: str, quantity: int) -> Purchase:
         """按订单建立采购任务（幂等，order_id 唯一）。已存在时原样返回。"""
         async with self.transaction() as conn:
             async with conn.execute("SELECT * FROM purchases WHERE order_id = ?", (order_id,)) as cur:
@@ -333,8 +329,13 @@ class Database:
         return _row_to_purchase(row) if row else None
 
     async def get_purchase_by_upstream_request_id(self, upstream_request_id: str) -> Purchase | None:
+        row = await self._one("SELECT * FROM purchases WHERE upstream_request_id = ?", (upstream_request_id,))
+        return _row_to_purchase(row) if row else None
+
+    async def get_purchase_conflict(self, order_id: int, upstream_request_id: str) -> Purchase | None:
         row = await self._one(
-            "SELECT * FROM purchases WHERE upstream_request_id = ?", (upstream_request_id,)
+            "SELECT * FROM purchases WHERE upstream_request_id = ? AND order_id != ?",
+            (upstream_request_id, order_id),
         )
         return _row_to_purchase(row) if row else None
 
@@ -377,8 +378,13 @@ class Database:
                 kyc_documents = COALESCE(?, kyc_documents)
                 WHERE id = ? RETURNING *""",
                 (
-                    to_state, upstream_request_id, upstream_order_no, last_error, attempts,
-                    set_kyc_documents, purchase_id,
+                    to_state,
+                    upstream_request_id,
+                    upstream_order_no,
+                    last_error,
+                    attempts,
+                    set_kyc_documents,
+                    purchase_id,
                 ),
             ) as cur:
                 updated = await cur.fetchone()
@@ -403,8 +409,28 @@ class Database:
                 row = await cur.fetchone()
             if row is None:
                 return None
+            async with conn.execute(
+                "SELECT * FROM purchases WHERE id = ? AND order_id = ?", (purchase_id, order_id)
+            ) as cur:
+                purchase = await cur.fetchone()
+            if purchase is None or purchase["state"] != from_purchase_state:
+                return None
+            if purchase["state"] in (PurchaseState.SUBMISSION_UNKNOWN, PurchaseState.REJECTED):
+                return None
+            expected_ref = purchase["upstream_request_id"] or f"STUB-{order_id:06d}"
+            if upstream_ref != expected_ref:
+                return None
+            if purchase["upstream_request_id"] is not None:
+                async with conn.execute(
+                    "SELECT id FROM purchases WHERE upstream_request_id = ? AND order_id != ?",
+                    (upstream_ref, order_id),
+                ) as cur:
+                    if await cur.fetchone() is not None:
+                        return None
             if row["status"] == "delivered":
-                # 中断恢复：订单侧已完成，补齐采购终态
+                # 只收敛同一份已验证交付，不能用旧货品完成新绑定的采购。
+                if row["upstream_ref"] != upstream_ref:
+                    return None
                 await conn.execute(
                     """UPDATE purchases SET state = ?, updated_at = datetime('now')
                     WHERE id = ? AND state = ?""",
@@ -414,8 +440,8 @@ class Database:
             if row["status"] != "paid":
                 return None
             async with conn.execute(
-                """UPDATE orders SET status = ?, upstream_ref = COALESCE(?, upstream_ref),
-                payload = COALESCE(?, payload), updated_at = datetime('now'),
+                """UPDATE orders SET status = ?, upstream_ref = ?,
+                payload = ?, updated_at = datetime('now'),
                 notification_pending = 1
                 WHERE id = ? AND status = 'paid' RETURNING *""",
                 (OrderStatus.DELIVERED, upstream_ref, payload, order_id),
@@ -433,6 +459,68 @@ class Database:
         assert updated is not None
         return _row_to_order(updated)
 
+    async def _invalidate_delivery(self, conn: aiosqlite.Connection, order: aiosqlite.Row, note: str) -> Order:
+        """调用方持有事务：仅撤销旧交付资料，金额、支付交易号与付款事实保持不变。"""
+        async with conn.execute(
+            """UPDATE orders SET status = 'paid', upstream_ref = NULL, payload = NULL,
+            notification_pending = 0, notified_at = NULL, updated_at = datetime('now')
+            WHERE id = ? RETURNING *""",
+            (order["id"],),
+        ) as cur:
+            updated = await cur.fetchone()
+        await conn.execute(
+            "INSERT INTO order_events (order_id, from_status, to_status, note) VALUES (?, ?, 'paid', ?)",
+            (order["id"], order["status"], note),
+        )
+        assert updated is not None
+        return _row_to_order(updated)
+
+    async def reconcile_delivery(self, order_id: int) -> Order | None:
+        """真实采购的历史恢复：同引用补齐终态；引用改变则重新查询交付，不能信任旧 payload。"""
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cur:
+                order = await cur.fetchone()
+            if order is None:
+                return None
+            if order["status"] != OrderStatus.DELIVERED:
+                return _row_to_order(order)
+            async with conn.execute("SELECT * FROM purchases WHERE order_id = ?", (order_id,)) as cur:
+                purchase = await cur.fetchone()
+            if purchase is None or purchase["state"] in (PurchaseState.SUBMISSION_UNKNOWN, PurchaseState.REJECTED):
+                return _row_to_order(order)
+            upstream_ref = purchase["upstream_request_id"]
+            async with conn.execute(
+                "SELECT id FROM purchases WHERE upstream_request_id = ? AND order_id != ?",
+                (upstream_ref, order_id),
+            ) as cur:
+                conflict = await cur.fetchone()
+            if not upstream_ref or conflict is not None:
+                await conn.execute(
+                    """UPDATE purchases SET state = 'submission_unknown',
+                    last_error = 'delivery reference missing or shared; manual reconciliation required',
+                    updated_at = datetime('now') WHERE id = ?""",
+                    (purchase["id"],),
+                )
+                return _row_to_order(order)
+            if upstream_ref != order["upstream_ref"]:
+                await conn.execute(
+                    """UPDATE purchases SET state = 'upstream_pending', last_error = NULL,
+                    updated_at = datetime('now') WHERE id = ?""",
+                    (purchase["id"],),
+                )
+                return await self._invalidate_delivery(
+                    conn,
+                    order,
+                    f"delivery reference changed from {order['upstream_ref']} to {upstream_ref}; revalidation required",
+                )
+            if purchase["state"] != PurchaseState.FULFILLED:
+                await conn.execute(
+                    """UPDATE purchases SET state = 'fulfilled', last_error = NULL,
+                    updated_at = datetime('now') WHERE id = ?""",
+                    (purchase["id"],),
+                )
+            return _row_to_order(order)
+
     async def bind_upstream_request(
         self,
         purchase_id: int,
@@ -441,8 +529,7 @@ class Database:
         upstream_request_id: str,
         upstream_order_no: str | None,
     ) -> tuple[Purchase | None, int | None]:
-        """人工绑定上游单，事务内复核唯一性（BEGIN IMMEDIATE 串行化写者，
-        不依赖唯一索引是否已建立）。
+        """人工绑定上游单，事务内复核唯一性并撤销旧交付，等待重新核验货品。
 
         返回 (绑定后的采购, None) 或 (None, 冲突订单 ID)。
         """
@@ -451,6 +538,10 @@ class Database:
                 row = await cur.fetchone()
             if row is None or row["state"] != from_state.value:
                 return None, None
+            async with conn.execute("SELECT * FROM orders WHERE id = ?", (row["order_id"],)) as cur:
+                order = await cur.fetchone()
+            if order is None or order["status"] not in (OrderStatus.PAID, OrderStatus.DELIVERED):
+                return None, None
             async with conn.execute(
                 "SELECT order_id FROM purchases WHERE upstream_request_id = ? AND order_id != ?",
                 (upstream_request_id, row["order_id"]),
@@ -458,13 +549,22 @@ class Database:
                 conflict = await cur.fetchone()
             if conflict is not None:
                 return None, conflict["order_id"]
+            await self._invalidate_delivery(
+                conn,
+                order,
+                f"admin bound upstream request {upstream_request_id}; "
+                f"previous delivery reference {order['upstream_ref']}",
+            )
             async with conn.execute(
                 """UPDATE purchases SET state = ?, upstream_request_id = ?,
-                upstream_order_no = COALESCE(?, upstream_order_no), last_error = NULL,
+                upstream_order_no = ?, last_error = NULL,
                 updated_at = datetime('now') WHERE id = ? AND state = ? RETURNING *""",
                 (
-                    PurchaseState.UPSTREAM_PENDING, upstream_request_id, upstream_order_no,
-                    purchase_id, from_state.value,
+                    PurchaseState.UPSTREAM_PENDING,
+                    upstream_request_id,
+                    upstream_order_no,
+                    purchase_id,
+                    from_state.value,
                 ),
             ) as cur:
                 updated = await cur.fetchone()
@@ -509,8 +609,17 @@ class Database:
                 input_iccid, input_msisdn, input_days, input_sku, input_request_type, input_plan_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
                 (
-                    user_id, product_id, quantity, amount_cents, currency,
-                    iccid, msisdn, days, sku, request_type, plan_id,
+                    user_id,
+                    product_id,
+                    quantity,
+                    amount_cents,
+                    currency,
+                    iccid,
+                    msisdn,
+                    days,
+                    sku,
+                    request_type,
+                    plan_id,
                 ),
             ) as cur:
                 row = await cur.fetchone()
@@ -540,7 +649,10 @@ class Database:
             OR (status = 'delivered' AND notification_pending = 1)
             OR (status = 'delivered' AND EXISTS (
                 SELECT 1 FROM purchases WHERE purchases.order_id = orders.id
-                AND purchases.state NOT IN ('fulfilled', 'rejected', 'submission_unknown')
+                AND purchases.state NOT IN ('rejected', 'submission_unknown')
+                AND (purchases.state != 'fulfilled'
+                    OR (purchases.upstream_request_id IS NOT NULL
+                        AND purchases.upstream_request_id IS NOT orders.upstream_ref))
             )) ORDER BY id"""
         )
         return [_row_to_order(r) for r in rows]

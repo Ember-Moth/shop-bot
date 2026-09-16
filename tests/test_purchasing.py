@@ -822,9 +822,9 @@ async def test_frozen_duplicate_purchases_block_notification_to_both_buyers(
                 attempts INTEGER DEFAULT 0, last_error TEXT, kyc_documents TEXT,
                 created_at TEXT, updated_at TEXT);
             -- 场景：两份订单均已 delivered 且货品相同、通知都还没发出去
-            INSERT INTO orders VALUES (1, 1, 1, 1, 999, 'CNY', 'delivered', 'up-1', 'T1',
+            INSERT INTO orders VALUES (1, 1, 1, 1, 999, 'CNY', 'delivered', 'shared-id', 'T1',
                 'ICCID: 89', NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, '', '');
-            INSERT INTO orders VALUES (2, 1, 1, 1, 999, 'CNY', 'delivered', 'up-1', 'T2',
+            INSERT INTO orders VALUES (2, 2, 1, 1, 999, 'CNY', 'delivered', 'shared-id', 'T2',
                 'ICCID: 89', NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, '', '');
             -- 一笔已 fulfilled、一笔 upstream_pending：迁移后都必须冻结
             INSERT INTO purchases VALUES (1, 1, 'fulfilled', 'esim', 'S', 1,
@@ -836,6 +836,10 @@ async def test_frozen_duplicate_purchases_block_notification_to_both_buyers(
     db = Database(path)
     await db.connect()
     try:
+        # 买家必须真实存在，避免因找不到收件人而让“未发送”的断言虚假通过。
+        first_buyer = await db.upsert_user(42, "buyer-one")
+        second_buyer = await db.upsert_user(43, "buyer-two")
+        assert first_buyer.id == 1 and second_buyer.id == 2
         # 迁移把 fulfilled 记录也冻结（重复货品归属存疑，通知前必须人工确认）
         frozen = await db.list_purchases_by_states((PurchaseState.SUBMISSION_UNKNOWN,))
         assert {p.order_id for p in frozen} == {1, 2}

@@ -18,15 +18,19 @@ async def notify_owner(db: Database, bot: Bot, order_id: int, *, resend: bool = 
         order = await db.get_order(order_id)
         if order is None or order.status != OrderStatus.DELIVERED:
             return False
-        # 冻结采购（迁移发现的重复上游单等）在人工核对归属前，同一货品可能
-        # 关联多个买家——自动通知与手动补发都必须被拦截（审计第四轮 P1）。
+        # 自动通知和手动补发均只使用当前采购已经核验、落库的货品。
+        # 重绑后的 upstream_pending、冻结记录和旧引用的 payload 都不能发送。
         purchase = await db.get_purchase_by_order(order_id)
-        if purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN:
-            logger.warning(
-                "delivery notification blocked: purchase frozen for manual reconciliation",
-                extra={"order_id": order_id},
-            )
-            return False
+        if purchase is not None:
+            expected_ref = purchase.upstream_request_id or f"STUB-{order_id:06d}"
+            if purchase.state != PurchaseState.FULFILLED or order.upstream_ref != expected_ref:
+                logger.warning(
+                    "delivery notification blocked: unverified purchase or reference", extra={"order_id": order_id}
+                )
+                return False
+            if purchase.upstream_request_id and await db.get_purchase_conflict(order_id, purchase.upstream_request_id):
+                logger.warning("delivery notification blocked: shared upstream reference", extra={"order_id": order_id})
+                return False
         if not order.notification_pending and not resend:
             return True
         if resend:
