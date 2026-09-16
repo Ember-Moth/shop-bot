@@ -1,6 +1,6 @@
 # 功能进度
 
-上游已确定为 Commbitz。阶段 A（只读客户端 + 目录同步）与阶段 B（采购记录、提交一次、详情轮询、货品持久化、买家私信、人工核对入口）已实现并配置 `upstream.provider: commbitz` 后即启用真实采购。开发路线见 [转售 Bot 开发方案](reseller-bot-development.md)。
+上游已确定为 Commbitz。阶段 A（只读客户端 + 目录同步）、阶段 B（采购状态机与交付）与阶段 C（全部业务 + KYC + 用量）已实现；配置 `upstream.provider: commbitz` 即启用真实采购。开发路线见 [转售 Bot 开发方案](reseller-bot-development.md)。
 
 ## 已完成 ✅
 
@@ -56,7 +56,10 @@
 - [x] 人工核对入口：`/purchases` 列表、`/retry <订单号>` 重试被拒采购、`/bind <订单号> <上游ID>` 核对绑定（业务类型/数量校验 + 审计）
 - [x] 支付回调快速应答：确认收款并建立采购任务后立即返回，上游请求交给后台恢复循环
 - [x] 双模式：未配置 provider 走 DemoPurchaser（模拟交付）；配置 commbitz 即启用真实采购适配器
-- [ ] 全部业务的输入、KYC、异步等待和用量查询（阶段 C）
+- [x] 全部业务的下单输入（阶段 C）：激活采集 ICCID、充值采集手机号+天数、兑换券/实体 SIM 按数量
+- [x] KYC 流程（阶段 C）：建单 pending → 买家私聊补交证件（照片/文件 multipart 或 HTTPS 链接 JSON）→ 审核释放后才交付
+- [x] 实体 SIM 物流边界（阶段 C）：上游受理成功转 awaiting_dispatch，管理员确认发货后才交付
+- [x] eSIM 用量查询（阶段 C）：`/usage <订单号>`，仅订单买家和管理员
 - [ ] 确认 Live 实际扣款、幂等/核对和失败退款规则（阶段 D 前置）
 - [ ] 授权范围内的真实支付、采购和交付验收（阶段 D/E）
 
@@ -81,11 +84,11 @@
 
 ## 接入上游 API 清单
 
-阶段 A（协议与目录）与阶段 B（采购与交付）已完成。接下来按 [开发阶段与验收](reseller-bot-development.md#8-开发阶段与验收) 实施：
+阶段 A（协议与目录）、B（采购与交付）、C（全部业务 + KYC + 用量）已完成。接下来按 [开发阶段与验收](reseller-bot-development.md#8-开发阶段与验收) 实施：
 
 1. ~~实现 Commbitz 客户端及商品 SKU 映射~~（阶段 A 完成）
 2. ~~采购记录、提交一次、详情轮询、人工核对~~（阶段 B 完成）
-3. 全部业务的输入采集、KYC、异步等待和用量查询（阶段 C）。
+3. ~~全部业务的输入采集、KYC、异步等待和用量查询~~（阶段 C 完成）
 4. Live 采购对账（扣款币种/单位/失败退回）与各业务真实交付验收（阶段 D）。
 5. 经确认的 SKU/业务上架，启用销售（阶段 E）。
 
@@ -100,6 +103,7 @@ tests/
 ├── test_commbitz.py            # 上游客户端：鉴权、刷新、401 恢复、并发刷新、目录解析
 ├── test_catalog_sync.py        # 目录同步、定价保留、旧库迁移、启动接线
 ├── test_purchasing.py          # 采购状态机：提交一次、等待、未知转人工、并发、重启恢复、绑定
+├── test_requests_contract.py   # 阶段 C：各请求类型 payload 合同、KYC 流、实体卡边界、用量
 ├── test_database_recovery.py   # 事务隔离、回滚、旧库迁移
 ├── test_payment_flow.py        # 核单、权限、私信、恢复
 └── test_startup.py             # 实际启动鉴权和资源清理

@@ -44,7 +44,10 @@ async def cmd_orders(message: Message, db: Database) -> None:
 
 @router.message(Command("paid"))
 async def cmd_paid(message: Message, db: Database, purchaser: Purchaser, bot: Bot) -> None:
-    """手动确认付款并立即推进一次履约；通知失败留给恢复循环重试。"""
+    """手动确认付款并立即推进一次履约；通知失败留给恢复循环重试。
+
+    实体卡 awaiting_dispatch 订单在此人工确认发货（物流边界：签收前人工跟进）。
+    """
     order_id = _parse_order_id(message)
     if order_id is None:
         await message.answer("用法：/paid <订单号>")
@@ -52,6 +55,14 @@ async def cmd_paid(message: Message, db: Database, purchaser: Purchaser, bot: Bo
     try:
         order = await orders.mark_paid(db, purchaser, order_id, retry_failed=True)
         order = await purchaser.fulfill(db, order.id)
+        if order is not None and order.status != OrderStatus.DELIVERED and isinstance(purchaser, CommbitzPurchaser):
+            purchase = await db.get_purchase_by_order(order_id)
+            if purchase is not None and purchase.state == PurchaseState.AWAITING_DISPATCH:
+                ok, detail = await purchaser.confirm_dispatch(db, order_id)
+                if not ok:
+                    await message.answer(f"❌ {detail}")
+                    return
+                order = await db.get_order(order_id)
     except OrderError as exc:
         await message.answer(f"❌ {exc}")
         return

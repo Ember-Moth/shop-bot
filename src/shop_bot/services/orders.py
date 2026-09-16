@@ -20,13 +20,25 @@ class OrderError(Exception):
         self.order = order
 
 
-async def create_order(db: Database, user_id: int, product: Product, quantity: int) -> Order:
+async def create_order(
+    db: Database,
+    user_id: int,
+    product: Product,
+    quantity: int,
+    *,
+    iccid: str | None = None,
+    msisdn: str | None = None,
+    days: int | None = None,
+) -> Order:
     order = await db.create_order(
         user_id=user_id,
         product_id=product.id,
         quantity=quantity,
         amount_cents=product.price_cents * quantity,
         currency=product.currency,
+        iccid=iccid,
+        msisdn=msisdn,
+        days=days,
     )
     logger.info(
         "order created",

@@ -20,6 +20,7 @@ from shop_bot.services.fulfillment import notify_owner, recover_once
 from shop_bot.services.purchasing import CommbitzPurchaser, DemoPurchaser
 from shop_bot.web.payment import register_epay_routes
 from shop_bot.web.telegram import register_telegram_routes
+from tests.fakes import FakeCommbitzGateway
 
 
 @pytest.fixture
@@ -217,24 +218,14 @@ async def test_restart_before_submit_becomes_manual_not_repurchase(*, tmp_path, 
 
     recovered = Database(path)
     await recovered.connect()
-    create_calls = 0
-
-    class FakeCommbitz:
-        async def create_request(self, **kwargs):
-            nonlocal create_calls
-            create_calls += 1
-            return {"_id": "up-1"}
-
-        async def get_order_details(self, request_id):
-            return {}
-
     try:
-        purchaser = CommbitzPurchaser(FakeCommbitz())
+        gateway = FakeCommbitzGateway()
+        purchaser = CommbitzPurchaser(gateway)
         await recover_once(recovered, purchaser, bot)
         purchase = await recovered.get_purchase_by_order(pending.id)
         assert purchase is not None
         assert purchase.state == PurchaseState.SUBMISSION_UNKNOWN
-        assert create_calls == 0  # 恢复只归档状态，不重新购买
+        assert gateway.create_calls == 0  # 恢复只归档状态，不重新购买
         saved = await recovered.get_order(pending.id)
         assert saved is not None and saved.status == OrderStatus.PAID
     finally:

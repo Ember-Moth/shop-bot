@@ -10,7 +10,7 @@ from aiohttp import web as aiohttp_web
 
 from .config import Settings, get_settings
 from .db import Database, FSMStorage
-from .handlers import admin, catalog, order, start
+from .handlers import admin, catalog, kyc, order, start
 from .logging_config import get_logger, setup_logging
 from .models import Product
 from .services.catalog_sync import sync_catalog
@@ -64,6 +64,7 @@ def build_dispatcher(
     dp.include_router(start.router)
     dp.include_router(catalog.router)
     dp.include_router(order.router)
+    dp.include_router(kyc.router)
     dp.include_router(admin.router)
     return dp
 

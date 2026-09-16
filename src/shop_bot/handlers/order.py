@@ -14,19 +14,68 @@ router = Router()
 
 MAX_QUANTITY = 9999
 
+# 按业务类型需要的额外输入提示（开发方案 4：按业务类型采集 ICCID、号码、天数）
+_EXTRA_PROMPTS = {
+    "activation": "**{name}** x{quantity}\n\n请回复要激活的 ICCID（SIM 卡上的 18 位以上数字）。",
+    "recharge": (
+        "**{name}** x{quantity}\n\n请回复充值目标手机号（含国家区号，如 +919876543210）；\n"
+        "按日套餐请同时回复天数，格式：`+919876543210 7`。"
+    ),
+}
+ICCID_PREFIX = "iccid:"
+
 
 class OrderFlow(StatesGroup):
     quantity = State()
+    extra = State()  # activation/recharge 的 ICCID、号码、天数采集
 
 
-def _summary(product: Product, quantity: int) -> str:
+def _summary(product: Product, quantity: int, extra: str = "") -> str:
     amount = product.price_cents * quantity
-    return (
-        f"**{product.name}** x{quantity}\n\n"
-        f"单价：{product.price_text}\n"
-        f"合计：{amount / 100:.2f} {product.currency}\n\n"
-        "确认下单吗？"
-    )
+    lines = [f"**{product.name}** x{quantity}", "", f"单价：{product.price_text}",
+             f"合计：{amount / 100:.2f} {product.currency}"]
+    if extra:
+        lines += ["", extra]
+    lines += ["", "确认下单吗？"]
+    return "\n".join(lines)
+
+
+def _parse_extra(product: Product, quantity: int, text: str) -> tuple[str | None, str | None, int | None, str | None]:
+    """解析业务输入，返回 (iccid, msisdn, days, 错误提示)。"""
+    request_type = product.request_type or "esim"
+    iccid = msisdn = None
+    days = None
+    if request_type == "activation":
+        iccid = text.strip()
+        if not iccid.isdecimal() or len(iccid) < 18:
+            return None, None, None, "ICCID 应为 18 位以上数字，请重新回复。"
+        return iccid, None, None, None
+    if request_type == "recharge":
+        parts = text.split()
+        target = parts[0]
+        if target.lower().startswith(ICCID_PREFIX):
+            iccid = target[len(ICCID_PREFIX):]
+            if not iccid.isdecimal() or len(iccid) < 18:
+                return None, None, None, "ICCID 应为 18 位以上数字，请重新回复。"
+        else:
+            msisdn = target
+            if not msisdn.lstrip("+").isdecimal():
+                return None, None, None, "手机号格式不对（应含国家区号，如 +919876543210），请重新回复。"
+        if len(parts) > 1:
+            try:
+                days = int(parts[1])
+                if days < 1 or days > 365:
+                    return None, None, None, "天数需在 1–365 之间，请重新回复。"
+            except ValueError:
+                return None, None, None, "天数应为数字，请重新回复。"
+        return iccid, msisdn, days, None
+    return None, None, None, None
+
+
+def _extra_hint(product: Product, quantity: int) -> str | None:
+    request_type = product.request_type or "esim"
+    template = _EXTRA_PROMPTS.get(request_type)
+    return template.format(name=product.name, quantity=quantity) if template else None
 
 
 @router.callback_query(F.data.startswith(keyboards.CB_ORDER_PREFIX))
@@ -69,8 +118,42 @@ async def msg_quantity(message: Message, state: FSMContext, db: Database) -> Non
         await message.answer("商品不存在或已下架，下单已取消。")
         return
     await state.update_data(quantity=quantity)
+    hint = _extra_hint(product, quantity)
+    if hint:
+        await state.set_state(OrderFlow.extra)
+        await message.answer(hint, parse_mode="Markdown")
+        return
     await message.answer(
         _summary(product, quantity),
+        reply_markup=keyboards.confirm_order(),
+        parse_mode="Markdown",
+    )
+
+
+@router.message(OrderFlow.extra)
+async def msg_extra(message: Message, state: FSMContext, db: Database) -> None:
+    text = message.text
+    assert text is not None
+    data = await state.get_data()
+    product = await db.get_product(data["product_id"])
+    if product is None or not product.active:
+        await state.clear()
+        await message.answer("商品不存在或已下架，下单已取消。")
+        return
+    iccid, msisdn, days, error = _parse_extra(product, data["quantity"], text)
+    if error:
+        await message.answer(error)
+        return
+    extra = []
+    if iccid:
+        extra.append(f"ICCID：`{iccid}`")
+    if msisdn:
+        extra.append(f"手机号：`{msisdn}`")
+    if days:
+        extra.append(f"天数：{days}")
+    await state.update_data(iccid=iccid, msisdn=msisdn, days=days)
+    await message.answer(
+        _summary(product, data["quantity"], "、".join(extra)),
         reply_markup=keyboards.confirm_order(),
         parse_mode="Markdown",
     )
@@ -98,7 +181,10 @@ async def cb_confirm(
     if epay is not None and product.currency != "CNY":
         await callback.answer("当前商品不支持在线支付，请联系管理员", show_alert=True)
         return
-    order = await orders.create_order(db, user.id, product, quantity)
+    order = await orders.create_order(
+        db, user.id, product, quantity,
+        iccid=data.get("iccid"), msisdn=data.get("msisdn"), days=data.get("days"),
+    )
     msg = callback.message
     if msg is None or isinstance(msg, InaccessibleMessage):
         await callback.answer()

@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS orders (
     payload TEXT,
     notified_at TEXT,
     notification_pending INTEGER NOT NULL DEFAULT 0,
+    input_iccid TEXT,
+    input_msisdn TEXT,
+    input_days INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -120,6 +123,11 @@ class Database:
         if "notification_pending" not in columns:
             # 旧版没有通知结果证据。历史已发货订单只允许主动补发，避免升级时群发旧货品。
             await conn.execute("ALTER TABLE orders ADD COLUMN notification_pending INTEGER NOT NULL DEFAULT 0")
+        for column in ("input_iccid", "input_msisdn"):
+            if column not in columns:
+                await conn.execute(f"ALTER TABLE orders ADD COLUMN {column} TEXT")
+        if "input_days" not in columns:
+            await conn.execute("ALTER TABLE orders ADD COLUMN input_days INTEGER")
         async with conn.execute("PRAGMA table_info(products)") as cur:
             product_columns = {row["name"] for row in await cur.fetchall()}
         for column in ("sku", "upstream_plan_id", "request_type"):
@@ -223,9 +231,13 @@ class Database:
     async def seed_products(self, products: list[Product]) -> None:
         async with self.transaction() as conn:
             await conn.executemany(
-                """INSERT OR IGNORE INTO products (id, name, description, price_cents, currency)
-                VALUES (?, ?, ?, ?, ?)""",
-                [(p.id, p.name, p.description, p.price_cents, p.currency) for p in products],
+                """INSERT OR IGNORE INTO products (id, name, description, price_cents, currency,
+                sku, upstream_plan_id, request_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (p.id, p.name, p.description, p.price_cents, p.currency, p.sku, p.upstream_plan_id, p.request_type)
+                    for p in products
+                ],
             )
 
     async def upsert_product_from_upstream(
@@ -329,13 +341,24 @@ class Database:
             )
 
     async def create_order(
-        self, user_id: int, product_id: int, quantity: int, amount_cents: int, currency: str
+        self,
+        user_id: int,
+        product_id: int,
+        quantity: int,
+        amount_cents: int,
+        currency: str,
+        *,
+        iccid: str | None = None,
+        msisdn: str | None = None,
+        days: int | None = None,
     ) -> Order:
+        """创建订单并固定本次采购输入快照（SKU/数量之外的业务参数）。"""
         async with self.transaction() as conn:
             async with conn.execute(
-                """INSERT INTO orders (user_id, product_id, quantity, amount_cents, currency)
-                VALUES (?, ?, ?, ?, ?) RETURNING *""",
-                (user_id, product_id, quantity, amount_cents, currency),
+                """INSERT INTO orders (user_id, product_id, quantity, amount_cents, currency,
+                input_iccid, input_msisdn, input_days)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
+                (user_id, product_id, quantity, amount_cents, currency, iccid, msisdn, days),
             ) as cur:
                 row = await cur.fetchone()
         assert row is not None
@@ -471,6 +494,9 @@ def _row_to_order(row: aiosqlite.Row) -> Order:
         payload=row["payload"],
         notified_at=row["notified_at"],
         notification_pending=bool(row["notification_pending"]),
+        input_iccid=row["input_iccid"],
+        input_msisdn=row["input_msisdn"],
+        input_days=row["input_days"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

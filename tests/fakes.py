@@ -1,3 +1,4 @@
+
 from aiogram.client.session.base import BaseSession
 from aiogram.types import Message, User
 
@@ -32,3 +33,30 @@ class FakeSession(BaseSession):
     async def stream_content(self, *args, **kwargs):
         if False:
             yield b""
+
+
+class FakeCommbitzGateway:
+    """满足 PurchaseGateway 协议的离线假上游；记录调用供断言。"""
+
+    def __init__(self, created=None, details=None):
+        self.created = created or {"_id": "up-fake", "status": "pending"}
+        self.details = details or {}
+        self.create_calls = 0
+        self.detail_calls = 0
+
+    async def create_request(self, **kwargs):
+        self.create_calls += 1
+        return dict(self.created)
+
+    async def get_order_details(self, request_id):
+        self.detail_calls += 1
+        return dict(self.details)
+
+    async def submit_kyc_documents_json(self, request_id, documents):
+        return {"kycStatus": "submitted"}
+
+    async def submit_kyc_documents_files(self, request_id, files):
+        return {"kycStatus": "submitted"}
+
+    async def get_esim_usage(self, **kwargs):
+        return {}

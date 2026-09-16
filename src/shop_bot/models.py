@@ -20,6 +20,9 @@ class PurchaseState(StrEnum):
     SUBMITTING = "submitting"  # 已记录提交意图，等待创建响应
     SUBMISSION_UNKNOWN = "submission_unknown"  # 上游可能已创建/扣款，无可靠 ID；停止自动重购
     UPSTREAM_PENDING = "upstream_pending"  # 已存上游 _id，业务未完成；只查询不重复创建
+    AWAITING_KYC = "awaiting_kyc"  # INR/强制 KYC 订单待买家补交证件
+    KYC_SUBMITTED = "kyc_submitted"  # 证件已提交，等待审核释放
+    AWAITING_DISPATCH = "awaiting_dispatch"  # 实体 SIM 已受理，物流未确认；不自动记为已发货
     FULFILLED = "fulfilled"  # 货品已确认并持久化
     REJECTED = "rejected"  # 上游明确拒绝；保留付款事实，由管理员重试/退款
 
@@ -57,6 +60,9 @@ class Order:
     updated_at: datetime
     notified_at: str | None = None
     notification_pending: bool = False
+    input_iccid: str | None = None  # 激活目标 ICCID / 充值备选
+    input_msisdn: str | None = None  # 充值手机号
+    input_days: int | None = None  # 按日套餐天数
 
     @property
     def amount_text(self) -> str:

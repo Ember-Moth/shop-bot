@@ -15,14 +15,15 @@ shop_bot/
 ├── handlers/
 │   ├── start.py        # /start、主菜单、我的订单、/query 查支付状态（触发一次履约推进）
 │   ├── catalog.py      # 商品目录浏览
-│   ├── order.py        # FSM 下单流程（选商品 → 数量 → 确认 → 生成支付链接）
-│   └── admin.py        # /orders、/paid、/cancel、/purchases、/retry、/bind（管理员限定）
+│   ├── order.py        # FSM 下单流程（按业务类型采集 ICCID/号码/天数 → 确认 → 支付链接）
+│   ├── kyc.py          # /kyc 私聊补交证件（multipart/JSON）、/usage eSIM 用量
+│   └── admin.py        # /orders、/paid（含实体卡确认发货）、/cancel、/purchases、/retry、/bind
 ├── services/
 │   ├── orders.py       # 收款确认（pending → paid + 建采购任务），与履约分离
-│   ├── purchasing.py   # 采购状态机（提交一次/详情轮询/未知转人工）+ Demo/Commbitz 双模式
+│   ├── purchasing.py   # 采购状态机（提交一次/详情轮询/KYC 等待/未知转人工）+ Demo/Commbitz 双模式
 │   ├── fulfillment.py  # 买家私信（分条）+ 恢复循环（采购推进 + 通知补发）
 │   ├── epay.py         # EPay 支付网关协议（MD5 签名、支付链接、回调验证、订单查询）
-│   ├── commbitz_api.py # Commbitz 分销 API 客户端（令牌/目录/详情 + create_request）
+│   ├── commbitz_api.py # Commbitz 分销 API 客户端（令牌/目录/详情/采购/KYC/用量）
 │   └── catalog_sync.py # 上游套餐同步为本地商品（SKU 映射；新商品 0 价下架待人工定价）
 └── web/
     └── payment.py      # EPay 回调端点（验签核单 → 确认收款 → 快速应答）

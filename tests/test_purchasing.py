@@ -17,6 +17,7 @@ from shop_bot.services.purchasing import (
     classify_status,
     split_payload_chunks,
 )
+from tests.fakes import FakeCommbitzGateway
 
 UAT = "https://api-uat.commbitz.com/distributor-api"
 TOKEN_RESPONSE = {
@@ -251,26 +252,19 @@ async def test_restart_recovery_with_known_id_only_queries(*, tmp_path, httpx_mo
 
     recovered = Database(path)
     await recovered.connect()
-    create_calls = 0
-
-    class FakeCommbitz:
-        async def create_request(self, **kwargs):
-            nonlocal create_calls
-            create_calls += 1
-            return {"_id": "up-new"}
-
-        async def get_order_details(self, request_id):
-            assert request_id == "up-9"  # 只查询既有 ID
-            return {"status": "Success", "requestType": "esim", "quantity": 1,
-                    "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}]}
-
     try:
-        purchaser = CommbitzPurchaser(FakeCommbitz())
+        gateway = FakeCommbitzGateway(details={
+            "status": "Success", "requestType": "esim", "quantity": 1,
+            "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}],
+        })
+        purchaser = CommbitzPurchaser(gateway)
         await recover_once(recovered, purchaser, None)  # bot=None：通知失败由异常路径吞掉，不重复采购
         order = await recovered.get_order(order.id)
         assert order is not None and order.status == OrderStatus.DELIVERED
         assert order.upstream_ref == "up-9"
-        assert create_calls == 0
+        # 只查询既有 ID，绝不重新购买
+        assert gateway.create_calls == 0
+        assert gateway.detail_calls == 1
     finally:
         await recovered.close()
 

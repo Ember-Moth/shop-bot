@@ -235,16 +235,97 @@ class CommbitzClient:
         return dict(body["data"]["data"])
 
     async def create_request(
-        self, *, request_type: str, sku: str, quantity: int, notes: str | None = None
+        self,
+        *,
+        request_type: str,
+        sku: str,
+        quantity: int = 1,
+        iccid: str | None = None,
+        mobile_number: str | None = None,
+        days: int | None = None,
+        kyc_documents: dict[str, str] | None = None,
+        notes: str | None = None,
     ) -> dict[str, Any]:
         """提交采购请求——本客户端唯一会创建上游订单的方法。
 
         上游没有幂等键（PDF 14.2 节）：调用方必须先持久化提交意图（开发方案规则 3），
         且不得因超时/5xx 重试本方法。客户端只做 401 鉴权重试（发生在业务处理之前，
         不构成重复提交）。响应业务数据在 data.data，成功时取 `_id` 立即持久化。
+
+        字段按 PDF 第 6 节：activation 需 iccid；recharge 需 mobile_number（或 iccid）
+        与按日套餐天数 days；esim/physical 需 quantity；账户级强制 KYC 时
+        activation/esim 需 kycDocuments（HTTPS URL）。
         """
         payload: dict[str, Any] = {"requestType": request_type, "sku": sku, "quantity": quantity}
+        if iccid:
+            payload["iccid"] = iccid
+        if mobile_number:
+            payload["mobile_number"] = mobile_number
+        if days is not None:
+            payload["days"] = days
+        if kyc_documents:
+            payload["kycDocuments"] = kyc_documents
         if notes:
             payload["notes"] = notes
         body = await self._request("POST", "/v1/request", json=payload)
         return dict(body["data"]["data"])
+
+    async def submit_kyc_documents_json(self, request_id: str, documents: dict[str, str]) -> dict[str, Any]:
+        """为已有订单补交 KYC 证件（JSON 模式，证件为已上传的 HTTPS URL）。
+
+        字段位于请求体顶层（不套 kycDocuments，PDF 8.3）；至少提供一份。
+        响应 data 含 kycStatus 与可能的 esims[]。
+        """
+        allowed = ("passportFront", "passportBack", "visaFront")
+        payload = {k: v for k, v in documents.items() if k in allowed and v}
+        if not payload:
+            raise CommbitzError("at least one KYC document URL must be provided")
+        body = await self._request("POST", f"/v1/orders/{request_id}/kyc-documents", json=payload)
+        return dict(body["data"])
+
+    async def submit_kyc_documents_files(self, request_id: str, files: list[tuple[str, str, bytes]]) -> dict[str, Any]:
+        """multipart 上传 KYC 证件文件（PDF 推荐方式，上游转存 S3）。
+
+        files 为 (字段名, 文件名, 字节) 列表；字段名限 passportFront/passportBack/visaFront，
+        至少一份。
+        """
+        allowed = {"passportFront", "passportBack", "visaFront"}
+        upload: list[tuple[str, tuple[str, bytes]]] = []
+        for field, filename, content in files:
+            if field in allowed:
+                upload.append((field, (filename, content)))
+        if not upload:
+            raise CommbitzError("at least one KYC document file must be provided")
+        token = await self._ensure_token()
+        resp = await self._http.post(
+            f"/v1/orders/{request_id}/kyc-documents",
+            files=upload,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        return dict(self._unwrap(resp)["data"])
+
+    async def get_esim_usage(
+        self,
+        *,
+        coupon: str | None = None,
+        cid: str | None = None,
+        order_id: str | None = None,
+        imsi: str | None = None,
+    ) -> dict[str, Any]:
+        """查询 eSIM 用量（PDF 第 9 节 + Swagger 16.4 节响应结构）。至少一个标识。
+
+        返回平铺视图：用量明细（data.data）+ 套餐额度/设备信息（data 层）。
+        """
+        params = {k: v for k, v in
+                  {"coupon": coupon, "cid": cid, "orderId": order_id, "imsi": imsi}.items() if v}
+        if not params:
+            raise CommbitzError("at least one of coupon/cid/orderId/imsi is required")
+        body = await self._request("GET", "/esim/usage", params=params)
+        data = body.get("data") or {}
+        if not isinstance(data, dict):
+            return {}
+        view = dict(data.get("data") or {})
+        for key in ("totalData", "totalDataFormatted", "profileInfo", "enhancedData"):
+            if data.get(key) is not None:
+                view[key] = data[key]
+        return view
