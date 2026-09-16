@@ -1,17 +1,51 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    WebAppInfo,
+)
 
 CB_PRODUCT_PREFIX = "p:"
 CB_ORDER_PREFIX = "o:"
 CB_CONFIRM_ORDER = "order:confirm"
 CB_CANCEL_ORDER = "order:cancel"
 
+# 主菜单文案（回复键盘与文本路由共用，改文案需同步 handlers/start.py）
+MENU_BUY = "🛒 购买商品"
+MENU_ORDERS = "📦 我的订单"
+MENU_HISTORY = "🧾 交易记录"
+MENU_USAGE = "📶 用量 / 有效期"
+MENU_KYC = "🪪 证件补交"
+MENU_HELP = "❓ 使用帮助"
+
 
 def main_menu() -> InlineKeyboardMarkup:
+    """双列商城风主菜单（消息内嵌按钮）。"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🛍 商品目录", callback_data="catalog")],
-            [InlineKeyboardButton(text="📦 我的订单", callback_data="myorders")],
+            [
+                InlineKeyboardButton(text=MENU_BUY, callback_data="catalog"),
+                InlineKeyboardButton(text=MENU_ORDERS, callback_data="myorders"),
+            ],
+            [
+                InlineKeyboardButton(text=MENU_USAGE, callback_data="usage_hint"),
+                InlineKeyboardButton(text=MENU_HELP, callback_data="help"),
+            ],
         ]
+    )
+
+
+def main_menu_reply() -> ReplyKeyboardMarkup:
+    """常驻回复键盘：不用打命令，点底部按钮即可触发功能。"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=MENU_BUY), KeyboardButton(text=MENU_ORDERS)],
+            [KeyboardButton(text=MENU_HISTORY), KeyboardButton(text=MENU_USAGE)],
+            [KeyboardButton(text=MENU_KYC), KeyboardButton(text=MENU_HELP)],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="选择功能或…",
     )
 
 
