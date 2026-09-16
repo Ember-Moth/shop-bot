@@ -58,6 +58,7 @@
 - [x] 双模式：未配置 provider 走 DemoPurchaser（模拟交付）；配置 commbitz 即启用真实采购适配器
 - [x] 全部业务的下单输入（阶段 C）：激活采集 ICCID、充值采集手机号+天数、兑换券/实体 SIM 按数量
 - [x] KYC 流程（阶段 C）：建单 pending → 买家私聊补交证件（照片/文件 multipart 或 HTTPS 链接 JSON）→ 审核释放后才交付
+- [x] KYC 入口可配置（`features.kyc`，默认开启）：关闭后按钮隐藏、`/kyc` 拒绝、帮助文案不含该项；上游强制 KYC 产生的待核验订单仍出现在 `/purchases` 由管理员处理
 - [x] 实体 SIM 物流边界（阶段 C）：上游受理成功转 awaiting_dispatch，管理员确认发货后才交付
 - [x] eSIM 用量查询（阶段 C）：`/usage <订单号>`，仅订单买家和管理员
 - [ ] 确认 Live 实际扣款、幂等/核对和失败退款规则（阶段 D 前置）
