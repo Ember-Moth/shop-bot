@@ -30,15 +30,20 @@ async def create_order(
     msisdn: str | None = None,
     days: int | None = None,
 ) -> Order:
+    """创建订单：金额含按日套餐天数（上游计价公式 unitPrice × days，PDF 6.1），
+    并锁定 SKU/业务类型快照，之后商品目录变更不影响本次采购。"""
+    days = days or 1
     order = await db.create_order(
         user_id=user_id,
         product_id=product.id,
         quantity=quantity,
-        amount_cents=product.price_cents * quantity,
+        amount_cents=product.price_cents * quantity * days,
         currency=product.currency,
         iccid=iccid,
         msisdn=msisdn,
-        days=days,
+        days=days if days > 1 else None,
+        sku=product.sku,
+        request_type=product.request_type,
     )
     logger.info(
         "order created",

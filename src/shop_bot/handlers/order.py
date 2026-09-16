@@ -30,10 +30,13 @@ class OrderFlow(StatesGroup):
     extra = State()  # activation/recharge 的 ICCID、号码、天数采集
 
 
-def _summary(product: Product, quantity: int, extra: str = "") -> str:
-    amount = product.price_cents * quantity
-    lines = [f"**{product.name}** x{quantity}", "", f"单价：{product.price_text}",
-             f"合计：{amount / 100:.2f} {product.currency}"]
+def _summary(product: Product, quantity: int, days: int | None = None, extra: str = "") -> str:
+    # 按日套餐计价公式：unitPrice × quantity × days（与上游 totalAmount 公式一致）
+    amount = product.price_cents * quantity * (days or 1)
+    lines = [f"**{product.name}** x{quantity}"]
+    if days:
+        lines.append(f"天数：{days} 天")
+    lines += ["", f"单价：{product.price_text}", f"合计：{amount / 100:.2f} {product.currency}"]
     if extra:
         lines += ["", extra]
     lines += ["", "确认下单吗？"]
@@ -149,11 +152,9 @@ async def msg_extra(message: Message, state: FSMContext, db: Database) -> None:
         extra.append(f"ICCID：`{iccid}`")
     if msisdn:
         extra.append(f"手机号：`{msisdn}`")
-    if days:
-        extra.append(f"天数：{days}")
     await state.update_data(iccid=iccid, msisdn=msisdn, days=days)
     await message.answer(
-        _summary(product, data["quantity"], "、".join(extra)),
+        _summary(product, data["quantity"], days=days, extra="、".join(extra)),
         reply_markup=keyboards.confirm_order(),
         parse_mode="Markdown",
     )

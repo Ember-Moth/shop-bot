@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS orders (
     input_iccid TEXT,
     input_msisdn TEXT,
     input_days INTEGER,
+    input_sku TEXT,
+    input_request_type TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -71,6 +73,7 @@ CREATE TABLE IF NOT EXISTS purchases (
     upstream_order_no TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
+    kyc_documents TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -123,7 +126,7 @@ class Database:
         if "notification_pending" not in columns:
             # 旧版没有通知结果证据。历史已发货订单只允许主动补发，避免升级时群发旧货品。
             await conn.execute("ALTER TABLE orders ADD COLUMN notification_pending INTEGER NOT NULL DEFAULT 0")
-        for column in ("input_iccid", "input_msisdn"):
+        for column in ("input_iccid", "input_msisdn", "input_sku", "input_request_type"):
             if column not in columns:
                 await conn.execute(f"ALTER TABLE orders ADD COLUMN {column} TEXT")
         if "input_days" not in columns:
@@ -160,6 +163,15 @@ class Database:
             ) WHERE status = 'delivered' AND payload IS NULL
         """)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_trade_no ON orders(trade_no)")
+        async with conn.execute("PRAGMA table_info(purchases)") as cur:
+            purchase_columns = {row["name"] for row in await cur.fetchall()}
+        if "kyc_documents" not in purchase_columns:
+            await conn.execute("ALTER TABLE purchases ADD COLUMN kyc_documents TEXT")
+        # 上游请求 ID 全局唯一：一份货品只能归属一个本店订单（防重复交付）
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_purchases_upstream"
+            " ON purchases(upstream_request_id) WHERE upstream_request_id IS NOT NULL"
+        )
 
     async def close(self) -> None:
         async with self._lock:
@@ -259,8 +271,10 @@ class Database:
                     (name, description, sku, upstream_plan_id, request_type),
                 )
                 return True
+            # request_type 保留人工配置（COALESCE）：管理员指定的业务类型不被目录同步覆盖
             await conn.execute(
-                """UPDATE products SET name = ?, description = ?, upstream_plan_id = ?, request_type = ?
+                """UPDATE products SET name = ?, description = ?, upstream_plan_id = ?,
+                request_type = COALESCE(request_type, ?)
                 WHERE id = ?""",
                 (name, description, upstream_plan_id, request_type, row["id"]),
             )
@@ -289,6 +303,12 @@ class Database:
         row = await self._one("SELECT * FROM purchases WHERE order_id = ?", (order_id,))
         return _row_to_purchase(row) if row else None
 
+    async def get_purchase_by_upstream_request_id(self, upstream_request_id: str) -> Purchase | None:
+        row = await self._one(
+            "SELECT * FROM purchases WHERE upstream_request_id = ?", (upstream_request_id,)
+        )
+        return _row_to_purchase(row) if row else None
+
     async def list_purchases_by_states(self, states: tuple[PurchaseState, ...]) -> list[Purchase]:
         # placeholders 只由 len(states) 生成，无外部输入参与拼接
         placeholders = ",".join("?" for _ in states)
@@ -307,9 +327,13 @@ class Database:
         upstream_request_id: str | None = None,
         upstream_order_no: str | None = None,
         last_error: str | None = None,
+        set_kyc_documents: str | None = None,
         bump_attempt: bool = False,
     ) -> Purchase | None:
-        """采购状态机转换。条件 UPDATE 保证并发下只有一个协程推进成功。"""
+        """采购状态机转换。条件 UPDATE 保证并发下只有一个协程推进成功。
+
+        set_kyc_documents 非 None 时显式覆盖暂存证件（建单前 KYC 流程用）。
+        """
         async with self.transaction() as conn:
             async with conn.execute("SELECT * FROM purchases WHERE id = ?", (purchase_id,)) as cur:
                 row = await cur.fetchone()
@@ -320,9 +344,13 @@ class Database:
                 """UPDATE purchases SET state = ?,
                 upstream_request_id = COALESCE(?, upstream_request_id),
                 upstream_order_no = COALESCE(?, upstream_order_no),
-                last_error = ?, attempts = ?, updated_at = datetime('now')
+                last_error = ?, attempts = ?, updated_at = datetime('now'),
+                kyc_documents = COALESCE(?, kyc_documents)
                 WHERE id = ? RETURNING *""",
-                (to_state, upstream_request_id, upstream_order_no, last_error, attempts, purchase_id),
+                (
+                    to_state, upstream_request_id, upstream_order_no, last_error, attempts,
+                    set_kyc_documents, purchase_id,
+                ),
             ) as cur:
                 updated = await cur.fetchone()
         assert updated is not None
@@ -351,14 +379,19 @@ class Database:
         iccid: str | None = None,
         msisdn: str | None = None,
         days: int | None = None,
+        sku: str | None = None,
+        request_type: str | None = None,
     ) -> Order:
-        """创建订单并固定本次采购输入快照（SKU/数量之外的业务参数）。"""
+        """创建订单并固定本次采购输入快照（SKU/业务类型/数量/天数/ICCID/号码）。
+
+        快照在下单时锁定，之后商品目录变更不影响已创建订单的采购。
+        """
         async with self.transaction() as conn:
             async with conn.execute(
                 """INSERT INTO orders (user_id, product_id, quantity, amount_cents, currency,
-                input_iccid, input_msisdn, input_days)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
-                (user_id, product_id, quantity, amount_cents, currency, iccid, msisdn, days),
+                input_iccid, input_msisdn, input_days, input_sku, input_request_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
+                (user_id, product_id, quantity, amount_cents, currency, iccid, msisdn, days, sku, request_type),
             ) as cur:
                 row = await cur.fetchone()
         assert row is not None
@@ -475,6 +508,7 @@ def _row_to_purchase(row: aiosqlite.Row) -> Purchase:
         upstream_order_no=row["upstream_order_no"],
         attempts=row["attempts"],
         last_error=row["last_error"],
+        kyc_documents=row["kyc_documents"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -497,6 +531,8 @@ def _row_to_order(row: aiosqlite.Row) -> Order:
         input_iccid=row["input_iccid"],
         input_msisdn=row["input_msisdn"],
         input_days=row["input_days"],
+        input_sku=row["input_sku"],
+        input_request_type=row["input_request_type"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

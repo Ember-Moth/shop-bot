@@ -94,10 +94,11 @@ async def cmd_kyc(
         await message.answer(f"订单 #{order.id} 当前采购状态为 {purchase.state.value}，无需提交证件")
         return
     await state.set_state(KycFlow.waiting_documents)
-    await state.update_data(order_id=order.id)
+    await state.update_data(order_id=order.id, pending_files=[])
     await message.answer(
         f"请直接发送订单 #{order.id} 的证件材料（照片或 PDF 文件，1–3 份，"
         "将按顺序作为护照正面/护照背面/签证正面提交）。\n"
+        "Telegram 相册会逐张送达，请逐条发送后用 /done 提交；"
         "也可以发送 1–3 个证件图片的 HTTPS 链接（每行一个）。\n发送 /cancel 取消。"
     )
 
@@ -108,7 +109,11 @@ async def msg_kyc_text(
 ) -> None:
     text = message.text
     assert text is not None
-    if text.startswith("/"):
+    command = text.split()[0].lower() if text.split() else ""
+    if command in ("/done", "/submit@audit_bot"):
+        await _submit_collected_files(message, db, purchaser, state)
+        return
+    if command == "/cancel":
         await state.clear()
         await message.answer("已取消证件提交。")
         return
@@ -117,7 +122,7 @@ async def msg_kyc_text(
         return
     urls = [line.strip() for line in text.splitlines() if line.strip()]
     if not urls or len(urls) > 3 or any(not u.lower().startswith(("http://", "https://")) for u in urls):
-        await message.answer("请发送 1–3 个 https:// 开头的证件链接，或直接发送照片/文件。")
+        await message.answer("请发送 1–3 个 https:// 开头的证件链接，或直接发送照片/文件后用 /done 提交。")
         return
     data = await state.get_data()
     order_id = data["order_id"]
@@ -131,39 +136,53 @@ async def msg_kyc_text(
 async def msg_kyc_files(
     message: Message, db: Database, purchaser: CommbitzPurchaser, state: FSMContext
 ) -> None:
-    """接收照片/文件，按顺序映射字段后 multipart 上传。"""
+    """接收照片/文件：先逐张收集（Telegram 相册按多条消息送达），/done 统一提交。"""
     if not await _require_private(message):
         await state.clear()
         return
     data = await state.get_data()
-    order_id = data["order_id"]
+    pending: list[dict[str, Any]] = list(data.get("pending_files") or [])
+    if len(pending) >= 3:
+        await message.answer("最多 3 份材料，已收集完毕，请用 /done 提交。")
+        return
+    photos = message.photo or []
+    item = photos[-1] if photos else message.document
+    if item is None:
+        await message.answer("请发送照片或文件材料。")
+        return
+    pending.append({
+        "file_id": item.file_id,
+        "name": getattr(item, "file_name", None) or f"document{len(pending) + 1}.jpg",
+    })
+    await state.update_data(pending_files=pending)
+    remaining = 3 - len(pending)
+    hint = "已收集满 3 份，" if remaining == 0 else f"还可发送 {remaining} 份，"
+    await message.answer(f"已收到第 {len(pending)} 份材料；{hint}发送 /done 提交。")
+
+
+async def _submit_collected_files(
+    message: Message, db: Database, purchaser: CommbitzPurchaser, state: FSMContext
+) -> None:
+    data = await state.get_data()
+    order_id = data.get("order_id")
+    pending: list[dict[str, Any]] = list(data.get("pending_files") or [])
+    if order_id is None or not pending:
+        await message.answer("还没有收集到材料，请先发送照片/文件。")
+        return
     bot = message.bot
     assert bot is not None
     files: list[tuple[str, str, bytes]] = []
-    photos = message.photo or []
-    documents: list[Any] = []
-    if photos:
-        documents.append(photos[-1])  # 取最大尺寸
-    if message.document:
-        documents.append(message.document)
-
-    for index, item in enumerate(documents[:3]):
-        file_id = item.file_id
-        file = await bot.get_file(file_id)
+    for index, entry in enumerate(pending):
+        file = await bot.get_file(entry["file_id"])
         if (file.file_size or 0) > MAX_FILE_BYTES:
-            await message.answer("文件过大，请压缩后重试。")
+            await message.answer("存在过大文件，请压缩后重新发送材料。")
             return
         assert file.file_path is not None  # Telegram 对已上传文件必返回路径
         content = await bot.download_file(file.file_path)
         if not isinstance(content, bytes):
             # aiogram 可能返回 BinaryIO
             content = b"" if content is None else content.read()
-        name = getattr(item, "file_name", None) or f"document{index}.jpg"
-        files.append((KYC_FIELDS[index], name, content))
-
-    if not files:
-        await message.answer("请发送 1–3 份材料（照片或 PDF），或文本链接。")
-        return
+        files.append((KYC_FIELDS[index], entry["name"], content))
     ok, detail = await purchaser.submit_kyc(db, order_id, files=files)
     await state.clear()
     await message.answer(("✅ " if ok else "❌ ") + detail)

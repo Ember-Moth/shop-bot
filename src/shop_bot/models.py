@@ -63,6 +63,8 @@ class Order:
     input_iccid: str | None = None  # 激活目标 ICCID / 充值备选
     input_msisdn: str | None = None  # 充值手机号
     input_days: int | None = None  # 按日套餐天数
+    input_sku: str | None = None  # 下单时锁定的上游 SKU（防止商品后续变更影响采购）
+    input_request_type: str | None = None  # 下单时锁定的业务类型
 
     @property
     def amount_text(self) -> str:
@@ -89,5 +91,6 @@ class Purchase:
     upstream_order_no: str | None  # 上游业务展示编号（DR.../AR...）
     attempts: int
     last_error: str | None
+    kyc_documents: str | None  # 账户级强制 KYC：建单前暂存的买家证件（JSON：字段→HTTPS URL）
     created_at: datetime
     updated_at: datetime

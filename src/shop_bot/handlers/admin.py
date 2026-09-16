@@ -46,7 +46,8 @@ async def cmd_orders(message: Message, db: Database) -> None:
 async def cmd_paid(message: Message, db: Database, purchaser: Purchaser, bot: Bot) -> None:
     """手动确认付款并立即推进一次履约；通知失败留给恢复循环重试。
 
-    实体卡 awaiting_dispatch 订单在此人工确认发货（物流边界：签收前人工跟进）。
+    实体卡订单受理成功后停在 awaiting_dispatch，发货确认走独立的 /dispatch（审计 P2：
+    确认付款不等于确认发货）。
     """
     order_id = _parse_order_id(message)
     if order_id is None:
@@ -55,24 +56,41 @@ async def cmd_paid(message: Message, db: Database, purchaser: Purchaser, bot: Bo
     try:
         order = await orders.mark_paid(db, purchaser, order_id, retry_failed=True)
         order = await purchaser.fulfill(db, order.id)
-        if order is not None and order.status != OrderStatus.DELIVERED and isinstance(purchaser, CommbitzPurchaser):
-            purchase = await db.get_purchase_by_order(order_id)
-            if purchase is not None and purchase.state == PurchaseState.AWAITING_DISPATCH:
-                ok, detail = await purchaser.confirm_dispatch(db, order_id)
-                if not ok:
-                    await message.answer(f"❌ {detail}")
-                    return
-                order = await db.get_order(order_id)
     except OrderError as exc:
         await message.answer(f"❌ {exc}")
         return
     assert order is not None
     if order.status != OrderStatus.DELIVERED:
-        await message.answer(f"⏳ 订单 #{order.id} 已确认付款，履约状态：{order.status}；系统会自动跟进")
+        hint = ""
+        if isinstance(purchaser, CommbitzPurchaser):
+            purchase = await db.get_purchase_by_order(order.id)
+            if purchase is not None and purchase.state == PurchaseState.AWAITING_DISPATCH:
+                hint = "；实体卡已受理，确认发货请用 /dispatch <订单号>"
+        await message.answer(f"⏳ 订单 #{order.id} 已确认付款，履约状态：{order.status}{hint}")
         return
     notified = await notify_owner(db, bot, order.id, resend=True)
     detail = "货品已私信发送给买家" if notified else "货品已保存，私信发送失败，系统会重试"
     await message.answer(f"✅ 订单 #{order.id} 已发货；{detail}")
+
+
+@router.message(Command("dispatch"))
+async def cmd_dispatch(message: Message, db: Database, purchaser: Purchaser, bot: Bot) -> None:
+    """独立确认实体卡已发货：必须管理员显式操作，不随 /paid 自动触发。"""
+    if not isinstance(purchaser, CommbitzPurchaser):
+        await message.answer("当前为模拟采购模式，无需确认发货")
+        return
+    order_id = _parse_order_id(message)
+    if order_id is None:
+        await message.answer("用法：/dispatch <订单号>（实体卡实际发出后确认）")
+        return
+    ok, detail = await purchaser.confirm_dispatch(db, order_id)
+    if not ok:
+        await message.answer(f"❌ {detail}")
+        return
+    order = await db.get_order(order_id)
+    if order is not None:
+        await notify_owner(db, bot, order.id, resend=True)
+    await message.answer(f"✅ {detail}")
 
 
 @router.message(Command("purchases"))

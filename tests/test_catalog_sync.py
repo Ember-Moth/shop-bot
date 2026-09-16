@@ -1,6 +1,7 @@
 """目录同步测试：同步只维护名称/SKU/上游 ID/业务类型，不动本店价格与上架状态。"""
 
 import aiosqlite
+import pytest
 
 from shop_bot import build_commbitz_client, build_purchaser
 from shop_bot.config import Settings
@@ -114,8 +115,9 @@ def test_wiring_noop_without_provider():
 
 
 def test_wiring_requires_credentials():
-    assert build_commbitz_client(_settings(provider="commbitz")) is None
-    assert isinstance(build_purchaser(None), DemoPurchaser)
+    # provider=commbitz 但密钥缺失：拒绝启动，绝不静默降级为模拟发货（审计 P1-7）
+    with pytest.raises(SystemExit, match="refusing to start"):
+        build_commbitz_client(_settings(provider="commbitz"))
 
 
 def test_wiring_builds_shared_client_and_real_purchaser():

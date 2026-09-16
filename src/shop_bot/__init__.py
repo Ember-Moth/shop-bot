@@ -31,13 +31,19 @@ DEMO_PRODUCTS = [
 
 
 def build_commbitz_client(settings: Settings) -> CommbitzClient | None:
-    """配置了 Commbitz 且密钥齐全时返回共享客户端；否则返回 None（模拟采购模式）。"""
+    """配置了 Commbitz 且密钥齐全时返回共享客户端。
+
+    provider=commbitz 但密钥缺失时抛 SystemExit 拒绝启动——绝不能静默降级为
+    DemoPurchaser 给真实买家发模拟货品（审计 P1-7）。
+    """
     cfg = settings.upstream
     if cfg.provider != "commbitz":
         return None
     if not (cfg.api_key and cfg.secret_key):
-        logger.warning("upstream provider is commbitz but api_key/secret_key missing")
-        return None
+        raise SystemExit(
+            "upstream.provider is 'commbitz' but api_key/secret_key is missing; "
+            "refusing to start with demo fulfillment in production mode"
+        )
     base_url = cfg.base_url or base_url_for(cfg.environment)
     return CommbitzClient(base_url, cfg.api_key, cfg.secret_key, timeout=cfg.timeout)
 
