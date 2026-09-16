@@ -181,9 +181,11 @@ class DemoPurchaser:
         async with db.order_operation(order_id):
             order = await db.get_order(order_id)
             if order is None or order.status == OrderStatus.DELIVERED:
-                # 已交付：补齐采购终态后返回（幂等收敛）
+                # 已交付：补齐采购终态后返回（幂等收敛；人工状态不自动翻转）
                 purchase = await db.get_purchase_by_order(order_id)
-                if purchase is not None and purchase.state != PurchaseState.FULFILLED:
+                if purchase is not None and purchase.state not in (
+                    PurchaseState.FULFILLED, PurchaseState.REJECTED, PurchaseState.SUBMISSION_UNKNOWN,
+                ):
                     await db.transition_purchase(purchase.id, PurchaseState.FULFILLED, last_error=None)
                 return order
             if order.status != OrderStatus.PAID:
@@ -254,9 +256,12 @@ class CommbitzPurchaser:
         if order is None:
             return None
         if order.status == OrderStatus.DELIVERED:
-            # 历史中断窗口残留（订单已交付、采购未落终态）：幂等收敛，不影响已发内容
+            # 历史中断窗口残留（订单已交付、采购未落终态）：幂等收敛，不影响已发内容。
+            # submission_unknown/rejected 属人工核对范畴，不由收敛自动翻转。
             purchase = await db.get_purchase_by_order(order_id)
-            if purchase is not None and purchase.state != PurchaseState.FULFILLED:
+            if purchase is not None and purchase.state not in (
+                PurchaseState.FULFILLED, PurchaseState.REJECTED, PurchaseState.SUBMISSION_UNKNOWN,
+            ):
                 await db.transition_purchase(purchase.id, PurchaseState.FULFILLED, last_error=None)
             return order
         if order.status != OrderStatus.PAID:
@@ -553,12 +558,15 @@ class CommbitzPurchaser:
         mismatches = _verify_details(purchase, details, order)
         if mismatches:
             return False, "上游订单与本店订单不匹配：" + "；".join(mismatches)
-        updated = await db.transition_purchase(
-            purchase.id, PurchaseState.UPSTREAM_PENDING, from_state=PurchaseState.SUBMISSION_UNKNOWN,
+        # 事务内复核唯一性：并发绑定同一上游单只有一个成功，不依赖唯一索引
+        updated, conflict_order_id = await db.bind_upstream_request(
+            purchase.id,
+            from_state=PurchaseState.SUBMISSION_UNKNOWN,
             upstream_request_id=upstream_request_id,
             upstream_order_no=str(details["orderId"]) if details.get("orderId") else None,
-            last_error=None,
         )
+        if conflict_order_id is not None:
+            return False, f"上游单 {upstream_request_id} 已绑定到订单 #{conflict_order_id}"
         if updated is None:
             return False, "采购状态已变化，请刷新后重试"
         await db.add_order_note(order_id, f"admin bound upstream request {upstream_request_id}")
@@ -568,8 +576,9 @@ class CommbitzPurchaser:
 def _verify_details(purchase: Purchase, details: dict[str, Any], order: Order) -> list[str]:
     """人工绑定前的归属核验（审计 P1-4）：业务类型、数量、套餐/SKU 交叉核对。
 
-    核对依据用下单时的套餐快照（input_plan_id），不用可能已被修改的当前商品；
-    上游响应缺少任何套餐标识且无法交叉核对时，拒绝绑定而不是放行。
+    核对依据用下单时的套餐快照（input_plan_id），不用可能已被修改的当前商品。
+    无套餐快照的旧订单必须靠上游 SKU 与订单快照 SKU 交叉核对；两者皆缺时
+    没有任何可确认的匹配标识，拒绝绑定（审计第三轮 P1-2）。
     """
     mismatches: list[str] = []
     expected_type = purchase.request_type
@@ -585,9 +594,9 @@ def _verify_details(purchase: Purchase, details: dict[str, Any], order: Order) -
     if expected_plan:
         if not upstream_plan or str(upstream_plan) != str(expected_plan):
             mismatches.append(f"套餐 {upstream_plan or '缺失'} != {expected_plan}")
-    elif upstream_sku and expected_sku and str(upstream_sku) != str(expected_sku):
-        mismatches.append(f"SKU {upstream_sku} != {expected_sku}")
-    elif not upstream_plan and not upstream_sku:
-        # 上游响应没有套餐/SKU 标识，且本地无套餐快照：无法核对归属，拒绝绑定
-        mismatches.append("上游响应缺少套餐/SKU 标识，无法核对归属")
+    elif upstream_sku and expected_sku:
+        if str(upstream_sku) != str(expected_sku):
+            mismatches.append(f"SKU {upstream_sku} != {expected_sku}")
+    else:
+        mismatches.append("本地缺少套餐快照且上游响应无 SKU，无法核对归属")
     return mismatches

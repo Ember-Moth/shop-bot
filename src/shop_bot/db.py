@@ -172,17 +172,27 @@ class Database:
         if "kyc_documents" not in purchase_columns:
             await conn.execute("ALTER TABLE purchases ADD COLUMN kyc_documents TEXT")
         # 上游请求 ID 全局唯一：一份货品只能归属一个本店订单（防重复交付）。
-        # 旧版本允许重复绑定：存在冲突时跳过索引并告警，由管理员人工核对后
-        # 手动清空多余记录的 upstream_request_id（不能擅自删除订单关联）。
+        # 旧版本允许重复绑定：存在冲突时跳过索引、冻结冲突记录履约并告警，
+        # 由管理员人工核对后手动清空多余记录的 upstream_request_id
+        # （不能擅自删除订单关联）。新绑定的唯一性由 bind_upstream_request
+        # 事务内复核保证，不依赖该索引。
         async with conn.execute(
             """SELECT upstream_request_id FROM purchases WHERE upstream_request_id IS NOT NULL
             GROUP BY upstream_request_id HAVING COUNT(*) > 1"""
         ) as cur:
             duplicates = [row["upstream_request_id"] for row in await cur.fetchall()]
         if duplicates:
+            await conn.execute(
+                """UPDATE purchases SET state = 'submission_unknown',
+                last_error = 'duplicate upstream request id; frozen for manual reconciliation'
+                WHERE upstream_request_id IN (
+                    SELECT upstream_request_id FROM purchases WHERE upstream_request_id IS NOT NULL
+                    GROUP BY upstream_request_id HAVING COUNT(*) > 1
+                ) AND state NOT IN ('fulfilled', 'rejected')"""
+            )
             logger.error(
-                "duplicate upstream request ids found in purchases, unique index skipped; "
-                "resolve manually by clearing upstream_request_id on the wrong orders: %s",
+                "duplicate upstream request ids found in purchases; unique index skipped, "
+                "conflicting purchases frozen as submission_unknown for manual reconciliation: %s",
                 duplicates,
             )
         else:
@@ -422,6 +432,45 @@ class Database:
         assert updated is not None
         return _row_to_order(updated)
 
+    async def bind_upstream_request(
+        self,
+        purchase_id: int,
+        *,
+        from_state: PurchaseState,
+        upstream_request_id: str,
+        upstream_order_no: str | None,
+    ) -> tuple[Purchase | None, int | None]:
+        """人工绑定上游单，事务内复核唯一性（BEGIN IMMEDIATE 串行化写者，
+        不依赖唯一索引是否已建立）。
+
+        返回 (绑定后的采购, None) 或 (None, 冲突订单 ID)。
+        """
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT * FROM purchases WHERE id = ?", (purchase_id,)) as cur:
+                row = await cur.fetchone()
+            if row is None or row["state"] != from_state.value:
+                return None, None
+            async with conn.execute(
+                "SELECT order_id FROM purchases WHERE upstream_request_id = ? AND order_id != ?",
+                (upstream_request_id, row["order_id"]),
+            ) as cur:
+                conflict = await cur.fetchone()
+            if conflict is not None:
+                return None, conflict["order_id"]
+            async with conn.execute(
+                """UPDATE purchases SET state = ?, upstream_request_id = ?,
+                upstream_order_no = COALESCE(?, upstream_order_no), last_error = NULL,
+                updated_at = datetime('now') WHERE id = ? AND state = ? RETURNING *""",
+                (
+                    PurchaseState.UPSTREAM_PENDING, upstream_request_id, upstream_order_no,
+                    purchase_id, from_state.value,
+                ),
+            ) as cur:
+                updated = await cur.fetchone()
+        if updated is None:
+            return None, None
+        return _row_to_purchase(updated), None
+
     async def add_order_note(self, order_id: int, note: str) -> None:
         """向 order_events 写一条人工操作审计记录（状态不变）。"""
         async with self.transaction() as conn:
@@ -483,8 +532,16 @@ class Database:
         return [_row_to_order(r) for r in rows]
 
     async def list_recovery_orders(self) -> list[Order]:
-        rows = await self._all("""SELECT * FROM orders WHERE status = 'paid'
-            OR (status = 'delivered' AND notification_pending = 1) ORDER BY id""")
+        """恢复候选：待履约的 paid 订单、未通知的已交付订单、以及
+        已交付但采购未落终态的历史残留（审计 P2：中断后状态必须可收敛）。"""
+        rows = await self._all(
+            """SELECT * FROM orders WHERE status = 'paid'
+            OR (status = 'delivered' AND notification_pending = 1)
+            OR (status = 'delivered' AND EXISTS (
+                SELECT 1 FROM purchases WHERE purchases.order_id = orders.id
+                AND purchases.state NOT IN ('fulfilled', 'rejected', 'submission_unknown')
+            )) ORDER BY id"""
+        )
         return [_row_to_order(r) for r in rows]
 
     async def mark_notified(self, order_id: int) -> None:
