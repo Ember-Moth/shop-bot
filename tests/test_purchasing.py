@@ -796,3 +796,62 @@ async def test_notified_delivered_order_with_pending_purchase_converges(
     await recover_once(db, commbitz_purchaser, bot)
     purchase = await db.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.FULFILLED
+
+
+# ---- 第四轮审计修复回归（6bf171c 审计报告）----
+
+
+async def test_frozen_duplicate_purchases_block_notification_to_both_buyers(
+    *, tmp_path, caplog, bot
+):
+    """P1：冻结的重复采购必须同时拦截自动通知与手动补发（同一货品两个买家）。"""
+    path = str(tmp_path / "dup3.db")
+    with sqlite3.connect(path) as conn:
+        conn.executescript("""
+            CREATE TABLE orders (
+                id INTEGER PRIMARY KEY, user_id INTEGER, product_id INTEGER, quantity INTEGER,
+                amount_cents INTEGER, currency TEXT, status TEXT NOT NULL DEFAULT 'pending_payment',
+                upstream_ref TEXT, trade_no TEXT, payload TEXT,
+                notified_at TEXT, notification_pending INTEGER NOT NULL DEFAULT 0,
+                input_iccid TEXT, input_msisdn TEXT, input_days INTEGER,
+                input_sku TEXT, input_request_type TEXT, input_plan_id TEXT,
+                created_at TEXT, updated_at TEXT);
+            CREATE TABLE purchases (
+                id INTEGER PRIMARY KEY, order_id INTEGER, state TEXT, request_type TEXT,
+                sku TEXT, quantity INTEGER, upstream_request_id TEXT, upstream_order_no TEXT,
+                attempts INTEGER DEFAULT 0, last_error TEXT, kyc_documents TEXT,
+                created_at TEXT, updated_at TEXT);
+            -- 场景：两份订单均已 delivered 且货品相同、通知都还没发出去
+            INSERT INTO orders VALUES (1, 1, 1, 1, 999, 'CNY', 'delivered', 'up-1', 'T1',
+                'ICCID: 89', NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, '', '');
+            INSERT INTO orders VALUES (2, 1, 1, 1, 999, 'CNY', 'delivered', 'up-1', 'T2',
+                'ICCID: 89', NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, '', '');
+            -- 一笔已 fulfilled、一笔 upstream_pending：迁移后都必须冻结
+            INSERT INTO purchases VALUES (1, 1, 'fulfilled', 'esim', 'S', 1,
+                'shared-id', NULL, 1, NULL, NULL, '', '');
+            INSERT INTO purchases VALUES (2, 2, 'upstream_pending', 'esim', 'S', 1,
+                'shared-id', NULL, 1, NULL, NULL, '', '');
+        """)
+
+    db = Database(path)
+    await db.connect()
+    try:
+        # 迁移把 fulfilled 记录也冻结（重复货品归属存疑，通知前必须人工确认）
+        frozen = await db.list_purchases_by_states((PurchaseState.SUBMISSION_UNKNOWN,))
+        assert {p.order_id for p in frozen} == {1, 2}
+
+        await recover_once(db, CommbitzPurchaser(FakeCommbitzGateway()), bot)
+        # 两个买家都没收到任何消息
+        assert bot.session.sent == []
+        # 通知保持待发状态，等管理员人工核对后处理
+        for order_id in (1, 2):
+            order = await db.get_order(order_id)
+            assert order is not None and order.notification_pending == 1
+
+        # 手动补发（resend=True）同样被拦截
+        bot.session.fail_send = False
+        assert not await notify_owner(db, bot, 1, resend=True)
+        assert not await notify_owner(db, bot, 2, resend=True)
+        assert bot.session.sent == []
+    finally:
+        await db.close()

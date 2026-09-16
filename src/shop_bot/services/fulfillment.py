@@ -6,7 +6,7 @@ from aiogram import Bot
 
 from ..db import Database
 from ..logging_config import get_logger
-from ..models import OrderStatus
+from ..models import OrderStatus, PurchaseState
 from .purchasing import Purchaser, split_payload_chunks
 
 logger = get_logger(__name__)
@@ -17,6 +17,15 @@ async def notify_owner(db: Database, bot: Bot, order_id: int, *, resend: bool = 
     async with db.order_operation(order_id):
         order = await db.get_order(order_id)
         if order is None or order.status != OrderStatus.DELIVERED:
+            return False
+        # 冻结采购（迁移发现的重复上游单等）在人工核对归属前，同一货品可能
+        # 关联多个买家——自动通知与手动补发都必须被拦截（审计第四轮 P1）。
+        purchase = await db.get_purchase_by_order(order_id)
+        if purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN:
+            logger.warning(
+                "delivery notification blocked: purchase frozen for manual reconciliation",
+                extra={"order_id": order_id},
+            )
             return False
         if not order.notification_pending and not resend:
             return True

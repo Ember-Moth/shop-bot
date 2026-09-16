@@ -91,7 +91,9 @@ ready → submitting → upstream_pending → fulfilled
 - 用户可用 `/query <订单号>` 主动查询支付状态（兜底，同样触发一次履约推进）
 
 - 状态转换持有连接锁、在写事务中核验前置状态，每次转换写入 `order_events` 审计；
-  交付与采购终态通过 `db.finalize_delivery()` 原子落账，中断后恢复循环幂等收敛。## 接入点
+  交付与采购终态通过 `db.finalize_delivery()` 原子落账，中断后恢复循环幂等收敛。
+
+## 接入点
 
 ### 上游采购（已实现，配置 `upstream.provider: commbitz` 启用）
 

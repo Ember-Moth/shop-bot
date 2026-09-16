@@ -172,10 +172,11 @@ class Database:
         if "kyc_documents" not in purchase_columns:
             await conn.execute("ALTER TABLE purchases ADD COLUMN kyc_documents TEXT")
         # 上游请求 ID 全局唯一：一份货品只能归属一个本店订单（防重复交付）。
-        # 旧版本允许重复绑定：存在冲突时跳过索引、冻结冲突记录履约并告警，
+        # 旧版本允许重复绑定：存在冲突时跳过索引、冻结冲突记录履约与通知并告警，
         # 由管理员人工核对后手动清空多余记录的 upstream_request_id
-        # （不能擅自删除订单关联）。新绑定的唯一性由 bind_upstream_request
-        # 事务内复核保证，不依赖该索引。
+        # （不能擅自删除订单关联）。 fulfilled 记录同样冻结——重复货品归属
+        # 本就存疑，通知前必须人工确认归属（审计第四轮 P1）。
+        # 新绑定的唯一性由 bind_upstream_request 事务内复核保证，不依赖该索引。
         async with conn.execute(
             """SELECT upstream_request_id FROM purchases WHERE upstream_request_id IS NOT NULL
             GROUP BY upstream_request_id HAVING COUNT(*) > 1"""
@@ -188,7 +189,7 @@ class Database:
                 WHERE upstream_request_id IN (
                     SELECT upstream_request_id FROM purchases WHERE upstream_request_id IS NOT NULL
                     GROUP BY upstream_request_id HAVING COUNT(*) > 1
-                ) AND state NOT IN ('fulfilled', 'rejected')"""
+                )"""
             )
             logger.error(
                 "duplicate upstream request ids found in purchases; unique index skipped, "
