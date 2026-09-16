@@ -1,3 +1,5 @@
+import time
+
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart, StateFilter
@@ -135,38 +137,52 @@ async def cb_help(callback: CallbackQuery) -> None:
 # ---- 回复键盘路由：点底部按钮即触发，无需打命令（仅空闲状态生效）----
 
 
-@router.message(F.text == MENU_BUY, StateFilter(None))
-async def menu_buy(message: Message, db: Database) -> None:
-    await _send_catalog(message, db)
+# 连点防抖：同一用户短时间重复点菜单按钮只处理第一次（审计 P2：消息堆积）
+MENU_DEBOUNCE_SECONDS = 3.0
+_menu_last_seen: dict[tuple[int, str], float] = {}
 
 
-@router.message(F.text == MENU_ORDERS, StateFilter(None))
-async def menu_orders(message: Message, db: Database) -> None:
-    await _render_my_orders(message, db, "📦 我的订单")
+def _menu_debounced(user_id: int, text: str) -> bool:
+    key = (user_id, text)
+    now = time.monotonic()
+    last = _menu_last_seen.get(key, 0.0)
+    if now - last < MENU_DEBOUNCE_SECONDS:
+        return True
+    _menu_last_seen[key] = now
+    # 防止字典无限增长：粗略清理过期项
+    if len(_menu_last_seen) > 1000:
+        stale = [k for k, v in _menu_last_seen.items() if now - v > MENU_DEBOUNCE_SECONDS]
+        for k in stale:
+            _menu_last_seen.pop(k, None)
+    return False
 
 
-@router.message(F.text == MENU_HISTORY, StateFilter(None))
-async def menu_history(message: Message, db: Database) -> None:
-    await _render_my_orders(message, db, "🧾 交易记录")
-
-
-@router.message(F.text == MENU_USAGE, StateFilter(None))
-async def menu_usage(message: Message) -> None:
-    await message.answer(
-        "📶 用量 / 有效期查询\n\n请发送：/usage <订单号>\n（查询已交付 eSIM 的流量与有效期）"
-    )
-
-
-@router.message(F.text == MENU_KYC, StateFilter(None))
-async def menu_kyc(message: Message) -> None:
-    await message.answer(
-        "🪪 证件补交\n\n需要身份核验的订单请发送：/kyc <订单号>\n（在私聊中提交证件材料）"
-    )
-
-
-@router.message(F.text == MENU_HELP, StateFilter(None))
-async def menu_help(message: Message) -> None:
-    await message.answer(HELP_TEXT, parse_mode="Markdown")
+@router.message(
+    F.text.in_({MENU_BUY, MENU_ORDERS, MENU_HISTORY, MENU_USAGE, MENU_KYC, MENU_HELP}),
+    StateFilter(None),
+)
+async def menu_router(message: Message, db: Database) -> None:
+    """菜单按钮统一入口：防抖后分发到对应处理（仅空闲状态生效）。"""
+    from_user = message.from_user
+    assert from_user is not None
+    text = message.text or ""
+    if _menu_debounced(from_user.id, text):
+        return
+    if text == MENU_BUY:
+        await _send_catalog(message, db)
+    elif text in (MENU_ORDERS, MENU_HISTORY):
+        title = "📦 我的订单" if text == MENU_ORDERS else "🧾 交易记录"
+        await _render_my_orders(message, db, title)
+    elif text == MENU_USAGE:
+        await message.answer(
+            "📶 用量 / 有效期查询\n\n请发送：/usage <订单号>\n（查询已交付 eSIM 的流量与有效期）"
+        )
+    elif text == MENU_KYC:
+        await message.answer(
+            "🪪 证件补交\n\n需要身份核验的订单请发送：/kyc <订单号>\n（在私聊中提交证件材料）"
+        )
+    else:
+        await message.answer(HELP_TEXT, parse_mode="Markdown")
 
 
 @router.message(Command("query"))

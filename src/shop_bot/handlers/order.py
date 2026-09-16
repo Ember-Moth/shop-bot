@@ -6,6 +6,7 @@ from aiogram.types import CallbackQuery, InaccessibleMessage, Message
 from .. import keyboards
 from ..config import get_settings
 from ..db import Database
+from ..keyboards import escape_markdown
 from ..models import Product
 from ..services import orders
 from ..services.epay import EPayClient, EPayOrder
@@ -33,7 +34,7 @@ class OrderFlow(StatesGroup):
 def _summary(product: Product, quantity: int, days: int | None = None, extra: str = "") -> str:
     # 按日套餐计价公式：unitPrice × quantity × days（与上游 totalAmount 公式一致）
     amount = product.price_cents * quantity * (days or 1)
-    lines = [f"**{product.name}** x{quantity}"]
+    lines = [f"**{escape_markdown(product.name)}** x{quantity}"]
     if days:
         lines.append(f"天数：{days} 天")
     lines += ["", f"单价：{product.price_text}", f"合计：{amount / 100:.2f} {product.currency}"]
@@ -78,7 +79,7 @@ def _parse_extra(product: Product, quantity: int, text: str) -> tuple[str | None
 def _extra_hint(product: Product, quantity: int) -> str | None:
     request_type = product.request_type or "esim"
     template = _EXTRA_PROMPTS.get(request_type)
-    return template.format(name=product.name, quantity=quantity) if template else None
+    return template.format(name=escape_markdown(product.name), quantity=quantity) if template else None
 
 
 @router.callback_query(F.data.startswith(keyboards.CB_ORDER_PREFIX))
@@ -97,7 +98,7 @@ async def cb_start_order(callback: CallbackQuery, state: FSMContext, db: Databas
         await callback.answer()
         return
     await msg.edit_text(
-        f"**{product.name}**\n\n要购买几个？请直接回复数量（正整数）。",
+        f"**{escape_markdown(product.name)}**\n\n要购买几个？请直接回复数量（正整数）。",
         parse_mode="Markdown",
     )
     await callback.answer()

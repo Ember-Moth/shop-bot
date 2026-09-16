@@ -89,3 +89,14 @@ def order_created(order_id: int, pay_url: str | None = None) -> InlineKeyboardMa
         )
     rows.append([InlineKeyboardButton(text="📦 查看我的订单", callback_data="myorders")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def escape_markdown(text: str) -> str:
+    """转义 legacy Markdown 标记字符。
+
+    商品名等动态文本来自上游目录同步，不受我们控制；含 * _ ` [ 字符时
+    轻则样式错乱，重则 Telegram 解析失败返回 400（审计 P1）。
+    """
+    for ch in ("*", "_", "`", "["):
+        text = text.replace(ch, f"\\{ch}")
+    return text
