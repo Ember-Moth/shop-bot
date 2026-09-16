@@ -21,6 +21,7 @@
 | `epay.key` | `SHOP_BOT_EPAY__KEY` | EPay 商户密钥 |
 | `epay.url` | `SHOP_BOT_EPAY__URL` | EPay 网关地址 |
 | `epay.type` | `SHOP_BOT_EPAY__TYPE` | 默认支付方式（`alipay`/`wxpay` 等） |
+| `features.kyc` | `SHOP_BOT_FEATURES__KYC` | 是否向买家开放 KYC 证件补交入口（默认 `true`） |
 | `logging.level` | `SHOP_BOT_LOGGING__LEVEL` | 日志级别（默认 `INFO`） |
 | `logging.log_dir` | `SHOP_BOT_LOGGING__LOG_DIR` | 日志文件目录（空表示只输出到 stdout） |
 | `logging.json_logs` | `SHOP_BOT_LOGGING__JSON_LOGS` | 是否用 JSON 格式（生产建议 `true`） |

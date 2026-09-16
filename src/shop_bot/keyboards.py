@@ -36,14 +36,21 @@ def main_menu() -> InlineKeyboardMarkup:
     )
 
 
-def main_menu_reply() -> ReplyKeyboardMarkup:
-    """常驻回复键盘：不用打命令，点底部按钮即可触发功能。"""
+def main_menu_reply(kyc_enabled: bool = True) -> ReplyKeyboardMarkup:
+    """常驻回复键盘：不用打命令，点底部按钮即可触发功能。
+
+    kyc_enabled=False 时隐藏证件补交按钮（功能开关 features.kyc）。
+    """
+    rows = [
+        [KeyboardButton(text=MENU_BUY), KeyboardButton(text=MENU_ORDERS)],
+        [KeyboardButton(text=MENU_HISTORY), KeyboardButton(text=MENU_USAGE)],
+    ]
+    if kyc_enabled:
+        rows.append([KeyboardButton(text=MENU_KYC), KeyboardButton(text=MENU_HELP)])
+    else:
+        rows.append([KeyboardButton(text=MENU_HELP)])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=MENU_BUY), KeyboardButton(text=MENU_ORDERS)],
-            [KeyboardButton(text=MENU_HISTORY), KeyboardButton(text=MENU_USAGE)],
-            [KeyboardButton(text=MENU_KYC), KeyboardButton(text=MENU_HELP)],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
         input_field_placeholder="选择功能或…",
     )

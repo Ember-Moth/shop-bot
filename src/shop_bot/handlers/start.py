@@ -30,14 +30,19 @@ from ..services.purchasing import Purchaser
 router = Router()
 logger = get_logger(__name__)
 
-HELP_TEXT = (
-    "❓ **使用帮助**\n\n"
-    "下单：点「🛒 购买商品」选商品 → 按提示回复数量 / ICCID / 手机号 → 确认并支付\n"
-    "查询：/query <订单号> 查支付状态；📦 我的订单 查看全部订单\n"
-    "用量：/usage <订单号>（已交付 eSIM 的流量与有效期）\n"
-    "证件：/kyc <订单号>（需要身份核验的订单，私聊提交材料）\n\n"
-    "如有其他问题请联系管理员。"
-)
+def help_text(kyc_enabled: bool = True) -> str:
+    """使用帮助；KYC 行随功能开关显示。"""
+    lines = [
+        "❓ **使用帮助**",
+        "",
+        "下单：点「🛒 购买商品」选商品 → 按提示回复数量 / ICCID / 手机号 → 确认并支付",
+        "查询：/query <订单号> 查支付状态；📦 我的订单 查看全部订单",
+        "用量：/usage <订单号>（已交付 eSIM 的流量与有效期）",
+    ]
+    if kyc_enabled:
+        lines.append("证件：/kyc <订单号>（需要身份核验的订单，私聊提交材料）")
+    lines += ["", "如有其他问题请联系管理员。"]
+    return "\n".join(lines)
 
 
 async def _safe_edit(callback: CallbackQuery, text: str, **kwargs) -> None:
@@ -62,7 +67,8 @@ async def cmd_start(
     await db.upsert_user(from_user.id, from_user.username)
     await message.answer("👇 请选择功能 👇", reply_markup=main_menu())
     # 常驻回复键盘：发送一次即驻留，用户点底部按钮即可触发功能
-    await message.answer("点击下方按钮快速使用", reply_markup=main_menu_reply())
+    kyc_enabled = get_settings().features.kyc
+    await message.answer("点击下方按钮快速使用", reply_markup=main_menu_reply(kyc_enabled))
 
 
 @router.callback_query(F.data == "menu")
@@ -130,7 +136,10 @@ async def cb_usage_hint(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "help")
 async def cb_help(callback: CallbackQuery) -> None:
-    await _safe_edit(callback, HELP_TEXT, reply_markup=main_menu(), parse_mode="Markdown")
+    kyc_enabled = get_settings().features.kyc
+    await _safe_edit(
+        callback, help_text(kyc_enabled), reply_markup=main_menu(), parse_mode="Markdown"
+    )
     await callback.answer()
 
 
@@ -168,6 +177,7 @@ async def menu_router(message: Message, db: Database) -> None:
     text = message.text or ""
     if _menu_debounced(from_user.id, text):
         return
+    kyc_enabled = get_settings().features.kyc
     if text == MENU_BUY:
         await _send_catalog(message, db)
     elif text in (MENU_ORDERS, MENU_HISTORY):
@@ -178,11 +188,14 @@ async def menu_router(message: Message, db: Database) -> None:
             "📶 用量 / 有效期查询\n\n请发送：/usage <订单号>\n（查询已交付 eSIM 的流量与有效期）"
         )
     elif text == MENU_KYC:
+        if not kyc_enabled:
+            await message.answer("证件补交功能未开放，如有需要请联系管理员")
+            return
         await message.answer(
             "🪪 证件补交\n\n需要身份核验的订单请发送：/kyc <订单号>\n（在私聊中提交证件材料）"
         )
     else:
-        await message.answer(HELP_TEXT, parse_mode="Markdown")
+        await message.answer(help_text(kyc_enabled), parse_mode="Markdown")
 
 
 @router.message(Command("query"))

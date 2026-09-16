@@ -6,7 +6,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import Message
 
+from shop_bot.config import Settings
 from shop_bot.db import FSMStorage
+from shop_bot.handlers import kyc as kyc_module
 from shop_bot.handlers import start
 from shop_bot.keyboards import (
     MENU_BUY,
@@ -35,13 +37,27 @@ def menu_message(bot: Bot, text: str, chat_id: int = 42) -> Message:
     )
 
 
-def test_reply_keyboard_layout():
-    kb = main_menu_reply()
+def test_reply_keyboard_layout_with_kyc_enabled():
+    kb = main_menu_reply(kyc_enabled=True)
     assert kb.resize_keyboard is True
     assert kb.input_field_placeholder == "选择功能或…"
     assert len(kb.keyboard) == 3 and all(len(row) == 2 for row in kb.keyboard)
     texts = [button.text for row in kb.keyboard for button in row]
     assert texts == [MENU_BUY, MENU_ORDERS, MENU_HISTORY, MENU_USAGE, MENU_KYC, MENU_HELP]
+
+
+def test_reply_keyboard_layout_hides_kyc_when_disabled():
+    kb = main_menu_reply(kyc_enabled=False)
+    texts = [button.text for row in kb.keyboard for button in row]
+    assert MENU_KYC not in texts
+    assert texts == [MENU_BUY, MENU_ORDERS, MENU_HISTORY, MENU_USAGE, MENU_HELP]
+
+
+def test_kyc_disabled_feature_flag():
+    """features.kyc=False 时 Settings 正确读取。"""
+    assert Settings(features={"kyc": True}).features.kyc is True
+    assert Settings(features={"kyc": False}).features.kyc is False
+    assert Settings().features.kyc is True  # 默认开放
 
 
 def test_inline_main_menu_two_columns():
@@ -131,3 +147,42 @@ async def test_menu_router_buy_and_orders(db, user, bot):
     await start.menu_router(menu_message(bot, MENU_ORDERS), db)
     texts = [m.text or "" for m in bot.session.sent]
     assert any(f"#{order.id}" in t and "delivered" in t for t in texts)
+
+
+# ---- KYC 功能开关 ----
+
+
+async def test_menu_kyc_refused_when_disabled(db, bot, monkeypatch):
+    """开关关闭：点「🪪 证件补交」按钮得到未开放提示，而非引导提交。"""
+    start._menu_last_seen.clear()
+    monkeypatch.setattr(start, "get_settings", lambda: Settings(features={"kyc": False}))
+    await start.menu_router(menu_message(bot, MENU_KYC), db)
+    texts = [m.text or "" for m in bot.session.sent]
+    assert any("未开放" in t for t in texts)
+    assert not any("/kyc" in t for t in texts)  # 不再引导使用被禁用的命令
+
+
+async def test_menu_kyc_guides_when_enabled(db, bot, monkeypatch):
+    start._menu_last_seen.clear()
+    monkeypatch.setattr(start, "get_settings", lambda: Settings(features={"kyc": True}))
+    await start.menu_router(menu_message(bot, MENU_KYC), db)
+    texts = [m.text or "" for m in bot.session.sent]
+    assert any("/kyc" in t for t in texts)
+
+
+async def test_menu_help_omits_kyc_line_when_disabled(db, bot, monkeypatch):
+    start._menu_last_seen.clear()
+    monkeypatch.setattr(start, "get_settings", lambda: Settings(features={"kyc": False}))
+    start._menu_last_seen.clear()
+    await start.menu_router(menu_message(bot, MENU_HELP), db)
+    texts = [m.text or "" for m in bot.session.sent]
+    assert all("/kyc" not in t for t in texts)
+
+
+async def test_cmd_kyc_refused_when_disabled(db, bot, monkeypatch):
+    monkeypatch.setattr(kyc_module, "get_settings", lambda: Settings(features={"kyc": False}))
+    await kyc_module.cmd_kyc(
+        menu_message(bot, "/kyc 1"), db, None, None  # 开关先于依赖使用，传 None 不触达
+    )
+    texts = [m.text or "" for m in bot.session.sent]
+    assert any("未开放" in t for t in texts)

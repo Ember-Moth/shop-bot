@@ -22,6 +22,9 @@ epay:                        # EPay（易支付）网关配置
   url: ""                    # 网关地址，例如 https://pay.example.com
   type: alipay               # 默认支付方式
 
+features:                    # 功能开关
+  kyc: true                  # 是否向买家开放 KYC 证件补交（按钮与 /kyc 命令）
+
 logging:                     # 日志配置
   level: INFO                # DEBUG/INFO/WARNING/ERROR/CRITICAL
   log_dir: ""                # 日志文件目录；空表示只输出到 stdout

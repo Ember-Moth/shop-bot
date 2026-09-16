@@ -53,6 +53,12 @@ class EPaySettings(BaseSettings):
     type: str = "alipay"  # 默认支付方式
 
 
+class FeaturesSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SHOP_BOT_FEATURES_")
+
+    kyc: bool = True  # 是否向买家开放 KYC 证件补交入口（按钮/命令）
+
+
 class LoggingSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SHOP_BOT_LOGGING_")
 
@@ -71,6 +77,7 @@ class Settings(BaseSettings):
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
     payment: PaymentSettings = Field(default_factory=PaymentSettings)
     epay: EPaySettings = Field(default_factory=EPaySettings)
+    features: FeaturesSettings = Field(default_factory=FeaturesSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
     @classmethod

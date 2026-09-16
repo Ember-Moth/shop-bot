@@ -77,6 +77,9 @@ async def _require_private(message: Message) -> bool:
 async def cmd_kyc(
     message: Message, db: Database, purchaser: CommbitzPurchaser, state: FSMContext
 ) -> None:
+    if not get_settings().features.kyc:
+        await message.answer("证件补交功能未开放，如有需要请联系管理员")
+        return
     order_id = _parse_order_arg(message.text)
     order = await _owned_order_or_reply(db, message, order_id)
     if order is None:
