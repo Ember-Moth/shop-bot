@@ -31,7 +31,7 @@ async def create_order(
     days: int | None = None,
 ) -> Order:
     """创建订单：金额含按日套餐天数（上游计价公式 unitPrice × days，PDF 6.1），
-    并锁定 SKU/业务类型快照，之后商品目录变更不影响本次采购。"""
+    并锁定 SKU/业务类型/套餐快照，之后商品目录变更不影响本次采购与交付核验。"""
     days = days or 1
     order = await db.create_order(
         user_id=user_id,
@@ -44,6 +44,7 @@ async def create_order(
         days=days if days > 1 else None,
         sku=product.sku,
         request_type=product.request_type,
+        plan_id=product.upstream_plan_id,
     )
     logger.info(
         "order created",

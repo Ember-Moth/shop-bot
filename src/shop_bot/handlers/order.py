@@ -90,7 +90,8 @@ async def cb_start_order(callback: CallbackQuery, state: FSMContext, db: Databas
         await callback.answer("商品不存在或已下架", show_alert=True)
         return
     await state.set_state(OrderFlow.quantity)
-    await state.update_data(product_id=product.id)
+    # 重置上一单可能残留的上下文（天数/ICCID/号码），防止切换商品后报价与订单不一致
+    await state.update_data(product_id=product.id, quantity=None, iccid=None, msisdn=None, days=None)
     msg = callback.message
     if msg is None or isinstance(msg, InaccessibleMessage):
         await callback.answer()

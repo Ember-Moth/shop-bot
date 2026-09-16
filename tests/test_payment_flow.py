@@ -5,13 +5,16 @@ from types import SimpleNamespace
 
 import pytest
 from aiogram import Dispatcher
-from aiogram.types import Message
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.types import CallbackQuery, Message
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from shop_bot import build_dispatcher
-from shop_bot.db import Database
+from shop_bot.db import Database, FSMStorage
 from shop_bot.handlers.admin import cmd_paid
+from shop_bot.handlers.order import cb_start_order
 from shop_bot.handlers.start import cmd_query
 from shop_bot.models import OrderStatus, Product, PurchaseState
 from shop_bot.services import orders
@@ -280,6 +283,32 @@ async def test_webhook_checks_secret_before_dispatch(*, bot, monkeypatch):
 async def test_missing_or_invalid_webhook_secret_cannot_start(*, bot, secret):
     with pytest.raises(ValueError, match=r"webhook\.secret_token"):
         register_telegram_routes(web.Application(), Dispatcher(), bot, "/webhook", secret)
+
+
+async def test_switching_product_resets_stale_order_context(db, pending, bot):
+    """P1-a：切换商品时清空上一单残留的天数/号码，防止报价与订单金额不一致。"""
+    context = FSMContext(
+        storage=FSMStorage(db), key=StorageKey(bot_id=1, chat_id=42, user_id=42)
+    )
+    await context.set_state("OrderFlow:quantity")
+    await context.set_data({
+        "product_id": pending.product_id, "quantity": 2, "days": 30, "msisdn": "+8613800138000",
+    })
+    callback = CallbackQuery.model_validate(
+        {
+            "id": "9",
+            "from_user": {"id": 42, "is_bot": False, "first_name": "Audit"},
+            "chat_instance": "test",
+            "data": f"o:{pending.product_id}",
+            "message": {"message_id": 5, "date": 0, "chat": {"id": 42, "type": "private"}, "text": "cat"},
+        },
+        context={"bot": bot},
+    )
+    await cb_start_order(callback, context, db)
+    data = await context.get_data()
+    assert data["days"] is None and data["msisdn"] is None and data["quantity"] is None
+    assert data["product_id"] == pending.product_id
+    assert await context.get_state() == "OrderFlow:quantity"
 
 
 async def test_dispatcher_serializes_duplicate_order_confirmation(db, pending, bot):

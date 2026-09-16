@@ -180,17 +180,24 @@ class DemoPurchaser:
     async def fulfill(self, db: Database, order_id: int) -> Order | None:
         async with db.order_operation(order_id):
             order = await db.get_order(order_id)
-            if order is None or order.status != OrderStatus.PAID:
+            if order is None or order.status == OrderStatus.DELIVERED:
+                # 已交付：补齐采购终态后返回（幂等收敛）
+                purchase = await db.get_purchase_by_order(order_id)
+                if purchase is not None and purchase.state != PurchaseState.FULFILLED:
+                    await db.transition_purchase(purchase.id, PurchaseState.FULFILLED, last_error=None)
+                return order
+            if order.status != OrderStatus.PAID:
                 return order
             purchase = await self.ensure_purchase(db, order)
-            await db.transition_purchase(purchase.id, PurchaseState.FULFILLED)
-            final = await db.transition_order(
+            final = await db.finalize_delivery(
                 order_id,
-                OrderStatus.DELIVERED,
-                from_status=OrderStatus.PAID,
+                purchase.id,
+                from_purchase_state=PurchaseState.READY,
                 upstream_ref=f"STUB-{order_id:06d}",
                 payload=f"[stub goods for order #{order_id}]",
             )
+            if final is None:
+                return await db.get_order(order_id)
             logger.info("order delivered (demo)", extra={"order_id": order_id})
             return final
 
@@ -244,7 +251,15 @@ class CommbitzPurchaser:
 
     async def _fulfill_locked(self, db: Database, order_id: int) -> Order | None:
         order = await db.get_order(order_id)
-        if order is None or order.status != OrderStatus.PAID:
+        if order is None:
+            return None
+        if order.status == OrderStatus.DELIVERED:
+            # 历史中断窗口残留（订单已交付、采购未落终态）：幂等收敛，不影响已发内容
+            purchase = await db.get_purchase_by_order(order_id)
+            if purchase is not None and purchase.state != PurchaseState.FULFILLED:
+                await db.transition_purchase(purchase.id, PurchaseState.FULFILLED, last_error=None)
+            return order
+        if order.status != OrderStatus.PAID:
             return order
         purchase = await db.get_purchase_by_order(order_id)
         if purchase is None:
@@ -296,8 +311,12 @@ class CommbitzPurchaser:
                 notes=f"shop-order:{order.id}",
             )
         except CommbitzError as exc:
-            if "kycdocuments is mandatory" in str(exc).lower():
-                # 账户级强制 KYC：转等待证件；买家 /kyc 补交后重新建单（审计 P1-6）
+            # 仅 HTTP 400 且明确要求证件时才转等待证件（审计 P1-3：500/未知错误
+            # 携带相同消息时不得允许重购，必须保持 submission_unknown）
+            if (
+                exc.status_code == 400
+                and "kycdocuments is mandatory" in str(exc).lower()
+            ):
                 logger.warning("purchase requires kyc documents before creation", extra={"order_id": order.id})
                 await db.transition_purchase(
                     purchase.id, PurchaseState.AWAITING_KYC, from_state=PurchaseState.SUBMITTING,
@@ -392,15 +411,14 @@ class CommbitzPurchaser:
             )
             return
         assert payload is not None
-        # 先落订单（delivered 会置通知待发），再落采购终态；中断后两边都能从恢复循环收敛
-        await db.transition_order(
+        # 同一事务内完成订单交付与采购终态，中断后可由恢复循环收敛（审计 P2）
+        await db.finalize_delivery(
             order.id,
-            OrderStatus.DELIVERED,
-            from_status=OrderStatus.PAID,
+            purchase.id,
+            from_purchase_state=purchase.state,
             upstream_ref=purchase.upstream_request_id,
             payload=payload,
         )
-        await db.transition_purchase(purchase.id, PurchaseState.FULFILLED, from_state=purchase.state)
         logger.info("order delivered", extra={"order_id": order.id, "upstream_ref": purchase.upstream_request_id})
 
     async def _track_kyc(self, db: Database, purchase: Purchase, details: dict[str, Any]) -> None:
@@ -480,14 +498,13 @@ class CommbitzPurchaser:
             return False, "该订单没有采购记录"
         if purchase.state != PurchaseState.AWAITING_DISPATCH:
             return False, f"采购状态为 {purchase.state.value}，只有 awaiting_dispatch 需要确认发货"
-        await db.transition_order(
+        await db.finalize_delivery(
             order_id,
-            OrderStatus.DELIVERED,
-            from_status=OrderStatus.PAID,
+            purchase.id,
+            from_purchase_state=PurchaseState.AWAITING_DISPATCH,
             upstream_ref=purchase.upstream_request_id,
             payload="实体 SIM 已由管理员确认发出；物流信息请联系客服跟进。",
         )
-        await db.transition_purchase(purchase.id, PurchaseState.FULFILLED, from_state=PurchaseState.AWAITING_DISPATCH)
         await db.add_order_note(order_id, "admin confirmed physical sim dispatch")
         return True, f"订单 #{order_id} 已确认发货并通知买家"
 
@@ -530,13 +547,10 @@ class CommbitzPurchaser:
             details = await self.client.get_order_details(upstream_request_id)
         except CommbitzError as exc:
             return False, f"上游查询失败：{exc}"
-        # 套餐核验：订单快照 SKU 对应商品的上游套餐 ID
+        # 套餐核验：使用下单时的套餐/SKU 快照，而非可能已被修改的当前商品
         order = await db.get_order(order_id)
-        plan_id = None
-        if order is not None:
-            product = await db.get_product(order.product_id)
-            plan_id = product.upstream_plan_id if product else None
-        mismatches = _verify_details(purchase, details, plan_id)
+        assert order is not None  # 前置状态检查已确认采购存在，订单必然存在
+        mismatches = _verify_details(purchase, details, order)
         if mismatches:
             return False, "上游订单与本店订单不匹配：" + "；".join(mismatches)
         updated = await db.transition_purchase(
@@ -551,15 +565,29 @@ class CommbitzPurchaser:
         return True, f"订单 #{order_id} 已绑定上游单 {upstream_request_id}，等待交付"
 
 
-def _verify_details(purchase: Purchase, details: dict[str, Any], plan_id: str | None = None) -> list[str]:
-    """人工绑定前的归属核验：业务类型、数量、套餐（审计 P1-4）。"""
+def _verify_details(purchase: Purchase, details: dict[str, Any], order: Order) -> list[str]:
+    """人工绑定前的归属核验（审计 P1-4）：业务类型、数量、套餐/SKU 交叉核对。
+
+    核对依据用下单时的套餐快照（input_plan_id），不用可能已被修改的当前商品；
+    上游响应缺少任何套餐标识且无法交叉核对时，拒绝绑定而不是放行。
+    """
     mismatches: list[str] = []
     expected_type = purchase.request_type
     if details.get("requestType") and str(details["requestType"]).lower() != expected_type.lower():
         mismatches.append(f"业务类型 {details['requestType']} != {expected_type}")
     if details.get("quantity") is not None and int(details["quantity"]) != purchase.quantity:
         mismatches.append(f"数量 {details['quantity']} != {purchase.quantity}")
+
+    expected_plan = order.input_plan_id
     upstream_plan = details.get("planId")
-    if plan_id and upstream_plan and str(upstream_plan) != str(plan_id):
-        mismatches.append(f"套餐 {upstream_plan} != {plan_id}")
+    expected_sku = order.input_sku
+    upstream_sku = details.get("sku") or ((details.get("plan") or {}).get("sku"))
+    if expected_plan:
+        if not upstream_plan or str(upstream_plan) != str(expected_plan):
+            mismatches.append(f"套餐 {upstream_plan or '缺失'} != {expected_plan}")
+    elif upstream_sku and expected_sku and str(upstream_sku) != str(expected_sku):
+        mismatches.append(f"SKU {upstream_sku} != {expected_sku}")
+    elif not upstream_plan and not upstream_sku:
+        # 上游响应没有套餐/SKU 标识，且本地无套餐快照：无法核对归属，拒绝绑定
+        mismatches.append("上游响应缺少套餐/SKU 标识，无法核对归属")
     return mismatches

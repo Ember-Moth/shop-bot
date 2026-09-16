@@ -95,6 +95,14 @@ async def cmd_kyc(
         return
     await state.set_state(KycFlow.waiting_documents)
     await state.update_data(order_id=order.id, pending_files=[])
+    if purchase.upstream_request_id is None:
+        # 账户级强制 KYC：尚未生成上游订单，只能携带链接证件重建（暂不支持文件直传）
+        await message.answer(
+            f"订单 #{order.id} 需要先登记证件才能向上游下单。\n"
+            "请发送 1–3 个证件图片的 HTTPS 链接（每行一个，将按顺序作为"
+            "护照正面/护照背面/签证正面提交）。\n发送 /cancel 取消。"
+        )
+        return
     await message.answer(
         f"请直接发送订单 #{order.id} 的证件材料（照片或 PDF 文件，1–3 份，"
         "将按顺序作为护照正面/护照背面/签证正面提交）。\n"

@@ -41,11 +41,10 @@ async def notify_owner(db: Database, bot: Bot, order_id: int, *, resend: bool = 
 
 
 async def recover_once(db: Database, purchaser: Purchaser, bot: Bot | None) -> None:
-    """恢复扫描：推进 paid 订单的采购状态机，补发未送达的通知。bot=None 时跳过通知。"""
+    """恢复扫描：fulfill 幂等推进 paid 履约并收敛 delivered 订单的采购终态，补发未送达通知。"""
     for order in await db.list_recovery_orders():
         try:
-            if order.status == OrderStatus.PAID:
-                await purchaser.fulfill(db, order.id)
+            await purchaser.fulfill(db, order.id)
             if bot is not None:
                 await notify_owner(db, bot, order.id)
         except Exception as exc:

@@ -65,6 +65,7 @@ class Order:
     input_days: int | None = None  # 按日套餐天数
     input_sku: str | None = None  # 下单时锁定的上游 SKU（防止商品后续变更影响采购）
     input_request_type: str | None = None  # 下单时锁定的业务类型
+    input_plan_id: str | None = None  # 下单时锁定的上游套餐 ID（交付/绑定核验依据）
 
     @property
     def amount_text(self) -> str:

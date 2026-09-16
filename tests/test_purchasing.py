@@ -1,6 +1,8 @@
 """Commbitz 采购状态机测试：提交一次、已知 ID 只查询、未知转人工、并发与恢复。"""
 
 import asyncio
+import logging
+import sqlite3
 import time
 
 import httpx
@@ -551,3 +553,118 @@ async def test_kyc_submit_before_creation_rejects_files(*, db, user, commbitz_pu
         db, order.id, files=[("passportFront", "pf.jpg", b"x")]
     )
     assert not ok and "HTTPS 链接" in detail
+
+
+# ---- 第二轮审计修复回归（7e5f8d5 审计报告）----
+
+
+async def test_bind_uses_order_plan_snapshot_and_refuses_unverifiable(
+    *, db, user, commbitz_purchaser, httpx_mock
+):
+    """P1-b：绑定用下单时套餐快照；商品被改后旧订单仍按原套餐核验；
+    上游响应无套餐/SKU 标识时拒绝绑定而不是放行。"""
+    product = Product(1, "US 1GB", "", 4999, "CNY", sku="US-1",
+                      upstream_plan_id="id-US-1", request_type="esim")
+    await db.seed_products([product])
+    order = await orders.create_order(db, user.id, product, 1)
+    await orders.mark_paid(db, commbitz_purchaser, order.id)
+    httpx_mock.add_response(status_code=503)
+    await commbitz_purchaser.fulfill(db, order.id)  # 提交结果不明
+    # 下单后篡改商品套餐
+    async with db.transaction() as conn:
+        await conn.execute("UPDATE products SET upstream_plan_id = 'NEW-PLAN' WHERE id = 1")
+
+    # 上游响应无 planId 也无 SKU → 订单有套餐快照，缺失即不匹配
+    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
+        "_id": "up-x", "status": "Success", "requestType": "esim", "quantity": 1, "esims": []}}})
+    ok, detail = await commbitz_purchaser.bind_unknown_purchase(db, order.id, "up-x")
+    assert not ok and "套餐 缺失 != id-US-1" in detail
+
+    # planId 与下单快照一致（而非当前商品）→ 通过
+    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
+        "_id": "up-x", "status": "Success", "requestType": "esim", "quantity": 1,
+        "planId": "id-US-1",
+        "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}]}}})
+    ok, detail = await commbitz_purchaser.bind_unknown_purchase(db, order.id, "up-x")
+    assert ok, detail
+    purchase = await db.get_purchase_by_order(order.id)
+    assert purchase is not None and purchase.upstream_request_id == "up-x"
+
+
+async def test_server_error_with_kyc_message_stays_unknown_never_repurchases(
+    *, db, esim_order, commbitz_purchaser, httpx_mock
+):
+    """P1-c：500 + kycDocuments 文案属于结果不明，必须保持 submission_unknown。"""
+    await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
+    httpx_mock.add_response(status_code=500, json={"statusCode": 500, "message":
+        "kycDocuments is mandatory for this distributor when creating activation or eSIM order"})
+    await commbitz_purchaser.fulfill(db, esim_order.id)
+    purchase = await db.get_purchase_by_order(esim_order.id)
+    assert purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN
+    # 恢复不得再次发起创建
+    await commbitz_purchaser.fulfill(db, esim_order.id)
+    paths = [r.url.path for r in httpx_mock.get_requests()]
+    assert paths.count("/distributor-api/v1/request") == 1
+
+
+async def test_interrupt_between_order_and_purchase_finalizes_on_recovery(
+    *, db, esim_order, commbitz_purchaser, httpx_mock, bot
+):
+    """P2-b：订单已 delivered 但采购仍 upstream_pending 时，恢复循环补齐采购终态。"""
+    await orders.mark_paid(db, commbitz_purchaser, esim_order.id, trade_no="T1")
+    httpx_mock.add_response(json=_create_ok())
+    _details_mock(httpx_mock)
+    await commbitz_purchaser.fulfill(db, esim_order.id)
+    assert (await db.get_order(esim_order.id)).status == OrderStatus.DELIVERED
+    # 模拟历史中断窗口：采购被回拨到 upstream_pending
+    purchase = await db.get_purchase_by_order(esim_order.id)
+    assert purchase is not None
+    await db.transition_purchase(
+        purchase.id, PurchaseState.UPSTREAM_PENDING,
+        from_state=PurchaseState.FULFILLED, upstream_request_id=None,
+    )
+    await recover_once(db, commbitz_purchaser, bot)
+    purchase = await db.get_purchase_by_order(esim_order.id)
+    assert purchase is not None and purchase.state == PurchaseState.FULFILLED
+    final = await db.get_order(esim_order.id)
+    assert final is not None and final.payload
+    assert await notify_owner(db, bot, esim_order.id)
+
+
+async def test_migration_survives_duplicate_upstream_ids(tmp_path, caplog):
+    """P2-c：旧库存在重复上游单时跳过唯一索引并告警，不阻断启动。"""
+    path = str(tmp_path / "dup.db")
+    with sqlite3.connect(path) as conn:
+        conn.executescript("""
+            CREATE TABLE orders (
+                id INTEGER PRIMARY KEY, user_id INTEGER, product_id INTEGER, quantity INTEGER,
+                amount_cents INTEGER, currency TEXT, status TEXT NOT NULL DEFAULT 'pending_payment',
+                upstream_ref TEXT, trade_no TEXT, payload TEXT,
+                notified_at TEXT, notification_pending INTEGER NOT NULL DEFAULT 0,
+                input_iccid TEXT, input_msisdn TEXT, input_days INTEGER,
+                input_sku TEXT, input_request_type TEXT, input_plan_id TEXT,
+                created_at TEXT, updated_at TEXT);
+            INSERT INTO orders VALUES (1, 1, 1, 1, 999, 'CNY', 'paid', NULL, 'T1', NULL,
+                NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, '', '');
+            INSERT INTO orders VALUES (2, 1, 1, 1, 999, 'CNY', 'paid', NULL, 'T2', NULL,
+                NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, '', '');
+            CREATE TABLE purchases (
+                id INTEGER PRIMARY KEY, order_id INTEGER, state TEXT, request_type TEXT,
+                sku TEXT, quantity INTEGER, upstream_request_id TEXT, upstream_order_no TEXT,
+                attempts INTEGER DEFAULT 0, last_error TEXT, kyc_documents TEXT,
+                created_at TEXT, updated_at TEXT);
+            INSERT INTO purchases VALUES (1, 1, 'submission_unknown', 'esim', 'S', 1,
+                'shared-id', NULL, 1, NULL, NULL, '', '');
+            INSERT INTO purchases VALUES (2, 2, 'submission_unknown', 'esim', 'S', 1,
+                'shared-id', NULL, 1, NULL, NULL, '', '');
+        """)
+    with caplog.at_level(logging.ERROR):
+        db = Database(path)
+        await db.connect()
+    try:
+        assert any("duplicate upstream request ids" in r.message for r in caplog.records)
+        # 无唯一索引：重复记录保留，交由管理员人工处理
+        row = await db._one("SELECT COUNT(*) AS c FROM purchases WHERE upstream_request_id = 'shared-id'")
+        assert row is not None and row["c"] == 2
+    finally:
+        await db.close()

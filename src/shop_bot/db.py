@@ -10,7 +10,10 @@ from weakref import WeakValueDictionary
 import aiosqlite
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
 
+from .logging_config import get_logger
 from .models import Order, OrderStatus, Product, Purchase, PurchaseState, User
+
+logger = get_logger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -49,6 +52,7 @@ CREATE TABLE IF NOT EXISTS orders (
     input_days INTEGER,
     input_sku TEXT,
     input_request_type TEXT,
+    input_plan_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -126,7 +130,7 @@ class Database:
         if "notification_pending" not in columns:
             # 旧版没有通知结果证据。历史已发货订单只允许主动补发，避免升级时群发旧货品。
             await conn.execute("ALTER TABLE orders ADD COLUMN notification_pending INTEGER NOT NULL DEFAULT 0")
-        for column in ("input_iccid", "input_msisdn", "input_sku", "input_request_type"):
+        for column in ("input_iccid", "input_msisdn", "input_sku", "input_request_type", "input_plan_id"):
             if column not in columns:
                 await conn.execute(f"ALTER TABLE orders ADD COLUMN {column} TEXT")
         if "input_days" not in columns:
@@ -167,11 +171,25 @@ class Database:
             purchase_columns = {row["name"] for row in await cur.fetchall()}
         if "kyc_documents" not in purchase_columns:
             await conn.execute("ALTER TABLE purchases ADD COLUMN kyc_documents TEXT")
-        # 上游请求 ID 全局唯一：一份货品只能归属一个本店订单（防重复交付）
-        await conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_purchases_upstream"
-            " ON purchases(upstream_request_id) WHERE upstream_request_id IS NOT NULL"
-        )
+        # 上游请求 ID 全局唯一：一份货品只能归属一个本店订单（防重复交付）。
+        # 旧版本允许重复绑定：存在冲突时跳过索引并告警，由管理员人工核对后
+        # 手动清空多余记录的 upstream_request_id（不能擅自删除订单关联）。
+        async with conn.execute(
+            """SELECT upstream_request_id FROM purchases WHERE upstream_request_id IS NOT NULL
+            GROUP BY upstream_request_id HAVING COUNT(*) > 1"""
+        ) as cur:
+            duplicates = [row["upstream_request_id"] for row in await cur.fetchall()]
+        if duplicates:
+            logger.error(
+                "duplicate upstream request ids found in purchases, unique index skipped; "
+                "resolve manually by clearing upstream_request_id on the wrong orders: %s",
+                duplicates,
+            )
+        else:
+            await conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_purchases_upstream"
+                " ON purchases(upstream_request_id) WHERE upstream_request_id IS NOT NULL"
+            )
 
     async def close(self) -> None:
         async with self._lock:
@@ -356,6 +374,54 @@ class Database:
         assert updated is not None
         return _row_to_purchase(updated)
 
+    async def finalize_delivery(
+        self,
+        order_id: int,
+        purchase_id: int,
+        *,
+        from_purchase_state: PurchaseState,
+        upstream_ref: str | None,
+        payload: str | None,
+    ) -> Order | None:
+        """同一事务内交付订单并落采购终态（审计 P2：消除两阶段提交中断窗口）。
+
+        幂等：订单已是 delivered（上次中断只完成订单侧）时仅补齐采购终态。
+        """
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                return None
+            if row["status"] == "delivered":
+                # 中断恢复：订单侧已完成，补齐采购终态
+                await conn.execute(
+                    """UPDATE purchases SET state = ?, updated_at = datetime('now')
+                    WHERE id = ? AND state = ?""",
+                    (PurchaseState.FULFILLED, purchase_id, from_purchase_state),
+                )
+                return _row_to_order(row)
+            if row["status"] != "paid":
+                return None
+            async with conn.execute(
+                """UPDATE orders SET status = ?, upstream_ref = COALESCE(?, upstream_ref),
+                payload = COALESCE(?, payload), updated_at = datetime('now'),
+                notification_pending = 1
+                WHERE id = ? AND status = 'paid' RETURNING *""",
+                (OrderStatus.DELIVERED, upstream_ref, payload, order_id),
+            ) as cur:
+                updated = await cur.fetchone()
+            await conn.execute(
+                "INSERT INTO order_events (order_id, from_status, to_status) VALUES (?, ?, ?)",
+                (order_id, "paid", "delivered"),
+            )
+            await conn.execute(
+                """UPDATE purchases SET state = ?, updated_at = datetime('now')
+                WHERE id = ? AND state = ?""",
+                (PurchaseState.FULFILLED, purchase_id, from_purchase_state),
+            )
+        assert updated is not None
+        return _row_to_order(updated)
+
     async def add_order_note(self, order_id: int, note: str) -> None:
         """向 order_events 写一条人工操作审计记录（状态不变）。"""
         async with self.transaction() as conn:
@@ -381,17 +447,21 @@ class Database:
         days: int | None = None,
         sku: str | None = None,
         request_type: str | None = None,
+        plan_id: str | None = None,
     ) -> Order:
-        """创建订单并固定本次采购输入快照（SKU/业务类型/数量/天数/ICCID/号码）。
+        """创建订单并固定本次采购输入快照（SKU/业务类型/套餐/数量/天数/ICCID/号码）。
 
-        快照在下单时锁定，之后商品目录变更不影响已创建订单的采购。
+        快照在下单时锁定，之后商品目录变更不影响已创建订单的采购与交付核验。
         """
         async with self.transaction() as conn:
             async with conn.execute(
                 """INSERT INTO orders (user_id, product_id, quantity, amount_cents, currency,
-                input_iccid, input_msisdn, input_days, input_sku, input_request_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
-                (user_id, product_id, quantity, amount_cents, currency, iccid, msisdn, days, sku, request_type),
+                input_iccid, input_msisdn, input_days, input_sku, input_request_type, input_plan_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
+                (
+                    user_id, product_id, quantity, amount_cents, currency,
+                    iccid, msisdn, days, sku, request_type, plan_id,
+                ),
             ) as cur:
                 row = await cur.fetchone()
         assert row is not None
@@ -533,6 +603,7 @@ def _row_to_order(row: aiosqlite.Row) -> Order:
         input_days=row["input_days"],
         input_sku=row["input_sku"],
         input_request_type=row["input_request_type"],
+        input_plan_id=row["input_plan_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
