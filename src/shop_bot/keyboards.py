@@ -10,11 +10,14 @@ CB_PRODUCT_PREFIX = "p:"
 CB_ORDER_PREFIX = "o:"
 CB_CONFIRM_ORDER = "order:confirm"
 CB_CANCEL_ORDER = "order:cancel"
+CB_BALANCE_PAY = "bal:"
 
 # 主菜单文案（回复键盘与文本路由共用，改文案需同步 handlers/start.py）
 MENU_BUY = "🛒 购买商品"
 MENU_ORDERS = "📦 我的订单"
 MENU_HISTORY = "🧾 交易记录"
+MENU_TOPUP = "💰 充值余额"
+MENU_BALANCE = "💳 我的余额"
 MENU_USAGE = "📶 用量 / 有效期"
 MENU_KYC = "🪪 证件补交"
 MENU_HELP = "❓ 使用帮助"
@@ -43,6 +46,7 @@ def main_menu_reply(kyc_enabled: bool = True) -> ReplyKeyboardMarkup:
     """
     rows = [
         [KeyboardButton(text=MENU_BUY), KeyboardButton(text=MENU_ORDERS)],
+        [KeyboardButton(text=MENU_TOPUP), KeyboardButton(text=MENU_BALANCE)],
         [KeyboardButton(text=MENU_HISTORY), KeyboardButton(text=MENU_USAGE)],
     ]
     if kyc_enabled:
@@ -87,8 +91,14 @@ def confirm_order() -> InlineKeyboardMarkup:
     )
 
 
-def order_created(order_id: int, pay_url: str | None = None) -> InlineKeyboardMarkup:
+def order_created(
+    order_id: int, pay_url: str | None = None, allow_balance: bool = False
+) -> InlineKeyboardMarkup:
     rows = []
+    if allow_balance:
+        rows.append(
+            [InlineKeyboardButton(text="💰 余额支付", callback_data=f"{CB_BALANCE_PAY}{order_id}")]
+        )
     if pay_url:
         # Web App 按钮：在 Telegram 内嵌打开支付页面
         rows.append(

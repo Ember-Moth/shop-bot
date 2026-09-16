@@ -3,6 +3,8 @@
 履约由后台恢复循环驱动（services/purchasing.py），回调不做耗时的上游请求。
 """
 
+from decimal import Decimal
+
 from aiohttp import web
 
 from ..db import Database
@@ -28,9 +30,13 @@ async def epay_callback(request: web.Request) -> web.Response:
     payment = epay.parse_callback(params)
     if not payment.paid:
         return web.Response(text="success")
-    if not payment.order_no.isascii() or not payment.order_no.isdecimal() or len(payment.order_no) > 18:
+    order_no = payment.order_no
+    # 充值单使用 T<id> 前缀，与商品订单（纯数字）区分
+    if order_no[:1] == "T" and order_no[1:].isdecimal() and len(order_no) <= 19:
+        return await _handle_topup_callback(request, int(order_no[1:]), payment)
+    if not order_no.isascii() or not order_no.isdecimal() or len(order_no) > 18:
         return web.Response(text="fail", status=400)
-    order_id = int(payment.order_no)
+    order_id = int(order_no)
     order = await db.get_order(order_id)
     if order is None:
         return web.Response(text="fail", status=404)
@@ -44,6 +50,54 @@ async def epay_callback(request: web.Request) -> web.Response:
     except OrderError:
         return web.Response(text="fail", status=422)
     # 收款已持久化、采购任务已建立；重复成功回调幂等返回 success，不重复履约。
+    return web.Response(text="success")
+
+
+async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -> web.Response:
+    """充值单回调：金额/商户/交易号核验 → 到账入账（幂等）→ 通知买家。"""
+    db: Database = request.app["db"]
+    epay: EPayClient = request.app["epay"]
+    topup = await db.get_topup(topup_id)
+    if topup is None:
+        logger.warning("topup callback for unknown topup", extra={"order_id": topup_id})
+        return web.Response(text="fail", status=404)
+
+    # 核验强度与商品订单一致：金额精确匹配 + 商户一致 + 交易号有效
+    if payment.pid != epay.pid:
+        logger.warning("topup callback merchant mismatch", extra={"order_id": topup_id})
+        return web.Response(text="fail", status=422)
+    if not payment.trade_no.strip():
+        return web.Response(text="fail", status=400)
+    try:
+        amount_ok = Decimal(payment.money) * 100 == topup.amount_cents
+    except Exception:
+        amount_ok = False
+    if not amount_ok:
+        logger.warning("topup callback amount mismatch", extra={"order_id": topup_id})
+        return web.Response(text="fail", status=422)
+
+    # complete_topup 幂等：已到账不重复入账
+    credited = await db.complete_topup(topup.id, trade_no=payment.trade_no)
+    if credited is None:
+        return web.Response(text="fail", status=422)
+
+    buyer = await db.get_user(topup.user_id)
+    bot = request.app["bot"]
+    if buyer is not None and bot is not None:
+        try:
+            balance = await db.get_user(topup.user_id)
+            text = (
+                f"💰 充值到账 {topup.amount_cents / 100:.2f} CNY\n"
+                f"当前余额：{(balance.balance_cents if balance else 0) / 100:.2f} CNY"
+            )
+            await bot.send_message(buyer.telegram_id, text)
+        except Exception as exc:
+            logger.warning(
+                "topup notification failed", extra={"order_id": topup_id, "error": type(exc).__name__}
+            )
+    logger.info(
+        "topup credited", extra={"order_id": topup_id, "upstream_ref": payment.trade_no}
+    )
     return web.Response(text="success")
 
 

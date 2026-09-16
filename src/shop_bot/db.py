@@ -11,7 +11,17 @@ import aiosqlite
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
 
 from .logging_config import get_logger
-from .models import Order, OrderStatus, Product, Purchase, PurchaseState, User
+from .models import (
+    BalanceTransaction,
+    Order,
+    OrderStatus,
+    Product,
+    Purchase,
+    PurchaseState,
+    Topup,
+    TopupState,
+    User,
+)
 
 logger = get_logger(__name__)
 
@@ -20,8 +30,33 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER NOT NULL UNIQUE,
     username TEXT,
+    balance_cents INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS balance_topups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    amount_cents INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    trade_no TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS balance_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    amount_cents INTEGER NOT NULL,
+    balance_after INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    order_id INTEGER,
+    topup_id INTEGER,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_balance_tx_user ON balance_transactions(user_id, id);
 
 CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,6 +170,10 @@ class Database:
                 await conn.execute(f"ALTER TABLE orders ADD COLUMN {column} TEXT")
         if "input_days" not in columns:
             await conn.execute("ALTER TABLE orders ADD COLUMN input_days INTEGER")
+        async with conn.execute("PRAGMA table_info(users)") as cur:
+            user_columns = {row["name"] for row in await cur.fetchall()}
+        if "balance_cents" not in user_columns:
+            await conn.execute("ALTER TABLE users ADD COLUMN balance_cents INTEGER NOT NULL DEFAULT 0")
         async with conn.execute("PRAGMA table_info(products)") as cur:
             product_columns = {row["name"] for row in await cur.fetchall()}
         for column in ("sku", "upstream_plan_id", "request_type"):
@@ -572,6 +611,108 @@ class Database:
             return None, None
         return _row_to_purchase(updated), None
 
+    async def create_topup(self, user_id: int, amount_cents: int) -> Topup:
+        async with self.transaction() as conn:
+            async with conn.execute(
+                "INSERT INTO balance_topups (user_id, amount_cents) VALUES (?, ?) RETURNING *",
+                (user_id, amount_cents),
+            ) as cur:
+                row = await cur.fetchone()
+        assert row is not None
+        return _row_to_topup(row)
+
+    async def get_topup(self, topup_id: int) -> Topup | None:
+        row = await self._one("SELECT * FROM balance_topups WHERE id = ?", (topup_id,))
+        return _row_to_topup(row) if row else None
+
+    async def complete_topup(self, topup_id: int, trade_no: str) -> Topup | None:
+        """充值单到账：pending → paid 与余额入账同一事务，天然幂等。
+
+        已是 paid 时原样返回（不重复入账）；非 pending 非 paid 返回 None。
+        """
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT * FROM balance_topups WHERE id = ?", (topup_id,)) as cur:
+                topup = await cur.fetchone()
+            if topup is None:
+                return None
+            if topup["status"] == "paid":
+                return _row_to_topup(topup)
+            if topup["status"] != "pending":
+                return None
+            async with conn.execute(
+                """UPDATE balance_topups SET status = 'paid', trade_no = ?,
+                updated_at = datetime('now') WHERE id = ? AND status = 'pending' RETURNING *""",
+                (trade_no, topup_id),
+            ) as cur:
+                paid = await cur.fetchone()
+            assert paid is not None
+            async with conn.execute(
+                "UPDATE users SET balance_cents = balance_cents + ? WHERE id = ? RETURNING balance_cents",
+                (paid["amount_cents"], paid["user_id"]),
+            ) as cur:
+                bal_row = await cur.fetchone()
+            assert bal_row is not None  # UPDATE 已命中（上面刚插入的充值单用户必然存在）
+            balance_after = bal_row["balance_cents"]
+            await conn.execute(
+                """INSERT INTO balance_transactions
+                (user_id, amount_cents, balance_after, kind, topup_id, note)
+                VALUES (?, ?, ?, 'topup', ?, ?)""",
+                (paid["user_id"], paid["amount_cents"], balance_after, topup_id, trade_no),
+            )
+        return _row_to_topup(paid)
+
+    async def pay_order_with_balance(
+        self, order_id: int, user_id: int, amount_cents: int
+    ) -> tuple[Order | None, str | None]:
+        """余额支付订单：扣款 + 订单转 paid + 流水同一事务。
+
+        返回 (订单, None) 成功；(None, "insufficient") 余额不足；
+        (None, "order not payable") / (None, "order mismatch") 状态或归属不符。
+        """
+        async with self.transaction() as conn:
+            async with conn.execute(
+                "SELECT * FROM orders WHERE id = ? AND status = 'pending_payment'", (order_id,)
+            ) as cur:
+                order = await cur.fetchone()
+            if order is None:
+                return None, "order not payable"
+            if order["user_id"] != user_id or order["amount_cents"] != amount_cents:
+                return None, "order mismatch"
+            async with conn.execute(
+                """UPDATE users SET balance_cents = balance_cents - ?
+                WHERE id = ? AND balance_cents >= ? RETURNING balance_cents""",
+                (amount_cents, user_id, amount_cents),
+            ) as cur:
+                bal_row = await cur.fetchone()
+            if bal_row is None:
+                return None, "insufficient"
+            async with conn.execute(
+                """UPDATE orders SET status = 'paid', updated_at = datetime('now')
+                WHERE id = ? AND status = 'pending_payment' RETURNING *""",
+                (order_id,),
+            ) as cur:
+                paid = await cur.fetchone()
+            assert paid is not None  # BEGIN IMMEDIATE 串行化写者，状态不会再变
+            await conn.execute(
+                "INSERT INTO order_events (order_id, from_status, to_status, note)"
+                " VALUES (?, 'pending_payment', 'paid', 'balance payment')",
+                (order_id,),
+            )
+            await conn.execute(
+                """INSERT INTO balance_transactions
+                (user_id, amount_cents, balance_after, kind, order_id, note)
+                VALUES (?, ?, ?, 'purchase', ?, ?)""",
+                (user_id, -amount_cents, bal_row["balance_cents"], order_id, f"order #{order_id}"),
+            )
+        return _row_to_order(paid), None
+
+    async def list_balance_transactions(self, user_id: int, limit: int = 5) -> list[BalanceTransaction]:
+        rows = await self._all(
+            "SELECT * FROM balance_transactions WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        )
+        return [_row_to_balance_tx(r) for r in rows]
+
     async def add_order_note(self, order_id: int, note: str) -> None:
         """向 order_events 写一条人工操作审计记录（状态不变）。"""
         async with self.transaction() as conn:
@@ -718,6 +859,7 @@ def _row_to_user(row: aiosqlite.Row) -> User:
         id=row["id"],
         telegram_id=row["telegram_id"],
         username=row["username"],
+        balance_cents=row["balance_cents"],
         created_at=row["created_at"],
     )
 
@@ -751,6 +893,32 @@ def _row_to_purchase(row: aiosqlite.Row) -> Purchase:
         kyc_documents=row["kyc_documents"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _row_to_topup(row: aiosqlite.Row) -> Topup:
+    return Topup(
+        id=row["id"],
+        user_id=row["user_id"],
+        amount_cents=row["amount_cents"],
+        status=TopupState(row["status"]),
+        trade_no=row["trade_no"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_balance_tx(row: aiosqlite.Row) -> BalanceTransaction:
+    return BalanceTransaction(
+        id=row["id"],
+        user_id=row["user_id"],
+        amount_cents=row["amount_cents"],
+        balance_after=row["balance_after"],
+        kind=row["kind"],
+        order_id=row["order_id"],
+        topup_id=row["topup_id"],
+        note=row["note"],
+        created_at=row["created_at"],
     )
 
 

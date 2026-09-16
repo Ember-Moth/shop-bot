@@ -10,11 +10,13 @@ from .. import keyboards
 from ..config import get_settings
 from ..db import Database
 from ..keyboards import (
+    MENU_BALANCE,
     MENU_BUY,
     MENU_HELP,
     MENU_HISTORY,
     MENU_KYC,
     MENU_ORDERS,
+    MENU_TOPUP,
     MENU_USAGE,
     main_menu,
     main_menu_reply,
@@ -26,6 +28,7 @@ from ..services.epay import EPayClient, EPayError
 from ..services.fulfillment import notify_owner
 from ..services.orders import OrderError
 from ..services.purchasing import Purchaser
+from .balance import render_balance, start_topup
 
 router = Router()
 logger = get_logger(__name__)
@@ -167,10 +170,14 @@ def _menu_debounced(user_id: int, text: str) -> bool:
 
 
 @router.message(
-    F.text.in_({MENU_BUY, MENU_ORDERS, MENU_HISTORY, MENU_USAGE, MENU_KYC, MENU_HELP}),
+    F.text.in_(
+        {MENU_BUY, MENU_TOPUP, MENU_BALANCE, MENU_ORDERS, MENU_HISTORY, MENU_USAGE, MENU_KYC, MENU_HELP}
+    ),
     StateFilter(None),
 )
-async def menu_router(message: Message, db: Database) -> None:
+async def menu_router(
+    message: Message, db: Database, state: FSMContext, epay: EPayClient | None
+) -> None:
     """菜单按钮统一入口：防抖后分发到对应处理（仅空闲状态生效）。"""
     from_user = message.from_user
     assert from_user is not None
@@ -183,6 +190,10 @@ async def menu_router(message: Message, db: Database) -> None:
     elif text in (MENU_ORDERS, MENU_HISTORY):
         title = "📦 我的订单" if text == MENU_ORDERS else "🧾 交易记录"
         await _render_my_orders(message, db, title)
+    elif text == MENU_TOPUP:
+        await start_topup(message, db, epay, state)
+    elif text == MENU_BALANCE:
+        await render_balance(message, db)
     elif text == MENU_USAGE:
         await message.answer(
             "📶 用量 / 有效期查询\n\n请发送：/usage <订单号>\n（查询已交付 eSIM 的流量与有效期）"

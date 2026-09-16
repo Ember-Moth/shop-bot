@@ -78,6 +78,12 @@ class User:
     telegram_id: int
     username: str | None
     created_at: datetime
+    balance_cents: int = 0  # 钱包余额（分）；一律为非负整数
+
+
+class TopupState(StrEnum):
+    PENDING = "pending"  # 充值单已创建，等待支付
+    PAID = "paid"  # 已到账（幂等终点，只入账一次）
 
 
 @dataclass(slots=True)
@@ -95,3 +101,29 @@ class Purchase:
     kyc_documents: str | None  # 账户级强制 KYC：建单前暂存的买家证件（JSON：字段→HTTPS URL）
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(slots=True)
+class Topup:
+    id: int
+    user_id: int
+    amount_cents: int
+    status: TopupState
+    trade_no: str | None  # 支付网关交易号（到账时写入）
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True)
+class BalanceTransaction:
+    """钱包流水（只增不改的账本）：amount_cents 正为入账、负为出账。"""
+
+    id: int
+    user_id: int
+    amount_cents: int
+    balance_after: int
+    kind: str  # topup / purchase / adjust
+    order_id: int | None
+    topup_id: int | None
+    note: str | None
+    created_at: datetime

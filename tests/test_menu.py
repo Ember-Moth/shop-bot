@@ -41,16 +41,25 @@ def test_reply_keyboard_layout_with_kyc_enabled():
     kb = main_menu_reply(kyc_enabled=True)
     assert kb.resize_keyboard is True
     assert kb.input_field_placeholder == "选择功能或…"
-    assert len(kb.keyboard) == 3 and all(len(row) == 2 for row in kb.keyboard)
+    assert len(kb.keyboard) == 4 and all(len(row) == 2 for row in kb.keyboard)
     texts = [button.text for row in kb.keyboard for button in row]
-    assert texts == [MENU_BUY, MENU_ORDERS, MENU_HISTORY, MENU_USAGE, MENU_KYC, MENU_HELP]
+    assert texts == [
+        MENU_BUY, MENU_ORDERS,
+        "💰 充值余额", "💳 我的余额",
+        MENU_HISTORY, MENU_USAGE,
+        MENU_KYC, MENU_HELP,
+    ]
 
 
 def test_reply_keyboard_layout_hides_kyc_when_disabled():
     kb = main_menu_reply(kyc_enabled=False)
     texts = [button.text for row in kb.keyboard for button in row]
     assert MENU_KYC not in texts
-    assert texts == [MENU_BUY, MENU_ORDERS, MENU_HISTORY, MENU_USAGE, MENU_HELP]
+    assert texts == [
+        MENU_BUY, MENU_ORDERS,
+        "💰 充值余额", "💳 我的余额",
+        MENU_HISTORY, MENU_USAGE, MENU_HELP,
+    ]
 
 
 def test_kyc_disabled_feature_flag():
@@ -92,7 +101,7 @@ async def test_menu_router_debounces_repeated_taps(db, user, bot):
     product = Product(1, "美国 1GB", "", 999, "CNY")
     await db.seed_products([product])
     for _ in range(5):
-        await start.menu_router(menu_message(bot, MENU_BUY), db)
+        await start.menu_router(menu_message(bot, MENU_BUY), db, None, None)
     catalog_msgs = [m.text for m in bot.session.sent if m.text and "商品目录" in m.text]
     assert len(catalog_msgs) == 1, "防抖后连点只应产生一条目录"
 
@@ -102,14 +111,14 @@ async def test_menu_router_dispatches_each_entry(db, user, bot):
     start._menu_last_seen.clear()
     product = Product(1, "美国 1GB", "", 999, "CNY")
     await db.seed_products([product])
-    await start.menu_router(menu_message(bot, MENU_BUY), db)
+    await start.menu_router(menu_message(bot, MENU_BUY), db, None, None)
     # 手动清除防抖时间戳，模拟 3 秒后
     start._menu_last_seen.clear()
-    await start.menu_router(menu_message(bot, MENU_ORDERS), db)
+    await start.menu_router(menu_message(bot, MENU_ORDERS), db, None, None)
     start._menu_last_seen.clear()
-    await start.menu_router(menu_message(bot, MENU_USAGE), db)
+    await start.menu_router(menu_message(bot, MENU_USAGE), db, None, None)
     start._menu_last_seen.clear()
-    await start.menu_router(menu_message(bot, MENU_HELP), db)
+    await start.menu_router(menu_message(bot, MENU_HELP), db, None, None)
     texts = [m.text or "" for m in bot.session.sent]
     assert any("商品目录" in t for t in texts)
     assert any("我的订单" in t for t in texts)
@@ -132,11 +141,11 @@ async def test_cmd_start_clears_fsm_and_sets_keyboards(db, bot):
 async def test_menu_router_buy_and_orders(db, user, bot):
     start._menu_last_seen.clear()
     await db.seed_products([Product(1, "美国 1GB", "", 999, "CNY")])
-    await start.menu_router(menu_message(bot, MENU_BUY), db)
+    await start.menu_router(menu_message(bot, MENU_BUY), db, None, None)
     assert any("商品目录" in (m.text or "") for m in bot.session.sent)
 
     start._menu_last_seen.clear()
-    await start.menu_router(menu_message(bot, MENU_ORDERS), db)
+    await start.menu_router(menu_message(bot, MENU_ORDERS), db, None, None)
     assert any("你还没有订单" in (m.text or "") for m in bot.session.sent)
 
     product2 = Product(2, "美国 1GB", "", 999, "CNY")
@@ -144,7 +153,7 @@ async def test_menu_router_buy_and_orders(db, user, bot):
     order = await db.create_order(user.id, product2.id, 1, 999, "CNY")
     await db.transition_order(order.id, OrderStatus.DELIVERED)
     start._menu_last_seen.clear()
-    await start.menu_router(menu_message(bot, MENU_ORDERS), db)
+    await start.menu_router(menu_message(bot, MENU_ORDERS), db, None, None)
     texts = [m.text or "" for m in bot.session.sent]
     assert any(f"#{order.id}" in t and "delivered" in t for t in texts)
 
@@ -156,7 +165,7 @@ async def test_menu_kyc_refused_when_disabled(db, bot, monkeypatch):
     """开关关闭：点「🪪 证件补交」按钮得到未开放提示，而非引导提交。"""
     start._menu_last_seen.clear()
     monkeypatch.setattr(start, "get_settings", lambda: Settings(features={"kyc": False}))
-    await start.menu_router(menu_message(bot, MENU_KYC), db)
+    await start.menu_router(menu_message(bot, MENU_KYC), db, None, None)
     texts = [m.text or "" for m in bot.session.sent]
     assert any("未开放" in t for t in texts)
     assert not any("/kyc" in t for t in texts)  # 不再引导使用被禁用的命令
@@ -165,7 +174,7 @@ async def test_menu_kyc_refused_when_disabled(db, bot, monkeypatch):
 async def test_menu_kyc_guides_when_enabled(db, bot, monkeypatch):
     start._menu_last_seen.clear()
     monkeypatch.setattr(start, "get_settings", lambda: Settings(features={"kyc": True}))
-    await start.menu_router(menu_message(bot, MENU_KYC), db)
+    await start.menu_router(menu_message(bot, MENU_KYC), db, None, None)
     texts = [m.text or "" for m in bot.session.sent]
     assert any("/kyc" in t for t in texts)
 
@@ -174,7 +183,7 @@ async def test_menu_help_omits_kyc_line_when_disabled(db, bot, monkeypatch):
     start._menu_last_seen.clear()
     monkeypatch.setattr(start, "get_settings", lambda: Settings(features={"kyc": False}))
     start._menu_last_seen.clear()
-    await start.menu_router(menu_message(bot, MENU_HELP), db)
+    await start.menu_router(menu_message(bot, MENU_HELP), db, None, None)
     texts = [m.text or "" for m in bot.session.sent]
     assert all("/kyc" not in t for t in texts)
 

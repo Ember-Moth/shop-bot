@@ -96,6 +96,11 @@ class EPayClient:
             logging.getLogger(name).setLevel(logging.WARNING)
         self._http = httpx.AsyncClient(timeout=5.0)
 
+    @property
+    def pid(self) -> str:
+        """商户 ID，供回调/查询核验使用。"""
+        return self._config.pid
+
     async def close(self) -> None:
         await self._http.aclose()
 

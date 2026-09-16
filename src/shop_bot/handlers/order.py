@@ -1,4 +1,4 @@
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InaccessibleMessage, Message
@@ -7,9 +7,11 @@ from .. import keyboards
 from ..config import get_settings
 from ..db import Database
 from ..keyboards import escape_markdown
-from ..models import Product
+from ..models import OrderStatus, Product
 from ..services import orders
 from ..services.epay import EPayClient, EPayOrder
+from ..services.fulfillment import notify_owner
+from ..services.purchasing import Purchaser
 
 router = Router()
 
@@ -194,6 +196,7 @@ async def cb_confirm(
         return
 
     settings = get_settings()
+    allow_balance = user.balance_cents >= order.amount_cents and order.currency == "CNY"
 
     if epay is not None:
         # 生成 EPay 支付链接，Web App 按钮直接打开收银台
@@ -215,7 +218,7 @@ async def cb_confirm(
             f"✅ 下单成功！\n\n订单号：`{order.id}`\n金额：{order.amount_text}\n\n"
             "点击下方按钮在 Telegram 内完成支付：",
             parse_mode="Markdown",
-            reply_markup=keyboards.order_created(order.id, pay_url),
+            reply_markup=keyboards.order_created(order.id, pay_url, allow_balance=allow_balance),
         )
     else:
         await msg.edit_text(
@@ -224,6 +227,48 @@ async def cb_confirm(
             parse_mode="Markdown",
         )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith(keyboards.CB_BALANCE_PAY))
+async def cb_pay_with_balance(
+    callback: CallbackQuery, db: Database, purchaser: Purchaser, bot: Bot
+) -> None:
+    """余额支付：扣款与订单转 paid 同一事务，随后走统一履约链路。"""
+    data = callback.data or ""
+    if not data.removeprefix(keyboards.CB_BALANCE_PAY).isdecimal():
+        await callback.answer("参数无效")
+        return
+    order_id = int(data.removeprefix(keyboards.CB_BALANCE_PAY))
+    from_user = callback.from_user
+    assert from_user is not None
+    user = await db.get_user_by_telegram_id(from_user.id)
+    if user is None:
+        await callback.answer("请先发 /start 再操作", show_alert=True)
+        return
+    async with db.order_operation(order_id):
+        order = await db.get_order(order_id)
+        if order is None or order.user_id != user.id:
+            await callback.answer("订单不存在", show_alert=True)
+            return
+        if order.status != OrderStatus.PENDING_PAYMENT:
+            await callback.answer("订单当前状态不可支付", show_alert=True)
+            return
+    # pay_order_with_balance 本身是原子的；fulfill 内部会自行持有订单锁，
+    # 这里不能先持有——否则 fulfill 重入同一把非重入锁会死锁。
+    paid, err = await db.pay_order_with_balance(order_id, user.id, order.amount_cents)
+    if err == "insufficient":
+        await callback.answer("余额不足，请选择在线支付或先充值", show_alert=True)
+        return
+    if err is not None or paid is None:
+        await callback.answer("支付失败，请稍后再试", show_alert=True)
+        return
+    await purchaser.ensure_purchase(db, paid)
+    final = await purchaser.fulfill(db, order_id)
+    if final is None or final.status != OrderStatus.DELIVERED:
+        await callback.answer("✅ 已用余额支付，系统正在履约", show_alert=True)
+        return
+    await notify_owner(db, bot, order_id)
+    await callback.answer("✅ 支付成功，货品已私信发送", show_alert=True)
 
 
 @router.callback_query(F.data == keyboards.CB_CANCEL_ORDER)
