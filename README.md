@@ -64,21 +64,7 @@ epay:
 
 ## 管理员命令（需在 `admin_ids` 中）
 
-- `/products` — 查看所有商品（含下架商品）的编号、价格、币种、SKU
-- `/currency <商品ID> <币种>` — 设置商品计价币种；新商品默认 USD
-- `/price <商品ID> <售价> [币种]` — 定价；省略币种保留原币种，不自动上架
-- `/publish <商品ID>` / `/unpublish <商品ID>` — 上架/下架，已有订单保留快照
-- `/status` — 查看就绪状态、最近备份和告警收件人数
-- `/ackalert <标识>` — 确认已处理告警，持续异常会再次触发
-- `/orders [状态]` — 查看订单
-- `/paid <订单号>` — 手动确认付款并推进履约（不重置已付款订单）
-- `/cancel <订单号>` — 取消待支付订单
-- `/purchases` — 列出需要人工处理的采购（结果不明/被拒）
-- `/retry <订单号>` — 重试创建前被拒的采购（仅自动退款前的历史数据；已退款关闭的订单不可重试）
-- `/bind <订单号> <上游请求ID>` — 核对并绑定已有上游订单；旧交付资料失效，重新查询核验后再发货
-- `/dispatch <订单号>` — 确认实体 SIM 已发出
-- `/refund <订单号>` — 人工退款到买家同币种余额并关单；仅未提交、明确拒绝或 submission_unknown 已人工核对的采购可退。上游仍在提交、处理、KYC 或待发货时拒绝直接退款；明确失败由系统自动退
-- `/adjust <用户ID> <币种> <±金额> [备注]` — 指定币种调账，例如 `/adjust 3 USD +10 退款补账`；旧格式省略币种时仍为 CNY，不允许扣成负余额
+商品管理（`/products` `/price` `/publish` `/unpublish` `/currency`）、订单收款（`/orders` `/query` `/paid` `/cancel` `/refund` `/dispatch`）、采购人工核对（`/purchases` `/bind` `/retry`）、钱包调账（`/adjust`）与运维（`/status` `/ackalert`）的完整用法，见 [管理员手册](docs/admin-guide.md)。
 
 ## 日志
 
@@ -127,6 +113,7 @@ src/shop_bot/
 - [部署指南](docs/deployment.md) — 配置项、systemd、Nginx 示例
 - [部署教程](docs/deploy-tutorial.md) — 从零到上线的完整步骤
 - [商品与运维](docs/operations.md) — 定价上下架、健康检查、管理员告警和自动备份/恢复
+- [管理员手册](docs/admin-guide.md) — 管理员命令的日常操作说明
 - [功能进度](docs/progress.md) — 完成度、TODO、接入指南
 - [转售开发方案](docs/reseller-bot-development.md) — 上游采购状态机与分阶段验收
 
