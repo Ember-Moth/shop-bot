@@ -92,6 +92,18 @@ def _format_money(amount: float) -> str:
     return f"{amount:.2f}"
 
 
+def parse_money_cents(text: str) -> int | None:
+    """把 EPay 回传的金额字符串解析为分；非法返回 None。
+
+    EPay 实际会回传最多 4 位小数（如 20.0000），故接受 1–4 位并用
+    quantize 四舍五入到分，避免二进制浮点导致的 *100 误差。
+    """
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,4})?", text):
+        return None
+    cents = (Decimal(text) * 100).quantize(Decimal("1"))
+    return int(cents)
+
+
 class EPayClient:
     def __init__(self, config: EPayConfig) -> None:
         config.currency = normalize_currency(config.currency)
@@ -168,9 +180,10 @@ class EPayClient:
             raise EPayError("payment transaction does not match")
         if order.currency != self.currency or (payment.currency and payment.currency != order.currency):
             raise EPayError("payment currency does not match gateway")
-        if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", payment.money):
+        money_cents = parse_money_cents(payment.money)
+        if money_cents is None:
             raise EPayError("payment currency or amount is invalid")
-        if Decimal(payment.money) <= 0 or Decimal(payment.money) * 100 != order.amount_cents:
+        if money_cents <= 0 or money_cents != order.amount_cents:
             raise EPayError("payment amount does not match")
 
     def verify_callback(self, params: dict[str, str]) -> bool:

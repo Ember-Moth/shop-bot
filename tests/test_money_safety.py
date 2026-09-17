@@ -19,7 +19,15 @@ from shop_bot.handlers.order import cb_confirm, cb_pay_online, cb_pay_with_balan
 from shop_bot.models import OrderStatus, Product, PurchaseState
 from shop_bot.services import orders
 from shop_bot.services.commbitz_api import CommbitzError
-from shop_bot.services.epay import EPayClient, EPayConfig, EPayError, EPayOrder, EPayQueryResult, _create_sign
+from shop_bot.services.epay import (
+    EPayClient,
+    EPayConfig,
+    EPayError,
+    EPayOrder,
+    EPayQueryResult,
+    _create_sign,
+    parse_money_cents,
+)
 from shop_bot.services.fulfillment import recover_once
 from shop_bot.services.purchasing import CommbitzPurchaser
 from shop_bot.web.payment import register_epay_routes
@@ -421,3 +429,43 @@ def test_currency_defaults_and_legacy_epay_config():
     assert Settings(epay=EPaySettings(currency="usd")).epay.currency == "USD"
     with pytest.raises(ValueError, match="unsupported currency"):
         Settings(epay=EPaySettings(currency="FAKE"))
+
+
+async def test_topup_callback_accepts_epay_four_decimal_money(db, bot, purchaser):
+    """真实生产案例：EPay 回调 money=20.0000（4 位小数）必须入账而非 422。"""
+    user, _order = await new_order(db)
+    epay = EPayClient(EPayConfig("1000", "audit-secret", "https://pay.example.com", currency="USD"))
+    app = web.Application()
+    app.update({"db": db, "bot": bot, "purchaser": purchaser, "epay": epay})
+    register_epay_routes(app, "/callback")
+    topup = await db.create_topup(user.id, 2000, "USD")
+    try:
+        async with TestClient(TestServer(app)) as client:
+            params = {
+                "pid": "1000",
+                "out_trade_no": f"T{topup.id}",
+                "trade_no": "TRADE-4DP",
+                "money": "20.0000",
+                "trade_status": "TRADE_SUCCESS",
+                "currency": "USD",
+            }
+            params["sign"] = _create_sign(params, "audit-secret")
+            response = await client.get("/callback", params=params)
+            assert response.status == 200
+        assert await db.get_balance(user.id, "USD") == 2000
+        assert (await db.get_topup(topup.id)).status.value == "paid"
+    finally:
+        await epay.close()
+
+
+def test_parse_money_cents_accepts_epay_four_decimal_places():
+    """EPay 实际回传最多 4 位小数（20.0000）；此前只收 2 位会误杀真实回调。"""
+    assert parse_money_cents("20.0000") == 2000
+    assert parse_money_cents("100") == 10000
+    assert parse_money_cents("50.50") == 5050
+    assert parse_money_cents("0.01") == 1
+    # 非法：非数字、5 位小数、负数、空
+    assert parse_money_cents("abc") is None
+    assert parse_money_cents("1.00001") is None
+    assert parse_money_cents("-5") is None
+    assert parse_money_cents("") is None

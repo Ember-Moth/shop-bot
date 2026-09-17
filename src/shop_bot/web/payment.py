@@ -3,14 +3,11 @@
 履约由后台恢复循环驱动（services/purchasing.py），回调不做耗时的上游请求。
 """
 
-import re
-from decimal import Decimal
-
 from aiohttp import web
 
 from ..db import Database
 from ..logging_config import get_logger
-from ..services.epay import EPayClient, EPayError
+from ..services.epay import EPayClient, EPayError, parse_money_cents
 from ..services.orders import OrderError, confirm_epay_payment
 from ..services.purchasing import Purchaser
 
@@ -70,10 +67,11 @@ async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -
         return web.Response(text="fail", status=422)
     if not payment.trade_no.strip() or payment.trade_no != payment.trade_no.strip():
         return web.Response(text="fail", status=400)
-    if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", payment.money):
+    money_cents = parse_money_cents(payment.money)
+    if money_cents is None:
         logger.warning("topup callback amount format invalid", extra={"order_id": topup_id})
         return web.Response(text="fail", status=422)
-    if Decimal(payment.money) * 100 != topup.amount_cents:
+    if money_cents != topup.amount_cents:
         logger.warning("topup callback amount mismatch", extra={"order_id": topup_id})
         return web.Response(text="fail", status=422)
 

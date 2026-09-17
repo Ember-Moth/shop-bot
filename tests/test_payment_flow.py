@@ -110,7 +110,15 @@ async def test_callback_confirms_payment_and_worker_delivers_once(*, http_client
 
 
 @pytest.mark.parametrize(
-    "changes", [{"money": "0.01"}, {"pid": "9999"}, {"trade_no": ""}, {"money": "NaN"}, {"money": "9.990"}]
+    "changes",
+    [
+        {"money": "0.01"},  # 金额不符
+        {"pid": "9999"},  # 商户不符
+        {"trade_no": ""},  # 缺交易号
+        {"money": "NaN"},  # 非数字
+        {"money": "9.99001"},  # 超过 4 位小数
+        {"money": "9.98"},  # 金额数值不符（分位对不上）
+    ],
 )
 async def test_callback_rejects_inconsistent_payment(*, http_client, db, pending, purchaser, changes):
     response = await http_client.post("/payment/callback", data=callback_params(pending, **changes))
