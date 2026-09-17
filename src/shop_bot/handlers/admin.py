@@ -4,13 +4,16 @@ from aiogram.types import Message
 
 from ..config import get_settings
 from ..db import Database
+from ..logging_config import get_logger
 from ..models import OrderStatus, PurchaseState
 from ..services import orders
+from ..services.balance import format_cents, parse_signed_amount
 from ..services.fulfillment import notify_owner
 from ..services.orders import OrderError
 from ..services.purchasing import CommbitzPurchaser, Purchaser
 
 router = Router()
+logger = get_logger(__name__)
 router.message.filter(F.from_user.id.in_(get_settings().admin_ids))
 router.callback_query.filter(F.from_user.id.in_(get_settings().admin_ids))
 
@@ -155,6 +158,44 @@ async def cmd_cancel(message: Message, db: Database) -> None:
         await message.answer(f"❌ {exc}")
         return
     await message.answer(f"🚫 订单 #{order.id} 已取消")
+
+
+@router.message(Command("adjust"))
+async def cmd_adjust(message: Message, db: Database, bot: Bot) -> None:
+    """人工调账：余额支付订单履约失败退款等场景；扣成负余额拒绝，流水可溯。"""
+    text = message.text
+    assert text is not None  # 只有文本消息会进入命令处理器
+    parts = text.split(maxsplit=3)
+    if len(parts) < 3 or not parts[1].isdecimal():
+        await message.answer("用法：/adjust <用户ID> <±金额元> [备注]，例如 /adjust 3 -10.00 订单#42退款")
+        return
+    delta_cents = parse_signed_amount(parts[2])
+    if delta_cents is None or delta_cents == 0:
+        await message.answer("金额无效：需非零、最多两位小数，例如 +5 或 -10.50")
+        return
+    user_id = int(parts[1])
+    note = parts[3].strip() if len(parts) == 4 else ""
+    new_balance = await db.adjust_balance(user_id, delta_cents, note or "admin adjust")
+    if new_balance is None:
+        await message.answer("❌ 调账失败：用户不存在，或负向调整超出当前余额")
+        return
+    await message.answer(
+        f"✅ 已调账 {delta_cents / 100:+.2f} 元，用户 #{user_id} 当前余额 {format_cents(new_balance)} 元"
+    )
+    user = await db.get_user(user_id)
+    if user is not None:
+        try:
+            await bot.send_message(
+                user.telegram_id,
+                f"💳 余额调整 {delta_cents / 100:+.2f} 元"
+                + (f"（{note}）" if note else "")
+                + f"\n当前余额：{format_cents(new_balance)} 元",
+            )
+        except Exception as exc:
+            # 私信失败不影响已落库的调账事实
+            logger.warning(
+                "adjust notification failed", extra={"user_id": user_id, "error": type(exc).__name__}
+            )
 
 
 def _parse_order_id(message: Message) -> int | None:

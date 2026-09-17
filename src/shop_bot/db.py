@@ -686,10 +686,12 @@ class Database:
                 bal_row = await cur.fetchone()
             if bal_row is None:
                 return None, "insufficient"
+            # 占位 trade_no 阻断重复收款：余额支付后若 EPay 收银台又付款，
+            # 回调会因 trade_no 一致性校验（validate_payment/transition_order）被拒并告警。
             async with conn.execute(
-                """UPDATE orders SET status = 'paid', updated_at = datetime('now')
+                """UPDATE orders SET status = 'paid', trade_no = ?, updated_at = datetime('now')
                 WHERE id = ? AND status = 'pending_payment' RETURNING *""",
-                (order_id,),
+                (f"BAL{order_id}", order_id),
             ) as cur:
                 paid = await cur.fetchone()
             assert paid is not None  # BEGIN IMMEDIATE 串行化写者，状态不会再变
@@ -705,6 +707,28 @@ class Database:
                 (user_id, -amount_cents, bal_row["balance_cents"], order_id, f"order #{order_id}"),
             )
         return _row_to_order(paid), None
+
+    async def adjust_balance(self, user_id: int, delta_cents: int, note: str) -> int | None:
+        """管理员调账：余额修正与 adjust 流水同一事务，不允许扣成负余额。
+
+        返回调账后的余额（分）；用户不存在或负向调整超额返回 None。
+        """
+        async with self.transaction() as conn:
+            async with conn.execute(
+                """UPDATE users SET balance_cents = balance_cents + ?
+                WHERE id = ? AND balance_cents + ? >= 0 RETURNING balance_cents""",
+                (delta_cents, user_id, delta_cents),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                return None
+            await conn.execute(
+                """INSERT INTO balance_transactions
+                (user_id, amount_cents, balance_after, kind, note)
+                VALUES (?, ?, ?, 'adjust', ?)""",
+                (user_id, delta_cents, row["balance_cents"], note),
+            )
+        return row["balance_cents"]
 
     async def list_balance_transactions(self, user_id: int, limit: int = 5) -> list[BalanceTransaction]:
         rows = await self._all(

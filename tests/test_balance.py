@@ -8,10 +8,11 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from shop_bot.db import Database
-from shop_bot.handlers.balance import render_balance
+from shop_bot.handlers.admin import cmd_adjust
+from shop_bot.handlers.balance import render_balance, topup_amount_non_text
 from shop_bot.models import Product
 from shop_bot.services import orders
-from shop_bot.services.balance import format_cents, parse_topup_amount
+from shop_bot.services.balance import format_cents, parse_signed_amount, parse_topup_amount
 from shop_bot.services.epay import _create_sign
 from shop_bot.services.fulfillment import recover_once
 from shop_bot.web.payment import register_epay_routes
@@ -265,3 +266,124 @@ async def test_migration_adds_user_balance_column(tmp_path):
         assert user.balance_cents == 0
     finally:
         await db.close()
+
+
+# ---- 审计修复回归（2026-09-16）----
+
+
+async def test_topup_amount_non_text_gets_hint(db, bot):
+    """P1：等待充值金额时发来图片等非文本消息 → 提示重发，而不是 handler 崩溃。"""
+    msg = Message.model_validate(
+        {"message_id": 1, "date": 0, "chat": {"id": 42, "type": "private"},
+         "from": {"id": 42, "is_bot": False, "first_name": "T"},
+         "photo": [{"file_id": "p", "file_unique_id": "u", "width": 1, "height": 1}]},
+        context={"bot": bot},
+    )
+    assert msg.text is None
+    await topup_amount_non_text(msg)
+    texts = [m.text or "" for m in bot.session.sent]
+    assert any("文本形式" in t for t in texts)
+
+
+async def test_render_balance_unknown_user_prompts_start(db, bot):
+    """未注册用户点「我的余额」：引导 /start 注册（原文案误写为"没有下过单"）。"""
+    await render_balance(menu_message_of(bot), db)
+    texts = [m.text or "" for m in bot.session.sent]
+    assert any("/start" in t and "注册" in t for t in texts)
+
+
+async def test_epay_callback_rejected_after_balance_payment(*, http_client, db, user, epay):
+    """P2：余额支付后占位 trade_no 阻断 EPay 收银台重复收款（双重支付窗口）。"""
+    product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
+    await db.seed_products([product])
+    order = await orders.create_order(db, user.id, product, 1)
+    topup = await db.create_topup(user.id, 1000_00)
+    await db.complete_topup(topup.id, trade_no="TX")
+    paid, err = await db.pay_order_with_balance(order.id, user.id, order.amount_cents)
+    assert err is None and paid is not None
+    assert paid.trade_no == f"BAL{order.id}"  # 占位 trade_no 已写入
+    # 用户随后在早已打开的 EPay 收银台完成付款：回调必须被拒，订单与余额不受影响
+    params = {
+        "pid": "1000",
+        "name": "p",
+        "out_trade_no": str(order.id),
+        "trade_no": f"EP{order.id}",
+        "money": "1.00",
+        "trade_status": "TRADE_SUCCESS",
+    }
+    params["sign"] = _create_sign(params, "audit-secret")
+    response = await http_client.post("/payment/callback", data=params)
+    assert response.status == 422
+    order_after = await db.get_order(order.id)
+    assert order_after is not None and order_after.trade_no == f"BAL{order.id}"
+    user_after = await db.get_user(user.id)
+    assert user_after is not None and user_after.balance_cents == 1000_00 - order.amount_cents
+
+
+async def test_topup_callback_rejects_whitespace_trade_no(*, http_client, db, user, epay):
+    """充值回调交易号首尾空白拒绝（与商品订单 validate_payment 同款规则）。"""
+    topup = await db.create_topup(user.id, 1000_00)
+    params = _topup_callback_params(topup.id, amount="1000.00", trade_no=" TT1 ")
+    response = await http_client.post("/payment/callback", data=params)
+    assert response.status == 400
+    topup_after = await db.get_topup(topup.id)
+    assert topup_after is not None and topup_after.status.value == "pending"
+    user_after = await db.get_user(user.id)
+    assert user_after is not None and user_after.balance_cents == 0
+
+
+async def test_topup_callback_rejects_nonstandard_money_format(*, http_client, db, user, epay):
+    """充值回调金额格式非法（科学计数法，Decimal 可解析但格式不合法）拒绝。"""
+    topup = await db.create_topup(user.id, 100_00)
+    params = _topup_callback_params(topup.id, amount="1e2")  # 数值恰等于 100 元
+    response = await http_client.post("/payment/callback", data=params)
+    assert response.status == 422
+    user_after = await db.get_user(user.id)
+    assert user_after is not None and user_after.balance_cents == 0
+
+
+def test_parse_signed_amount():
+    assert parse_signed_amount("+5") == 500
+    assert parse_signed_amount("-10.50") == -1050
+    assert parse_signed_amount("0.01") == 1
+    assert parse_signed_amount("abc") is None
+    assert parse_signed_amount("") is None
+    assert parse_signed_amount("12345678") is None  # 整数部分超 7 位
+    assert parse_signed_amount("1.234") is None
+
+
+async def test_adjust_balance_credit_and_debit(db, user):
+    """调账：正负调整入账并各写一条 adjust 流水。"""
+    assert await db.adjust_balance(user.id, 500_00, "充值补单") == 500_00
+    assert await db.adjust_balance(user.id, -200_00, "订单退款") == 300_00
+    user_after = await db.get_user(user.id)
+    assert user_after is not None and user_after.balance_cents == 300_00
+    txs = await db.list_balance_transactions(user.id)
+    assert [t.kind for t in txs] == ["adjust", "adjust"]
+    assert txs[0].amount_cents == -200_00 and txs[0].note == "订单退款"
+    assert txs[0].balance_after == 300_00
+
+
+async def test_adjust_balance_rejects_overdraft_and_unknown_user(db, user):
+    """负向调账不允许扣成负余额；不存在的用户拒绝；拒绝时不写流水。"""
+    assert await db.adjust_balance(user.id, -1, "超额扣减") is None
+    assert await db.adjust_balance(9999, 100, "不存在") is None
+    user_after = await db.get_user(user.id)
+    assert user_after is not None and user_after.balance_cents == 0
+    assert await db.list_balance_transactions(user.id) == []
+
+
+async def test_cmd_adjust_replies_and_notifies_user(db, user, bot):
+    """/adjust 回复管理员确认，并私信用户余额变动（含备注）。"""
+    msg = Message.model_validate(
+        {"message_id": 1, "date": 0, "chat": {"id": 1, "type": "private"},
+         "from": {"id": 1, "is_bot": False, "first_name": "A"},
+         "text": f"/adjust {user.id} 5.50 测试调账"},
+        context={"bot": bot},
+    )
+    await cmd_adjust(msg, db, bot)
+    texts = [m.text or "" for m in bot.session.sent]
+    assert any("已调账 +5.50 元" in t for t in texts)  # 管理员确认
+    assert any("余额调整 +5.50 元" in t and "测试调账" in t for t in texts)  # 用户私信
+    user_after = await db.get_user(user.id)
+    assert user_after is not None and user_after.balance_cents == 550

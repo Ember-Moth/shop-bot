@@ -6,7 +6,7 @@ TopupFlow.amount 状态处理器注册在本模块 router 上。
 
 from __future__ import annotations
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
@@ -39,7 +39,7 @@ async def start_topup(
     )
 
 
-@router.message(TopupFlow.amount)
+@router.message(TopupFlow.amount, F.text)
 async def topup_amount_input(
     message: Message, db: Database, epay: EPayClient | None, state: FSMContext
 ) -> None:
@@ -47,7 +47,7 @@ async def topup_amount_input(
         await message.answer("支付渠道未配置，充值功能暂不可用，请联系管理员")
         return
     text = message.text
-    assert text is not None
+    assert text is not None  # F.text 过滤后必有文本
     if text.startswith("/"):
         await state.clear()
         await message.answer("已取消充值。")
@@ -87,12 +87,18 @@ async def topup_amount_input(
     )
 
 
+@router.message(TopupFlow.amount)
+async def topup_amount_non_text(message: Message) -> None:
+    """等待金额时收到图片/贴纸等非文本消息：提示而非让上一个 handler 的 assert 崩溃。"""
+    await message.answer("请回复文本形式的充值金额（元），或发 /start 取消。")
+
+
 async def render_balance(message: Message, db: Database) -> None:
     from_user = message.from_user
     assert from_user is not None
     user = await db.get_user_by_telegram_id(from_user.id)
     if user is None:
-        await message.answer("你还没有下过单")
+        await message.answer("请先发送 /start 完成注册")
         return
     lines = [f"当前余额：{format_cents(user.balance_cents)} CNY"]
     txs = await db.list_balance_transactions(user.id)

@@ -19,6 +19,19 @@ MIN_TOPUP_CENTS = 100  # 单笔最低 1 元
 MAX_TOPUP_CENTS = 10000_00  # 单笔最高 10000 元
 
 _AMOUNT_RE = re.compile(r"^\d{1,5}([.]\d{1,2})?$")
+# 调账金额：可带正负号，整数部分限 7 位（百万级）防手滑多敲零
+_SIGNED_AMOUNT_RE = re.compile(r"^[+-]?\d{1,7}([.]\d{1,2})?$")
+
+
+def parse_signed_amount(text: str) -> int | None:
+    """把管理员调账金额（元，可带正负号）解析为分；非法返回 None。"""
+    raw = text.strip().replace("元", "")
+    if not _SIGNED_AMOUNT_RE.fullmatch(raw):
+        return None
+    try:
+        return int((Decimal(raw) * 100).to_integral_value())
+    except InvalidOperation:
+        return None
 
 
 def parse_topup_amount(text: str) -> int | None:

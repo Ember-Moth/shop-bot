@@ -3,6 +3,7 @@
 履约由后台恢复循环驱动（services/purchasing.py），回调不做耗时的上游请求。
 """
 
+import re
 from decimal import Decimal
 
 from aiohttp import web
@@ -62,17 +63,17 @@ async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -
         logger.warning("topup callback for unknown topup", extra={"order_id": topup_id})
         return web.Response(text="fail", status=404)
 
-    # 核验强度与商品订单一致：金额精确匹配 + 商户一致 + 交易号有效
+    # 核验强度与商品订单一致（validate_payment 同款规则）：
+    # 商户一致 + 交易号无首尾空白 + 金额格式合法且数值精确匹配
     if payment.pid != epay.pid:
         logger.warning("topup callback merchant mismatch", extra={"order_id": topup_id})
         return web.Response(text="fail", status=422)
-    if not payment.trade_no.strip():
+    if not payment.trade_no.strip() or payment.trade_no != payment.trade_no.strip():
         return web.Response(text="fail", status=400)
-    try:
-        amount_ok = Decimal(payment.money) * 100 == topup.amount_cents
-    except Exception:
-        amount_ok = False
-    if not amount_ok:
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", payment.money):
+        logger.warning("topup callback amount format invalid", extra={"order_id": topup_id})
+        return web.Response(text="fail", status=422)
+    if Decimal(payment.money) * 100 != topup.amount_cents:
         logger.warning("topup callback amount mismatch", extra={"order_id": topup_id})
         return web.Response(text="fail", status=422)
 
@@ -85,10 +86,9 @@ async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -
     bot = request.app["bot"]
     if buyer is not None and bot is not None:
         try:
-            balance = await db.get_user(topup.user_id)
             text = (
                 f"💰 充值到账 {topup.amount_cents / 100:.2f} CNY\n"
-                f"当前余额：{(balance.balance_cents if balance else 0) / 100:.2f} CNY"
+                f"当前余额：{buyer.balance_cents / 100:.2f} CNY"
             )
             await bot.send_message(buyer.telegram_id, text)
         except Exception as exc:
