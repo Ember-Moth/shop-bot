@@ -7,9 +7,17 @@ from aiogram.types import Message
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from shop_bot.db import Database
+from shop_bot.db import Database, FSMStorage
 from shop_bot.handlers.admin import cmd_adjust
-from shop_bot.handlers.balance import render_balance, topup_amount_non_text
+from shop_bot.handlers.balance import (
+    TopupFlow,
+    cb_topup_cancel,
+    cb_topup_custom,
+    cb_topup_preset,
+    render_balance,
+    start_topup,
+    topup_amount_non_text,
+)
 from shop_bot.models import Product, Purchase
 from shop_bot.services import orders
 from shop_bot.services.balance import format_cents, parse_signed_amount, parse_topup_amount
@@ -493,3 +501,75 @@ async def test_recover_once_sends_refund_notification(db, user, bot):
     await recover_once(db, _RefundingPurchaser(), bot)
     texts = [m.text or "" for m in bot.session.sent]
     assert any("已退回余额" in t and f"#{order.id}" in t for t in texts)
+
+
+# ---- 充值档位键盘 ----
+
+from aiogram.fsm.context import FSMContext  # noqa: E402
+from aiogram.fsm.storage.base import StorageKey  # noqa: E402
+
+
+def _topup_state(db):
+    return FSMContext(storage=FSMStorage(db), key=StorageKey(bot_id=1, chat_id=42, user_id=42))
+
+
+def _topup_callback(bot, data):
+    return CallbackQuery.model_validate(
+        {
+            "id": "9",
+            "from_user": {"id": 42, "is_bot": False, "first_name": "T"},
+            "chat_instance": "test",
+            "data": data,
+            "message": {"message_id": 5, "date": 0, "chat": {"id": 42, "type": "private"}, "text": "topup"},
+        },
+        context={"bot": bot},
+    )
+
+
+async def test_start_topup_shows_balance_and_presets(db, user, bot, epay):
+    await start_topup(menu_message_of(bot), db, epay, _topup_state(db))
+    m = bot.session.sent[-1]
+    assert "当前余额" in m.text
+    datas = [b.callback_data for row in m.reply_markup.inline_keyboard for b in row]
+    assert datas == [
+        "topup:1000",
+        "topup:2000",
+        "topup:3000",
+        "topup:5000",
+        "topup:10000",
+        "topup:custom",
+        "topup:cancel",
+    ]
+
+
+async def test_cb_topup_preset_creates_invoice(db, user, bot, epay):
+    await cb_topup_preset(_topup_callback(bot, "topup:1000"), db, epay, _topup_state(db))
+    topups = await db._all("SELECT * FROM balance_topups")
+    assert len(topups) == 1 and topups[0]["amount_cents"] == 1000 and topups[0]["currency"] == "CNY"
+    edited = [m for m in bot.session.sent if m.__api_method__ == "editMessageText"]
+    assert edited and "充值单" in edited[-1].text
+    pay_button = edited[-1].reply_markup.inline_keyboard[0][0]
+    assert pay_button.web_app.url.startswith("https://pay.example.com/")
+
+
+async def test_cb_topup_preset_rejects_forged_amount(db, user, bot, epay):
+    # callback data 可被伪造：档位外的金额必须服务端拒绝
+    await cb_topup_preset(_topup_callback(bot, "topup:50"), db, epay, _topup_state(db))
+    assert await db._all("SELECT * FROM balance_topups") == []
+    answers = [m for m in bot.session.sent if m.__api_method__ == "answerCallbackQuery"]
+    assert answers and "范围" in answers[-1].text
+
+
+async def test_cb_topup_custom_enters_text_input(db, user, bot, epay):
+    context = _topup_state(db)
+    await cb_topup_custom(_topup_callback(bot, "topup:custom"), epay, context)
+    assert await context.get_state() == "TopupFlow:amount"
+    edited = [m for m in bot.session.sent if m.__api_method__ == "editMessageText"]
+    assert edited and "自定义充值金额" in edited[-1].text
+
+
+async def test_cb_topup_cancel_clears_state(db, bot):
+    context = _topup_state(db)
+    await context.set_state(TopupFlow.amount)
+    await cb_topup_cancel(_topup_callback(bot, "topup:cancel"), context)
+    assert await context.get_state() is None

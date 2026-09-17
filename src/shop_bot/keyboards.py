@@ -12,6 +12,11 @@ CB_CONFIRM_ORDER = "order:confirm"
 CB_CANCEL_ORDER = "order:cancel"
 CB_BALANCE_PAY = "bal:"
 CB_EPAY_PAY = "epay:"
+CB_TOPUP_PREFIX = "topup:"  # topup:<金额分> 预设档位
+CB_TOPUP_CUSTOM = "topup:custom"
+CB_TOPUP_CANCEL = "topup:cancel"
+
+TOPUP_PRESETS = (10, 20, 30, 50, 100)  # 预设充值档位（元），自定义金额走文本输入
 
 # 主菜单文案（回复键盘与文本路由共用，改文案需同步 handlers/start.py）
 MENU_BUY = "🛒 购买商品"
@@ -100,6 +105,24 @@ def order_created(
     elif allow_online:
         rows.append([InlineKeyboardButton(text="💳 在线支付", callback_data=f"{CB_EPAY_PAY}{order_id}")])
     rows.append([InlineKeyboardButton(text="📦 查看我的订单", callback_data="myorders")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def topup_amounts(currency: str) -> InlineKeyboardMarkup:
+    """充值档位键盘：预设金额三列排列，自定义金额走文本输入。"""
+    rows = []
+    row = []
+    for amount in TOPUP_PRESETS:
+        row.append(
+            InlineKeyboardButton(text=f"💵 {amount} {currency}", callback_data=f"{CB_TOPUP_PREFIX}{amount * 100}")
+        )
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="✏️ 自定义金额", callback_data=CB_TOPUP_CUSTOM)])
+    rows.append([InlineKeyboardButton(text="❌ 取消", callback_data=CB_TOPUP_CANCEL)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
