@@ -7,6 +7,7 @@ from aiohttp import ClientSession
 from aiohttp.test_utils import unused_port
 
 import shop_bot
+from shop_bot.commands import register_bot_commands
 from shop_bot.config import BackupSettings, Settings, UpstreamSettings, WebhookSettings
 from shop_bot.db import Database, FSMStorage
 
@@ -123,3 +124,13 @@ async def test_live_startup_has_no_demo_products_and_supervises_workers(
             await asyncio.gather(task, return_exceptions=True)
     with pytest.raises(RuntimeError, match="must be called first"):
         await database.ping()
+
+
+async def test_admin_menu_registration_failure_isolated(bot, caplog):
+    """单个管理员菜单注册失败（如尚未私聊 /start）不影响默认菜单和其他管理员。"""
+    bot.session.fail_commands_for.add(1)
+    settings = Settings(bot_token=bot.token, admin_ids=[1, 2])
+    await register_bot_commands(bot, settings)
+    menus = [m for m in bot.session.sent if m.__api_method__ == "setMyCommands"]
+    assert len(menus) == 3  # 默认 scope + 两个管理员各自尝试，互不影响
+    assert "chat not found" in caplog.text

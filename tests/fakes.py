@@ -1,4 +1,5 @@
 from aiogram.client.session.base import BaseSession
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import EditMessageText, SendMessage, SendPhoto
 from aiogram.types import Message, User
 
@@ -9,6 +10,7 @@ class FakeSession(BaseSession):
         self.sent = []
         self.fail_send = False
         self.fail_photo = False
+        self.fail_commands_for = set()  # 模拟 Telegram 拒绝为这些 chat scope 注册菜单
 
     async def close(self):
         pass
@@ -43,6 +45,10 @@ class FakeSession(BaseSession):
                     "photo": [{"file_id": "photo", "file_unique_id": "photo-id", "width": 512, "height": 512}],
                 }
             )
+        if method.__api_method__ == "setMyCommands":
+            scope = getattr(method, "scope", None)
+            if scope is not None and getattr(scope, "chat_id", None) in self.fail_commands_for:
+                raise TelegramBadRequest(method=method, message="chat not found")
         return True
 
     async def stream_content(self, *args, **kwargs):
