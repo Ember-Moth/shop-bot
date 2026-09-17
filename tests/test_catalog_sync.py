@@ -4,7 +4,7 @@ import aiosqlite
 import pytest
 
 from shop_bot import build_commbitz_client, build_purchaser
-from shop_bot.config import Settings
+from shop_bot.config import Settings, UpstreamSettings
 from shop_bot.db import Database
 from shop_bot.services.catalog_sync import sync_catalog
 from shop_bot.services.purchasing import CommbitzPurchaser, DemoPurchaser
@@ -106,7 +106,7 @@ async def test_legacy_products_table_migrates(tmp_path):
 
 
 def _settings(**upstream) -> Settings:
-    return Settings(upstream=upstream)
+    return Settings(upstream=UpstreamSettings(**upstream))
 
 
 def test_wiring_noop_without_provider():

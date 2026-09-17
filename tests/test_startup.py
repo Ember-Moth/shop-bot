@@ -7,7 +7,7 @@ from aiohttp import ClientSession
 from aiohttp.test_utils import unused_port
 
 import shop_bot
-from shop_bot.config import Settings
+from shop_bot.config import BackupSettings, Settings, UpstreamSettings, WebhookSettings
 from shop_bot.db import Database, FSMStorage
 
 
@@ -16,7 +16,7 @@ async def test_actual_startup_authentication_and_resource_cleanup(tmp_path, monk
     settings = Settings(
         bot_token=bot.token,
         database_path=str(tmp_path / "startup.db"),
-        webhook={"url": "https://bot.example.com", "port": unused_port(), "secret_token": "startup-secret"},
+        webhook=WebhookSettings(url="https://bot.example.com", port=unused_port(), secret_token="startup-secret"),
     )
     database = Database(settings.database_path)
     ready = asyncio.Event()
@@ -68,9 +68,9 @@ async def test_live_startup_has_no_demo_products_and_supervises_workers(
         bot_token=bot.token,
         admin_ids=[42],
         database_path=str(tmp_path / "live.db"),
-        webhook={"url": "https://bot.example.com", "port": unused_port(), "secret_token": "test-secret"},
-        upstream={"provider": "commbitz", "api_key": "fake", "secret_key": "fake"},
-        backup={"enabled": False},
+        webhook=WebhookSettings(url="https://bot.example.com", port=unused_port(), secret_token="test-secret"),
+        upstream=UpstreamSettings(provider="commbitz", api_key="fake", secret_key="fake"),
+        backup=BackupSettings(enabled=False),
     )
     database = Database(settings.database_path)
     ready = asyncio.Event()

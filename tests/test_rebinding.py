@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import sqlite3
+from typing import Any
 
 import pytest
 from aiogram.types import Message
@@ -41,7 +42,8 @@ def details(reference, label):
 class Gateway(FakeCommbitzGateway):
     def __init__(self):
         super().__init__()
-        self.responses = {
+        # 值可以是响应字典，也可以是模拟查询失败的异常
+        self.responses: dict[str, Any] = {
             OLD_REF: details(OLD_REF, "OLD-VERIFIED"),
             NEW_REF: details(NEW_REF, "NEW-VERIFIED"),
         }

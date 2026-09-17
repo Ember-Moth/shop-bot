@@ -19,6 +19,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.414",
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
     "pytest-httpx>=0.35",
@@ -74,6 +75,14 @@ ignore = [
 
 [tool.ty]
 # Type checking configuration; ty auto-discovers src/ layout.
+
+[tool.pyright]
+# pyright 为主要类型检查器（ty 仍为 alpha，作辅助）
+include = ["src", "tests"]
+pythonVersion = "3.14"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -10,7 +10,7 @@ from aiogram.fsm.storage.base import StorageKey
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from shop_bot.config import Settings
+from shop_bot.config import EPaySettings, Settings
 from shop_bot.db import Database, FSMStorage
 from shop_bot.handlers.admin import cmd_adjust, cmd_currency, cmd_refund
 from shop_bot.handlers.balance import start_topup, topup_amount_input
@@ -418,6 +418,6 @@ def test_currency_defaults_and_legacy_epay_config():
     assert Product(1, "p", "", 100).currency == "USD"
     # 未提供币种的旧配置保持原有网关行为；示例配置显式选择 USD。
     assert Settings().epay.currency == "CNY"
-    assert Settings(epay={"currency": "usd"}).epay.currency == "USD"
+    assert Settings(epay=EPaySettings(currency="usd")).epay.currency == "USD"
     with pytest.raises(ValueError, match="unsupported currency"):
-        Settings(epay={"currency": "FAKE"})
+        Settings(epay=EPaySettings(currency="FAKE"))

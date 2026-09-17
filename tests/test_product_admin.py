@@ -5,7 +5,7 @@ import pytest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 
-from shop_bot.config import Settings
+from shop_bot.config import Settings, UpstreamSettings
 from shop_bot.db import FSMStorage
 from shop_bot.handlers import admin
 from shop_bot.handlers.order import cb_confirm, product_quote
@@ -21,7 +21,7 @@ def test_price_rejects_invalid_amount(value):
 
 
 async def test_admin_price_publish_unpublish_and_audit(db, bot, monkeypatch):
-    monkeypatch.setattr(admin, "get_settings", lambda: Settings(upstream={"provider": "commbitz"}))
+    monkeypatch.setattr(admin, "get_settings", lambda: Settings(upstream=UpstreamSettings(provider="commbitz")))
     await db.upsert_product_from_upstream(
         sku="S", name="test", description="", upstream_plan_id="P", request_type="esim"
     )

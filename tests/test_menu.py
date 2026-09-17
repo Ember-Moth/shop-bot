@@ -6,7 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import Message
 
-from shop_bot.config import Settings
+from shop_bot.config import FeaturesSettings, Settings
 from shop_bot.db import FSMStorage
 from shop_bot.handlers import kyc as kyc_module
 from shop_bot.handlers import start
@@ -72,8 +72,8 @@ def test_reply_keyboard_layout_hides_kyc_when_disabled():
 
 def test_kyc_disabled_feature_flag():
     """features.kyc=False 时 Settings 正确读取。"""
-    assert Settings(features={"kyc": True}).features.kyc is True
-    assert Settings(features={"kyc": False}).features.kyc is False
+    assert Settings(features=FeaturesSettings(kyc=True)).features.kyc is True
+    assert Settings(features=FeaturesSettings(kyc=False)).features.kyc is False
     assert Settings().features.kyc is True  # 默认开放
 
 
@@ -170,7 +170,7 @@ async def test_menu_router_buy_and_orders(db, user, bot):
 async def test_menu_kyc_refused_when_disabled(db, bot, monkeypatch):
     """开关关闭：点「🪪 证件补交」按钮得到未开放提示，而非引导提交。"""
     start._menu_last_seen.clear()
-    monkeypatch.setattr(start, "get_settings", lambda: Settings(features={"kyc": False}))
+    monkeypatch.setattr(start, "get_settings", lambda: Settings(features=FeaturesSettings(kyc=False)))
     await start.menu_router(menu_message(bot, MENU_KYC), db, None, None)
     texts = [m.text or "" for m in bot.session.sent]
     assert any("未开放" in t for t in texts)
@@ -179,7 +179,7 @@ async def test_menu_kyc_refused_when_disabled(db, bot, monkeypatch):
 
 async def test_menu_kyc_guides_when_enabled(db, bot, monkeypatch):
     start._menu_last_seen.clear()
-    monkeypatch.setattr(start, "get_settings", lambda: Settings(features={"kyc": True}))
+    monkeypatch.setattr(start, "get_settings", lambda: Settings(features=FeaturesSettings(kyc=True)))
     await start.menu_router(menu_message(bot, MENU_KYC), db, None, None)
     texts = [m.text or "" for m in bot.session.sent]
     assert any("/kyc" in t for t in texts)
@@ -187,7 +187,7 @@ async def test_menu_kyc_guides_when_enabled(db, bot, monkeypatch):
 
 async def test_menu_help_omits_kyc_line_when_disabled(db, bot, monkeypatch):
     start._menu_last_seen.clear()
-    monkeypatch.setattr(start, "get_settings", lambda: Settings(features={"kyc": False}))
+    monkeypatch.setattr(start, "get_settings", lambda: Settings(features=FeaturesSettings(kyc=False)))
     start._menu_last_seen.clear()
     await start.menu_router(menu_message(bot, MENU_HELP), db, None, None)
     texts = [m.text or "" for m in bot.session.sent]
@@ -195,7 +195,7 @@ async def test_menu_help_omits_kyc_line_when_disabled(db, bot, monkeypatch):
 
 
 async def test_cmd_kyc_refused_when_disabled(db, bot, monkeypatch):
-    monkeypatch.setattr(kyc_module, "get_settings", lambda: Settings(features={"kyc": False}))
+    monkeypatch.setattr(kyc_module, "get_settings", lambda: Settings(features=FeaturesSettings(kyc=False)))
     await kyc_module.cmd_kyc(
         menu_message(bot, "/kyc 1"),
         db,

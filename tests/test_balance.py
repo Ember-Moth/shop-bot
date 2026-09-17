@@ -10,12 +10,12 @@ from aiohttp.test_utils import TestClient, TestServer
 from shop_bot.db import Database
 from shop_bot.handlers.admin import cmd_adjust
 from shop_bot.handlers.balance import render_balance, topup_amount_non_text
-from shop_bot.models import Product
+from shop_bot.models import Product, Purchase
 from shop_bot.services import orders
 from shop_bot.services.balance import format_cents, parse_signed_amount, parse_topup_amount
 from shop_bot.services.epay import _create_sign
 from shop_bot.services.fulfillment import recover_once
-from shop_bot.services.purchasing import PurchaseGateway
+from shop_bot.services.purchasing import Purchaser
 from shop_bot.web.payment import register_epay_routes
 
 
@@ -482,9 +482,9 @@ async def test_recover_once_sends_refund_notification(db, user, bot):
     order = await orders.create_order(db, user.id, product, 1)
     await db.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
 
-    class _RefundingPurchaser(PurchaseGateway):
-        async def ensure_purchase(self, db, order):
-            return None
+    class _RefundingPurchaser(Purchaser):
+        async def ensure_purchase(self, db, order) -> Purchase:
+            raise AssertionError("本测试只经过 fulfill，不应建立采购")
 
         async def fulfill(self, db, order_id):
             await db.refund_order_to_balance(order_id, "test")

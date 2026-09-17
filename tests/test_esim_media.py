@@ -37,7 +37,7 @@ def esim_details(label="A", count=1):
     }
 
 
-async def delivered_order(db, count=1):
+async def delivered_order(db, count=1) -> tuple[int, CommbitzPurchaser, FakeCommbitzGateway]:
     user = await db.upsert_user(42, "buyer")
     product = Product(1, "eSIM", "", 999, sku="SKU", request_type="esim", upstream_plan_id="plan")
     await db.seed_products([product])
@@ -46,7 +46,7 @@ async def delivered_order(db, count=1):
     purchaser = CommbitzPurchaser(gateway)
     await orders.mark_paid(db, purchaser, order.id, trade_no="paid")
     await purchaser.fulfill(db, order.id)
-    return order.id, purchaser
+    return order.id, purchaser, gateway
 
 
 def photos(bot):
@@ -54,7 +54,7 @@ def photos(bot):
 
 
 async def test_photo_contains_local_png_and_only_goes_to_owner(db, bot):
-    order_id, purchaser = await delivered_order(db, count=2)
+    order_id, purchaser, _gateway = await delivered_order(db, count=2)
     saved = await db.get_order(order_id)
     assert json.loads(saved.delivery_esims)[0]["lpa"] == esim_details()["esims"][0]["lpa"]
     assert await notify_owner(db, bot, order_id)
@@ -88,7 +88,7 @@ async def test_photo_failure_resumes_after_restart_without_resending_first(tmp_p
 
     monkeypatch.setattr(bot, "send_photo", send)
     try:
-        order_id, purchaser = await delivered_order(db, count=2)
+        order_id, purchaser, gateway = await delivered_order(db, count=2)
         assert not await notify_owner(db, bot, order_id)
         saved = await db.get_order(order_id)
         assert saved is not None and saved.notification_pending and saved.notification_cursor == 3
@@ -102,13 +102,13 @@ async def test_photo_failure_resumes_after_restart_without_resending_first(tmp_p
         assert [photo.photo.filename for photo in photos(bot)] == [f"esim-{order_id}-1.png", f"esim-{order_id}-2.png"]
         saved = await restored.get_order(order_id)
         assert saved is not None and not saved.notification_pending and saved.notified_at
-        assert purchaser.client.create_calls == 1
+        assert gateway.create_calls == 1
     finally:
         await restored.close()
 
 
 async def test_rate_limit_defers_photo_and_keeps_text_progress(db, bot, monkeypatch):
-    order_id, _ = await delivered_order(db)
+    order_id, _, _gateway = await delivered_order(db)
     now = [1000.0]
     monkeypatch.setattr(fulfillment, "time", SimpleNamespace(time=lambda: now[0]))
     original_send = bot.send_photo
@@ -135,23 +135,23 @@ async def test_rate_limit_defers_photo_and_keeps_text_progress(db, bot, monkeypa
 
 
 async def test_manual_query_resends_images_to_buyer_not_admin_chat(db, bot, monkeypatch):
-    order_id, purchaser = await delivered_order(db)
+    order_id, purchaser, gateway = await delivered_order(db)
     assert await notify_owner(db, bot, order_id)
     order = await db.get_order(order_id)
     monkeypatch.setattr("shop_bot.handlers.start.get_settings", lambda: SimpleNamespace(admin_ids=[700]))
     await cmd_query(query_message(bot, order, user_id=700, chat_id=-100), db, None, purchaser, bot)
     assert len(photos(bot)) == 2 and all(photo.chat_id == 42 for photo in photos(bot))
     assert photos(bot)[0].photo.data == photos(bot)[1].photo.data
-    assert purchaser.client.create_calls == 1
+    assert gateway.create_calls == 1
 
 
 async def test_rebinding_clears_media_progress_and_sends_new_qr_only(db, bot):
-    order_id, purchaser = await delivered_order(db)
+    order_id, purchaser, gateway = await delivered_order(db)
     bot.session.fail_photo = True
     assert not await notify_owner(db, bot, order_id)
     purchase = await db.get_purchase_by_order(order_id)
     await db.transition_purchase(purchase.id, PurchaseState.SUBMISSION_UNKNOWN)
-    purchaser.client.details = esim_details("NEW")
+    gateway.details = esim_details("NEW")
     ok, _ = await purchaser.bind_unknown_purchase(db, order_id, "new-reference")
     assert ok
     rebound = await db.get_order(order_id)
@@ -163,7 +163,7 @@ async def test_rebinding_clears_media_progress_and_sends_new_qr_only(db, bot):
     bot.session.fail_photo = False
     assert await notify_owner(db, bot, order_id)
     assert photos(bot)[-1].photo.data == qr_png(esim_details("NEW")["esims"][0]["lpa"])
-    assert purchaser.client.create_calls == 1
+    assert gateway.create_calls == 1
 
 
 async def test_legacy_text_esim_can_be_sent_as_photo(db, user, bot):

@@ -1,4 +1,5 @@
 from aiogram.client.session.base import BaseSession
+from aiogram.methods import EditMessageText, SendMessage, SendPhoto
 from aiogram.types import Message, User
 
 
@@ -19,6 +20,7 @@ class FakeSession(BaseSession):
         if method.__api_method__ in ("sendMessage", "editMessageText"):
             if self.fail_send:
                 raise RuntimeError("simulated Telegram unavailable")
+            assert isinstance(method, (SendMessage, EditMessageText)) and method.chat_id is not None
             chat_id = int(method.chat_id)
             return Message.model_validate(
                 {
@@ -31,6 +33,7 @@ class FakeSession(BaseSession):
         if method.__api_method__ == "sendPhoto":
             if self.fail_send or self.fail_photo:
                 raise RuntimeError("simulated Telegram image unavailable")
+            assert isinstance(method, SendPhoto)
             return Message.model_validate(
                 {
                     "message_id": 100,
