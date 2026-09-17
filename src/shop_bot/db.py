@@ -706,6 +706,7 @@ class Database:
         price_cents: int | None = None,
         currency: str | None = None,
         name: str | None = None,
+        description: str | None = None,
         active: bool | None = None,
         require_upstream: bool = False,
     ) -> Product | None:
@@ -720,14 +721,22 @@ class Database:
             if any(ord(c) < 0x20 or c == "\x7f" for c in name):
                 # 名称会进入买家可见的目录按钮与详情，换行等控制字符会破坏排版
                 raise ValueError("名称不能包含换行等控制字符")
+        if description is not None:
+            description = description.strip()
+            if len(description) > 500:
+                raise ValueError("描述最长 500 个字符")
+            if any(ord(c) < 0x20 or c == "\x7f" for c in description):
+                # 描述显示在目录正文与详情页，控制字符会破坏排版
+                raise ValueError("描述不能包含换行等控制字符")
         async with self.transaction() as conn:
             async with conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)) as cur:
                 row = await cur.fetchone()
             if row is None:
                 return None
-            before = {key: row[key] for key in ("name", "price_cents", "currency", "active")}
+            before = {key: row[key] for key in ("name", "description", "price_cents", "currency", "active")}
             after = {
                 "name": name if name is not None else row["name"],
+                "description": description if description is not None else row["description"],
                 "price_cents": price_cents if price_cents is not None else row["price_cents"],
                 "currency": currency if currency is not None else row["currency"],
                 "active": int(active) if active is not None else row["active"],
@@ -741,8 +750,16 @@ class Database:
                 ):
                     raise ValueError("真实商品缺少 SKU、上游套餐或明确业务类型，暂不能上架")
             async with conn.execute(
-                "UPDATE products SET name = ?, price_cents = ?, currency = ?, active = ? WHERE id = ? RETURNING *",
-                (after["name"], after["price_cents"], after["currency"], after["active"], product_id),
+                """UPDATE products SET name = ?, description = ?, price_cents = ?, currency = ?, active = ?
+                WHERE id = ? RETURNING *""",
+                (
+                    after["name"],
+                    after["description"],
+                    after["price_cents"],
+                    after["currency"],
+                    after["active"],
+                    product_id,
+                ),
             ) as cur:
                 updated = await cur.fetchone()
             if before != after:

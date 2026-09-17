@@ -107,6 +107,27 @@ async def cmd_rename(message: Message, db: Database) -> None:
     await message.answer(f"✅ 商品 #{product.id} 已更名为：{product.name}；目录同步不会覆盖人工名称")
 
 
+@router.message(Command("describe"))
+async def cmd_describe(message: Message, db: Database) -> None:
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) != 3 or not _valid_product_id(parts[1]):
+        await message.answer("用法：/describe <商品ID> <描述>，例如 /describe 1 美国TMO 100条短信+50分钟通话-30天")
+        return
+    try:
+        product = await db.configure_product(
+            int(parts[1]),
+            description=parts[2],
+            actor_id=message.from_user.id if message.from_user else None,
+        )
+    except ValueError as exc:
+        await message.answer(f"❌ {exc}")
+        return
+    if product is None:
+        await message.answer("商品不存在")
+        return
+    await message.answer(f"✅ 商品 #{product.id} 描述已更新：{product.description}；目录同步不会覆盖人工描述")
+
+
 async def _set_published(message: Message, db: Database, active: bool) -> None:
     parts = (message.text or "").split()
     if len(parts) != 2 or not _valid_product_id(parts[1]):

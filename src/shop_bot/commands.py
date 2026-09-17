@@ -30,6 +30,7 @@ def admin_commands() -> list[BotCommand]:
         BotCommand(command="products", description="商品列表（含下架）"),
         BotCommand(command="price", description="定价"),
         BotCommand(command="rename", description="修改商品名称"),
+        BotCommand(command="describe", description="修改商品描述"),
         BotCommand(command="publish", description="上架"),
         BotCommand(command="unpublish", description="下架"),
         BotCommand(command="currency", description="设置计价币种"),

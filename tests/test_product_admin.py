@@ -76,6 +76,31 @@ async def test_admin_rename_and_audit(db, bot):
     assert any("控制字符" in (m.text or "") for m in bot.session.sent)
 
 
+async def test_admin_describe_and_audit(db, bot):
+    await db.upsert_product_from_upstream(
+        sku="S", name="plan", description="esim · planIsFor=6", upstream_plan_id="P", request_type="esim"
+    )
+    msg = menu_message_of(bot)
+    await admin.cmd_describe(msg.model_copy(update={"text": "/describe 1 美国TMO 100条短信+50分钟通话-30天"}), db)
+    assert (await db.get_product(1)).description == "美国TMO 100条短信+50分钟通话-30天"
+    events = await db._all("SELECT * FROM product_events")
+    assert len(events) == 1
+    assert json.loads(events[0]["before_json"])["description"] == "esim · planIsFor=6"
+    assert json.loads(events[0]["after_json"])["description"] == "美国TMO 100条短信+50分钟通话-30天"
+    # 目录同步不覆盖人工描述
+    await db.upsert_product_from_upstream(
+        sku="S", name="plan", description="esim · planIsFor=9", upstream_plan_id="P", request_type="esim"
+    )
+    assert (await db.get_product(1)).description == "美国TMO 100条短信+50分钟通话-30天"
+    # 非法描述
+    await admin.cmd_describe(msg.model_copy(update={"text": "/describe 1"}), db)
+    assert any("用法" in (m.text or "") for m in bot.session.sent)
+    with pytest.raises(ValueError, match="描述"):
+        await db.configure_product(1, description="x" * 501)
+    with pytest.raises(ValueError, match="控制字符"):
+        await db.configure_product(1, description="多行\n描述")
+
+
 async def test_live_publish_requires_mapping(db, product):
     await db.configure_product(product.id, active=False)
     with pytest.raises(ValueError, match="SKU"):
