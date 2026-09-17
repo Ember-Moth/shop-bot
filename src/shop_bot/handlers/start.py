@@ -91,7 +91,7 @@ async def _send_catalog(message: Message, db: Database) -> None:
     if not products:
         await message.answer("暂时没有商品")
         return
-    await message.answer("🛍 商品目录", reply_markup=keyboards.catalog(products))
+    await message.answer(keyboards.catalog_text(products), reply_markup=keyboards.catalog(products))
 
 
 async def _render_my_orders(message: Message, db: Database, title: str) -> None:

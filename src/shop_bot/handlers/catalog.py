@@ -3,7 +3,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InaccessibleMessage
 
 from ..db import Database
-from ..keyboards import CB_PRODUCT_PREFIX, catalog, escape_markdown, product_detail
+from ..keyboards import CB_PRODUCT_PREFIX, catalog, catalog_text, escape_markdown, product_detail
 
 router = Router()
 
@@ -25,7 +25,7 @@ async def cb_catalog(callback: CallbackQuery, db: Database) -> None:
     if not products:
         await callback.answer("暂时没有商品", show_alert=True)
         return
-    await _safe_edit(callback, "🛍 商品目录", reply_markup=catalog(products))
+    await _safe_edit(callback, catalog_text(products), reply_markup=catalog(products))
     await callback.answer()
 
 

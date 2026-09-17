@@ -17,6 +17,7 @@ from shop_bot.keyboards import (
     MENU_KYC,
     MENU_ORDERS,
     MENU_USAGE,
+    catalog_text,
     escape_markdown,
     main_menu,
     main_menu_reply,
@@ -84,6 +85,20 @@ def test_inline_main_menu_two_columns():
     assert callbacks == ["catalog", "myorders", "usage_hint", "help"]
 
 
+def test_catalog_text_lists_products_with_separator():
+    """目录正文：标题 + 分隔线 + 每款商品的名称价格行与描述行，名称/描述经转义。"""
+    products = [
+        Product(1, "100 SMS & 50 Talk", "美国TMO 100条短信+50分钟通话-30天eSIM", 630, "USD"),
+        Product(2, "Unlimited Plan", "", 950, "USD"),
+    ]
+    text = catalog_text(products)
+    lines = text.splitlines()
+    assert lines[0] == "🛍 选择eSIM套餐" and lines[1] == "━━━━━━━━━━━━━━━━━━"
+    assert "100 SMS & 50 Talk — 6.30 USD" in text
+    assert "美国TMO 100条短信+50分钟通话-30天eSIM" in text
+    assert "Unlimited Plan — 9.50 USD" in text
+
+
 def test_menu_text_handlers_are_guarded_by_idle_state():
     """FSM 进行中（如等待数量输入）点菜单按钮不会被误路由。"""
     handler = next(h for h in start.router.message.handlers if getattr(h.callback, "__name__", "") == "menu_router")
@@ -108,7 +123,7 @@ async def test_menu_router_debounces_repeated_taps(db, user, bot):
     await db.seed_products([product])
     for _ in range(5):
         await start.menu_router(menu_message(bot, MENU_BUY), db, None, None)
-    catalog_msgs = [m.text for m in bot.session.sent if m.text and "商品目录" in m.text]
+    catalog_msgs = [m.text for m in bot.session.sent if m.text and "选择eSIM套餐" in m.text]
     assert len(catalog_msgs) == 1, "防抖后连点只应产生一条目录"
 
 
@@ -126,7 +141,7 @@ async def test_menu_router_dispatches_each_entry(db, user, bot):
     start._menu_last_seen.clear()
     await start.menu_router(menu_message(bot, MENU_HELP), db, None, None)
     texts = [m.text or "" for m in bot.session.sent]
-    assert any("商品目录" in t for t in texts)
+    assert any("选择eSIM套餐" in t for t in texts)
     assert any("我的订单" in t for t in texts)
     assert any("用量" in t and "/usage" in t for t in texts)
     assert any("使用帮助" in t for t in texts)
@@ -167,7 +182,7 @@ async def test_menu_router_buy_and_orders(db, user, bot):
     start._menu_last_seen.clear()
     await db.seed_products([Product(1, "美国 1GB", "", 999, "CNY")])
     await start.menu_router(menu_message(bot, MENU_BUY), db, None, None)
-    assert any("商品目录" in (m.text or "") for m in bot.session.sent)
+    assert any("选择eSIM套餐" in (m.text or "") for m in bot.session.sent)
 
     start._menu_last_seen.clear()
     await start.menu_router(menu_message(bot, MENU_ORDERS), db, None, None)

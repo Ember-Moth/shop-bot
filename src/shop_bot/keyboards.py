@@ -75,6 +75,17 @@ def catalog(products) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def catalog_text(products) -> str:
+    """目录消息正文：标题 + 分隔线 + 每款商品的名称行与描述行。"""
+    lines = ["🛍 选择eSIM套餐", "━━━━━━━━━━━━━━━━━━", ""]
+    for p in products:
+        lines.append(f"{escape_markdown(p.name)} — {p.price_text}")
+        if p.description:
+            lines.append(escape_markdown(p.description))
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 def product_detail(product_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
