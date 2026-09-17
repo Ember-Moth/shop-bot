@@ -42,9 +42,7 @@ class CommbitzError(Exception):
     def definite_rejection(self) -> bool:
         """4xx（除鉴权/超时/限流）代表上游明确拒绝本次请求，重试无意义。"""
         return (
-            self.status_code is not None
-            and 400 <= self.status_code < 500
-            and self.status_code not in (401, 408, 429)
+            self.status_code is not None and 400 <= self.status_code < 500 and self.status_code not in (401, 408, 429)
         )
 
 
@@ -316,8 +314,7 @@ class CommbitzClient:
 
         返回平铺视图：用量明细（data.data）+ 套餐额度/设备信息（data 层）。
         """
-        params = {k: v for k, v in
-                  {"coupon": coupon, "cid": cid, "orderId": order_id, "imsi": imsi}.items() if v}
+        params = {k: v for k, v in {"coupon": coupon, "cid": cid, "orderId": order_id, "imsi": imsi}.items() if v}
         if not params:
             raise CommbitzError("at least one of coupon/cid/orderId/imsi is required")
         body = await self._request("GET", "/esim/usage", params=params)

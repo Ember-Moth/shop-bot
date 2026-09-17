@@ -33,8 +33,12 @@ class FakeCommbitz:
         return {"_id": "up-fake", "status": "pending"}
 
     async def get_order_details(self, request_id):
-        return {"status": "Success", "requestType": "esim", "quantity": 1,
-                "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}]}
+        return {
+            "status": "Success",
+            "requestType": "esim",
+            "quantity": 1,
+            "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}],
+        }
 
     async def submit_kyc_documents_json(self, request_id, documents):
         return {}
@@ -137,9 +141,7 @@ def _topup_callback_params(topup_id, amount="10.00", **changes):
     return params
 
 
-async def test_topup_callback_credits_once(
-    *, http_client, db, user, epay
-):
+async def test_topup_callback_credits_once(*, http_client, db, user, epay):
     """T 前缀回调走充值分支：入账幂等，重复回调返回 success。"""
     topup = await db.create_topup(user.id, 1000_00)
     for _ in range(2):
@@ -186,12 +188,15 @@ async def test_menu_balance_shows_balance(db, user, bot):
 
 def menu_message_of(bot):
     return Message.model_validate(
-        {"message_id": 1, "date": 0, "chat": {"id": 42, "type": "private"},
-         "from": {"id": 42, "is_bot": False, "first_name": "T"}, "text": "x"},
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 42, "type": "private"},
+            "from": {"id": 42, "is_bot": False, "first_name": "T"},
+            "text": "x",
+        },
         context={"bot": bot},
     )
-
-
 
 
 # ---- 余额支付回调（用户入口）----
@@ -275,9 +280,13 @@ async def test_migration_adds_user_balance_column(tmp_path):
 async def test_topup_amount_non_text_gets_hint(db, bot):
     """P1：等待充值金额时发来图片等非文本消息 → 提示重发，而不是 handler 崩溃。"""
     msg = Message.model_validate(
-        {"message_id": 1, "date": 0, "chat": {"id": 42, "type": "private"},
-         "from": {"id": 42, "is_bot": False, "first_name": "T"},
-         "photo": [{"file_id": "p", "file_unique_id": "u", "width": 1, "height": 1}]},
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 42, "type": "private"},
+            "from": {"id": 42, "is_bot": False, "first_name": "T"},
+            "photo": [{"file_id": "p", "file_unique_id": "u", "width": 1, "height": 1}],
+        },
         context={"bot": bot},
     )
     assert msg.text is None
@@ -380,9 +389,13 @@ async def test_adjust_balance_rejects_overdraft_and_unknown_user(db, user):
 async def test_cmd_adjust_replies_and_notifies_user(db, user, bot):
     """/adjust 回复管理员确认，并私信用户余额变动（含备注）。"""
     msg = Message.model_validate(
-        {"message_id": 1, "date": 0, "chat": {"id": 1, "type": "private"},
-         "from": {"id": 1, "is_bot": False, "first_name": "A"},
-         "text": f"/adjust {user.id} 5.50 测试调账"},
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": f"/adjust {user.id} 5.50 测试调账",
+        },
         context={"bot": bot},
     )
     await cmd_adjust(msg, db, bot)
@@ -443,8 +456,13 @@ async def test_cmd_refund_paid_order_notifies_buyer(db, user, bot):
     order = await orders.create_order(db, user.id, product, 1)
     await db.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
     msg = Message.model_validate(
-        {"message_id": 1, "date": 0, "chat": {"id": 1, "type": "private"},
-         "from": {"id": 1, "is_bot": False, "first_name": "A"}, "text": f"/refund {order.id}"},
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": f"/refund {order.id}",
+        },
         context={"bot": bot},
     )
     await cmd_refund(msg, db, bot)

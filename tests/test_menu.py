@@ -44,10 +44,14 @@ def test_reply_keyboard_layout_with_kyc_enabled():
     assert len(kb.keyboard) == 4 and all(len(row) == 2 for row in kb.keyboard)
     texts = [button.text for row in kb.keyboard for button in row]
     assert texts == [
-        MENU_BUY, MENU_ORDERS,
-        "💰 充值余额", "💳 我的余额",
-        MENU_HISTORY, MENU_USAGE,
-        MENU_KYC, MENU_HELP,
+        MENU_BUY,
+        MENU_ORDERS,
+        "💰 充值余额",
+        "💳 我的余额",
+        MENU_HISTORY,
+        MENU_USAGE,
+        MENU_KYC,
+        MENU_HELP,
     ]
 
 
@@ -56,9 +60,13 @@ def test_reply_keyboard_layout_hides_kyc_when_disabled():
     texts = [button.text for row in kb.keyboard for button in row]
     assert MENU_KYC not in texts
     assert texts == [
-        MENU_BUY, MENU_ORDERS,
-        "💰 充值余额", "💳 我的余额",
-        MENU_HISTORY, MENU_USAGE, MENU_HELP,
+        MENU_BUY,
+        MENU_ORDERS,
+        "💰 充值余额",
+        "💳 我的余额",
+        MENU_HISTORY,
+        MENU_USAGE,
+        MENU_HELP,
     ]
 
 
@@ -78,9 +86,7 @@ def test_inline_main_menu_two_columns():
 
 def test_menu_text_handlers_are_guarded_by_idle_state():
     """FSM 进行中（如等待数量输入）点菜单按钮不会被误路由。"""
-    handler = next(
-        h for h in start.router.message.handlers if getattr(h.callback, "__name__", "") == "menu_router"
-    )
+    handler = next(h for h in start.router.message.handlers if getattr(h.callback, "__name__", "") == "menu_router")
     filters = handler.filters or []
     state_filters = [f.callback for f in filters if isinstance(f.callback, StateFilter)]
     assert state_filters and all(f.states == (None,) for f in state_filters), "菜单路由应只在空闲状态触发"
@@ -191,7 +197,10 @@ async def test_menu_help_omits_kyc_line_when_disabled(db, bot, monkeypatch):
 async def test_cmd_kyc_refused_when_disabled(db, bot, monkeypatch):
     monkeypatch.setattr(kyc_module, "get_settings", lambda: Settings(features={"kyc": False}))
     await kyc_module.cmd_kyc(
-        menu_message(bot, "/kyc 1"), db, None, None  # 开关先于依赖使用，传 None 不触达
+        menu_message(bot, "/kyc 1"),
+        db,
+        None,
+        None,  # 开关先于依赖使用，传 None 不触达
     )
     texts = [m.text or "" for m in bot.session.sent]
     assert any("未开放" in t for t in texts)

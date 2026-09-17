@@ -35,8 +35,7 @@ async def _seed_order(db, user_id, sku, request_type, **order_kwargs):
     [
         ("activation", {"iccid": "8901260123456789012"}, {"iccid": "8901260123456789012"}),
         ("recharge", {"msisdn": "+919876543210"}, {"mobile_number": "+919876543210"}),
-        ("recharge", {"msisdn": "+919876543210", "days": 7},
-         {"mobile_number": "+919876543210", "days": 7}),
+        ("recharge", {"msisdn": "+919876543210", "days": 7}, {"mobile_number": "+919876543210", "days": 7}),
         ("voucher", {}, {}),
         ("esim", {}, {}),
         ("physical", {}, {}),
@@ -48,10 +47,24 @@ async def test_request_type_payload_contract(
     """各业务类型的 /v1/request 请求体合同：字段名、大小写、条件必填。"""
     order = await _seed_order(db, user.id, f"SKU-{request_type}", request_type, **order_kwargs)
     await orders.mark_paid(db, purchaser, order.id)
-    httpx_mock.add_response(json={"statusCode": 201, "data": {"success": True, "data": {
-        "_id": "up-1", "status": "pending", "requestType": request_type, "quantity": 1}}})
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-1", "status": "pending", "requestType": request_type, "quantity": 1, "esims": []}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 201,
+            "data": {
+                "success": True,
+                "data": {"_id": "up-1", "status": "pending", "requestType": request_type, "quantity": 1},
+            },
+        }
+    )
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {"_id": "up-1", "status": "pending", "requestType": request_type, "quantity": 1, "esims": []},
+            },
+        }
+    )
     await purchaser.fulfill(db, order.id)
     requests = [r for r in httpx_mock.get_requests() if r.url.path.endswith("/v1/request")]
     assert len(requests) == 1
@@ -63,16 +76,28 @@ async def test_request_type_payload_contract(
         assert str(value) in body
 
 
-async def test_physical_sim_stays_awaiting_dispatch_until_admin_confirms(
-    *, db, user, purchaser, httpx_mock, bot
-):
+async def test_physical_sim_stays_awaiting_dispatch_until_admin_confirms(*, db, user, purchaser, httpx_mock, bot):
     """实体卡边界：上游受理成功不自动记为已发货；管理员 /paid 确认后才交付。"""
     order = await _seed_order(db, user.id, "SKU-physical", "physical")
     await orders.mark_paid(db, purchaser, order.id, trade_no="T1")
-    httpx_mock.add_response(json={"statusCode": 201, "data": {"success": True, "data": {
-        "_id": "up-p", "status": "pending", "requestType": "physical", "quantity": 1}}})
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-p", "status": "Success", "requestType": "physical", "quantity": 1, "esims": []}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 201,
+            "data": {
+                "success": True,
+                "data": {"_id": "up-p", "status": "pending", "requestType": "physical", "quantity": 1},
+            },
+        }
+    )
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {"_id": "up-p", "status": "Success", "requestType": "physical", "quantity": 1, "esims": []},
+            },
+        }
+    )
     order = await purchaser.fulfill(db, order.id)
     assert order is not None and order.status == OrderStatus.PAID  # 受理成功 ≠ 已发货
     purchase = await db.get_purchase_by_order(order.id)
@@ -96,38 +121,90 @@ async def test_kyc_pending_requires_documents_then_releases(*, db, user, purchas
     order = await _seed_order(db, user.id, "IN-1", "esim")
     await orders.mark_paid(db, purchaser, order.id, trade_no="T1")
     # 建单响应 kycStatus=pending
-    httpx_mock.add_response(json={"statusCode": 201, "data": {"success": True, "data": {
-        "_id": "up-in", "status": "pending", "requestType": "esim", "quantity": 1,
-        "kycStatus": "pending", "isKycRequired": True}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 201,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-in",
+                    "status": "pending",
+                    "requestType": "esim",
+                    "quantity": 1,
+                    "kycStatus": "pending",
+                    "isKycRequired": True,
+                },
+            },
+        }
+    )
     # 轮询：kyc 未过，esims 空
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-in", "status": "pending", "kycStatus": "pending", "isKycVerified": False, "esims": []}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-in",
+                    "status": "pending",
+                    "kycStatus": "pending",
+                    "isKycVerified": False,
+                    "esims": [],
+                },
+            },
+        }
+    )
     order = await purchaser.fulfill(db, order.id)
     assert order is not None and order.status == OrderStatus.PAID
     purchase = await db.get_purchase_by_order(order.id)
     assert purchase is not None and purchase.state == PurchaseState.AWAITING_KYC
 
     # 买家补交证件（JSON URL 模式）
-    httpx_mock.add_response(json={"success": True, "data": {
-        "kycStatus": "submitted", "isKycRequired": True, "isKycVerified": False, "esims": []}})
-    ok, detail = await purchaser.submit_kyc(
-        db, order.id, documents={"passportFront": "https://cdn.example/pf.jpg"}
+    httpx_mock.add_response(
+        json={
+            "success": True,
+            "data": {"kycStatus": "submitted", "isKycRequired": True, "isKycVerified": False, "esims": []},
+        }
     )
+    ok, detail = await purchaser.submit_kyc(db, order.id, documents={"passportFront": "https://cdn.example/pf.jpg"})
     assert ok, detail
     purchase = await db.get_purchase_by_order(order.id)
     assert purchase is not None and purchase.state == PurchaseState.KYC_SUBMITTED
 
     # 轮询：已提交但未审核（即使上游返回 eSIM 安装信息也不交付，开发方案 7.2）
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-in", "status": "Success", "kycStatus": "submitted", "isKycVerified": False,
-        "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}]}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-in",
+                    "status": "Success",
+                    "kycStatus": "submitted",
+                    "isKycVerified": False,
+                    "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}],
+                },
+            },
+        }
+    )
     order = await purchaser.fulfill(db, order.id)
     assert order is not None and order.status == OrderStatus.PAID  # 不提前交付
 
     # 审核通过 → 自动交付
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-in", "status": "Success", "kycStatus": "verified", "isKycVerified": True,
-        "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}]}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-in",
+                    "status": "Success",
+                    "kycStatus": "verified",
+                    "isKycVerified": True,
+                    "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}],
+                },
+            },
+        }
+    )
     order = await purchaser.fulfill(db, order.id)
     assert order is not None and order.status == OrderStatus.DELIVERED
 
@@ -136,10 +213,30 @@ async def test_kyc_submit_already_verified_recovers(*, db, user, purchaser, http
     """规则 7：证件已审核过时（上传报 already verified），状态继续推进而不卡死。"""
     order = await _seed_order(db, user.id, "IN-1", "esim")
     await orders.mark_paid(db, purchaser, order.id)
-    httpx_mock.add_response(json={"statusCode": 201, "data": {"success": True, "data": {
-        "_id": "up-in", "status": "pending", "kycStatus": "pending", "isKycRequired": True}}})
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-in", "status": "pending", "kycStatus": "pending", "isKycVerified": False, "esims": []}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 201,
+            "data": {
+                "success": True,
+                "data": {"_id": "up-in", "status": "pending", "kycStatus": "pending", "isKycRequired": True},
+            },
+        }
+    )
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-in",
+                    "status": "pending",
+                    "kycStatus": "pending",
+                    "isKycVerified": False,
+                    "esims": [],
+                },
+            },
+        }
+    )
     await purchaser.fulfill(db, order.id)
     httpx_mock.add_response(
         status_code=400, json={"statusCode": 400, "message": "KYC is already verified for this order"}
@@ -168,9 +265,7 @@ async def test_kyc_requires_at_least_one_document(purchaser):
 
 async def test_kyc_multipart_upload_contract(*, purchaser, httpx_mock):
     httpx_mock.add_response(json={"success": True, "data": {"kycStatus": "submitted"}})
-    await purchaser.client.submit_kyc_documents_files(
-        "up-9", [("passportFront", "pf.jpg", b"image-bytes")]
-    )
+    await purchaser.client.submit_kyc_documents_files("up-9", [("passportFront", "pf.jpg", b"image-bytes")])
     request = httpx_mock.get_requests()[-1]
     assert request.url.path == "/distributor-api/v1/orders/up-9/kyc-documents"
     body = request.read()
@@ -182,14 +277,21 @@ async def test_usage_query_and_formatting(*, db, user, purchaser, httpx_mock):
     order = await _seed_order(db, user.id, "US-1", "esim")
     await orders.mark_paid(db, purchaser, order.id)
     await db.transition_order(order.id, OrderStatus.DELIVERED, upstream_ref="up-1", payload="goods")
-    httpx_mock.add_response(json={"statusCode": 200, "code": "000", "data": {
-        "data": {
-            "effectiveTime": "2026-06-01", "expiryTime": "2026-06-08",
-            "totalUsageFormatted": "1.2 GB",
-            "summary": {"totalDays": 3, "averageDailyUsageFormatted": "400 MB"},
-        },
-        "totalDataFormatted": "5 GB",
-    }})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "code": "000",
+            "data": {
+                "data": {
+                    "effectiveTime": "2026-06-01",
+                    "expiryTime": "2026-06-08",
+                    "totalUsageFormatted": "1.2 GB",
+                    "summary": {"totalDays": 3, "averageDailyUsageFormatted": "400 MB"},
+                },
+                "totalDataFormatted": "5 GB",
+            },
+        }
+    )
     usage = await purchaser.client.get_esim_usage(order_id="up-1")
     text = format_usage(usage)
     assert "2026-06-01" in text and "1.2 GB" in text and "5 GB" in text and "400 MB" in text
@@ -208,11 +310,30 @@ async def test_recovery_loop_drives_kyc_orders(*, db, user, purchaser, httpx_moc
     """恢复循环同样推进 KYC 订单（通知补发与采购恢复统一）。"""
     order = await _seed_order(db, user.id, "IN-1", "esim")
     await orders.mark_paid(db, purchaser, order.id)
-    httpx_mock.add_response(json={"statusCode": 201, "data": {"success": True, "data": {
-        "_id": "up-in", "status": "pending", "kycStatus": "pending", "isKycRequired": True}}})
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-in", "status": "Success", "kycStatus": "verified", "isKycVerified": True,
-        "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}]}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 201,
+            "data": {
+                "success": True,
+                "data": {"_id": "up-in", "status": "pending", "kycStatus": "pending", "isKycRequired": True},
+            },
+        }
+    )
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-in",
+                    "status": "Success",
+                    "kycStatus": "verified",
+                    "isKycVerified": True,
+                    "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}],
+                },
+            },
+        }
+    )
     await recover_once(db, purchaser, bot)
     final = await db.get_order(order.id)
     assert final is not None and final.status == OrderStatus.DELIVERED

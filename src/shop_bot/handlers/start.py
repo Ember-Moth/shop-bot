@@ -33,6 +33,7 @@ from .balance import render_balance, start_topup
 router = Router()
 logger = get_logger(__name__)
 
+
 def help_text(kyc_enabled: bool = True) -> str:
     """使用帮助；KYC 行随功能开关显示。"""
     lines = [
@@ -60,9 +61,7 @@ async def _safe_edit(callback: CallbackQuery, text: str, **kwargs) -> None:
 
 
 @router.message(CommandStart())
-async def cmd_start(
-    message: Message, db: Database, state: FSMContext
-) -> None:
+async def cmd_start(message: Message, db: Database, state: FSMContext) -> None:
     # 清理残留的未完成流程，避免旧状态影响新会话
     await state.clear()
     from_user = message.from_user
@@ -99,9 +98,7 @@ async def _render_my_orders(message: Message, db: Database, title: str) -> None:
     if not user_orders:
         await message.answer("你还没有订单。\n点「🛒 购买商品」开始第一单！", reply_markup=main_menu())
         return
-    lines = [
-        f"#{o.id} · 数量 x{o.quantity} · {o.amount_text} · {o.status}" for o in user_orders
-    ]
+    lines = [f"#{o.id} · 数量 x{o.quantity} · {o.amount_text} · {o.status}" for o in user_orders]
     await message.answer(f"{title}\n\n" + "\n".join(lines), reply_markup=main_menu())
 
 
@@ -117,9 +114,7 @@ async def cb_my_orders(callback: CallbackQuery, db: Database) -> None:
         return
     user_orders = await db.list_orders_for_user(user.id)
     if not user_orders:
-        await _safe_edit(
-            callback, "你还没有订单。\n点「🛒 购买商品」开始第一单！", reply_markup=main_menu()
-        )
+        await _safe_edit(callback, "你还没有订单。\n点「🛒 购买商品」开始第一单！", reply_markup=main_menu())
         await callback.answer()
         return
     lines = [f"#{o.id} · 数量 x{o.quantity} · {o.amount_text} · {o.status}" for o in user_orders]
@@ -140,9 +135,7 @@ async def cb_usage_hint(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "help")
 async def cb_help(callback: CallbackQuery) -> None:
     kyc_enabled = get_settings().features.kyc
-    await _safe_edit(
-        callback, help_text(kyc_enabled), reply_markup=main_menu(), parse_mode="Markdown"
-    )
+    await _safe_edit(callback, help_text(kyc_enabled), reply_markup=main_menu(), parse_mode="Markdown")
     await callback.answer()
 
 
@@ -170,14 +163,10 @@ def _menu_debounced(user_id: int, text: str) -> bool:
 
 
 @router.message(
-    F.text.in_(
-        {MENU_BUY, MENU_TOPUP, MENU_BALANCE, MENU_ORDERS, MENU_HISTORY, MENU_USAGE, MENU_KYC, MENU_HELP}
-    ),
+    F.text.in_({MENU_BUY, MENU_TOPUP, MENU_BALANCE, MENU_ORDERS, MENU_HISTORY, MENU_USAGE, MENU_KYC, MENU_HELP}),
     StateFilter(None),
 )
-async def menu_router(
-    message: Message, db: Database, state: FSMContext, epay: EPayClient | None
-) -> None:
+async def menu_router(message: Message, db: Database, state: FSMContext, epay: EPayClient | None) -> None:
     """菜单按钮统一入口：防抖后分发到对应处理（仅空闲状态生效）。"""
     from_user = message.from_user
     assert from_user is not None
@@ -195,24 +184,18 @@ async def menu_router(
     elif text == MENU_BALANCE:
         await render_balance(message, db)
     elif text == MENU_USAGE:
-        await message.answer(
-            "📶 用量 / 有效期查询\n\n请发送：/usage <订单号>\n（查询已交付 eSIM 的流量与有效期）"
-        )
+        await message.answer("📶 用量 / 有效期查询\n\n请发送：/usage <订单号>\n（查询已交付 eSIM 的流量与有效期）")
     elif text == MENU_KYC:
         if not kyc_enabled:
             await message.answer("证件补交功能未开放，如有需要请联系管理员")
             return
-        await message.answer(
-            "🪪 证件补交\n\n需要身份核验的订单请发送：/kyc <订单号>\n（在私聊中提交证件材料）"
-        )
+        await message.answer("🪪 证件补交\n\n需要身份核验的订单请发送：/kyc <订单号>\n（在私聊中提交证件材料）")
     else:
         await message.answer(help_text(kyc_enabled), parse_mode="Markdown")
 
 
 @router.message(Command("query"))
-async def cmd_query(
-    message: Message, db: Database, epay: EPayClient | None, purchaser: Purchaser, bot: Bot
-) -> None:
+async def cmd_query(message: Message, db: Database, epay: EPayClient | None, purchaser: Purchaser, bot: Bot) -> None:
     """用户主动查询订单支付状态（回调可能延迟或丢失时兜底）。"""
     text = message.text
     if text is None:

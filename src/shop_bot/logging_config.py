@@ -39,11 +39,11 @@ class ColoredFormatter(logging.Formatter):
     """开发环境用的彩色格式。"""
 
     COLORS: ClassVar[dict[str, str]] = {
-        "DEBUG": "\033[36m",    # 青
-        "INFO": "\033[32m",     # 绿
+        "DEBUG": "\033[36m",  # 青
+        "INFO": "\033[32m",  # 绿
         "WARNING": "\033[33m",  # 黄
-        "ERROR": "\033[31m",    # 红
-        "CRITICAL": "\033[35m", # 紫
+        "ERROR": "\033[31m",  # 红
+        "CRITICAL": "\033[35m",  # 紫
     }
     RESET: ClassVar[str] = "\033[0m"
 
@@ -73,9 +73,7 @@ def setup_logging(
     if json_logs:
         stdout_handler.setFormatter(JSONFormatter())
     else:
-        stdout_handler.setFormatter(
-            ColoredFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-        )
+        stdout_handler.setFormatter(ColoredFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root.addHandler(stdout_handler)
 
     # 文件处理器（按天轮转，保留 30 天）

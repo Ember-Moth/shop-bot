@@ -74,9 +74,7 @@ async def _require_private(message: Message) -> bool:
 
 
 @router.message(Command("kyc"))
-async def cmd_kyc(
-    message: Message, db: Database, purchaser: CommbitzPurchaser, state: FSMContext
-) -> None:
+async def cmd_kyc(message: Message, db: Database, purchaser: CommbitzPurchaser, state: FSMContext) -> None:
     if not get_settings().features.kyc:
         await message.answer("证件补交功能未开放，如有需要请联系管理员")
         return
@@ -118,9 +116,7 @@ async def cmd_kyc(
 
 
 @router.message(KycFlow.waiting_documents, F.text)
-async def msg_kyc_text(
-    message: Message, db: Database, purchaser: CommbitzPurchaser, state: FSMContext
-) -> None:
+async def msg_kyc_text(message: Message, db: Database, purchaser: CommbitzPurchaser, state: FSMContext) -> None:
     text = message.text
     assert text is not None
     command = text.split()[0].lower() if text.split() else ""
@@ -147,9 +143,7 @@ async def msg_kyc_text(
 
 
 @router.message(KycFlow.waiting_documents)
-async def msg_kyc_files(
-    message: Message, db: Database, purchaser: CommbitzPurchaser, state: FSMContext
-) -> None:
+async def msg_kyc_files(message: Message, db: Database, purchaser: CommbitzPurchaser, state: FSMContext) -> None:
     """接收照片/文件：先逐张收集（Telegram 相册按多条消息送达），/done 统一提交。"""
     if not await _require_private(message):
         await state.clear()
@@ -164,10 +158,12 @@ async def msg_kyc_files(
     if item is None:
         await message.answer("请发送照片或文件材料。")
         return
-    pending.append({
-        "file_id": item.file_id,
-        "name": getattr(item, "file_name", None) or f"document{len(pending) + 1}.jpg",
-    })
+    pending.append(
+        {
+            "file_id": item.file_id,
+            "name": getattr(item, "file_name", None) or f"document{len(pending) + 1}.jpg",
+        }
+    )
     await state.update_data(pending_files=pending)
     remaining = 3 - len(pending)
     hint = "已收集满 3 份，" if remaining == 0 else f"还可发送 {remaining} 份，"

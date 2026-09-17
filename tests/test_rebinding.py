@@ -98,7 +98,8 @@ async def frozen_orders(tmp_path):
 
 def goods_messages(bot, buyer_id):
     return [
-        getattr(m, "text", "") for m in bot.session.sent
+        getattr(m, "text", "")
+        for m in bot.session.sent
         if m.chat_id == buyer_id and "LPA:" in (getattr(m, "text", "") or "")
     ]
 

@@ -35,8 +35,14 @@ def _plan_response(skus: list[str]) -> dict:
         "statusCode": 200,
         "data": {
             "plans": [
-                {"_id": f"id-{s}", "sku": s, "name": s, "simCategory": "esim", "planIsFor": 2,
-                 "pricing": {"currency": {"code": "USD"}}}
+                {
+                    "_id": f"id-{s}",
+                    "sku": s,
+                    "name": s,
+                    "simCategory": "esim",
+                    "planIsFor": 2,
+                    "pricing": {"currency": {"code": "USD"}},
+                }
                 for s in skus
             ],
             "pagination": {"hasNextPage": False},
@@ -45,25 +51,37 @@ def _plan_response(skus: list[str]) -> dict:
 
 
 def _create_ok(request_id="up-1", order_no="DR001"):
-    return {"statusCode": 201, "data": {"success": True, "data": {"_id": request_id, "orderId": order_no,
-            "status": "pending", "requestType": "esim", "quantity": 1}}}
+    return {
+        "statusCode": 201,
+        "data": {
+            "success": True,
+            "data": {"_id": request_id, "orderId": order_no, "status": "pending", "requestType": "esim", "quantity": 1},
+        },
+    }
 
 
 def _details(status="Success", esims=None, quantity=1, request_type="esim", plan_id="id-US-1"):
     return {
         "statusCode": 200,
-        "data": {"success": True, "data": {
-            "_id": "up-1", "status": status, "requestType": request_type, "quantity": quantity,
-            "planId": plan_id,
-            "esims": esims if esims is not None else [],
-        }},
+        "data": {
+            "success": True,
+            "data": {
+                "_id": "up-1",
+                "status": status,
+                "requestType": request_type,
+                "quantity": quantity,
+                "planId": plan_id,
+                "esims": esims if esims is not None else [],
+            },
+        },
     }
 
 
 def _details_with_esims(status="Success", count=1, plan_id="id-US-1", request_type="esim", quantity=None):
     esims = [{"iccid": f"89-{i}", "lpa": f"LPA:{i}", "qrCode": f"https://qr/{i}.png"} for i in range(count)]
-    body = _details(status=status, quantity=quantity if quantity is not None else count,
-                    plan_id=plan_id, request_type=request_type)
+    body = _details(
+        status=status, quantity=quantity if quantity is not None else count, plan_id=plan_id, request_type=request_type
+    )
     body["data"]["data"]["esims"] = esims
     return body
 
@@ -264,10 +282,14 @@ async def test_restart_recovery_with_known_id_only_queries(*, tmp_path, httpx_mo
     recovered = Database(path)
     await recovered.connect()
     try:
-        gateway = FakeCommbitzGateway(details={
-            "status": "Success", "requestType": "esim", "quantity": 1,
-            "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}],
-        })
+        gateway = FakeCommbitzGateway(
+            details={
+                "status": "Success",
+                "requestType": "esim",
+                "quantity": 1,
+                "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}],
+            }
+        )
         purchaser = CommbitzPurchaser(gateway)
         await recover_once(recovered, purchaser, None)  # bot=None：通知失败由异常路径吞掉，不重复采购
         order = await recovered.get_order(order.id)
@@ -391,14 +413,33 @@ async def test_voucher_missing_voucher_code_never_delivered(*, db, user, commbit
     order = await _seed_order(db, user.id, "V-1", "voucher")
     await orders.mark_paid(db, commbitz_purchaser, order.id)
     httpx_mock.add_response(json=_create_ok())
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-1", "status": "Success", "requestType": "voucher", "quantity": 1}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {"_id": "up-1", "status": "Success", "requestType": "voucher", "quantity": 1},
+            },
+        }
+    )
     order = await commbitz_purchaser.fulfill(db, order.id)
     assert order is not None and order.status == OrderStatus.PAID
     # 有券面才交付
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-1", "status": "Success", "requestType": "voucher", "quantity": 1,
-        "voucher": "VOUCHER123"}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-1",
+                    "status": "Success",
+                    "requestType": "voucher",
+                    "quantity": 1,
+                    "voucher": "VOUCHER123",
+                },
+            },
+        }
+    )
     order = await commbitz_purchaser.fulfill(db, order.id)
     assert order is not None and order.status == OrderStatus.DELIVERED
     assert order.payload == "兑换券：VOUCHER123"
@@ -460,13 +501,18 @@ async def test_order_snapshot_survives_product_change(*, db, user, commbitz_purc
     order = await orders.create_order(db, user.id, product, 1)
     # 下单后篡改商品
     async with db.transaction() as conn:
-        await conn.execute(
-            "UPDATE products SET sku = 'NEW-SKU', request_type = 'physical' WHERE id = 1"
-        )
+        await conn.execute("UPDATE products SET sku = 'NEW-SKU', request_type = 'physical' WHERE id = 1")
     await orders.mark_paid(db, commbitz_purchaser, order.id)
     httpx_mock.add_response(json=_create_ok())
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-1", "status": "pending", "requestType": "esim", "quantity": 1, "esims": []}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {"_id": "up-1", "status": "pending", "requestType": "esim", "quantity": 1, "esims": []},
+            },
+        }
+    )
     await commbitz_purchaser.fulfill(db, order.id)
     request = [r for r in httpx_mock.get_requests() if r.url.path.endswith("/v1/request")][-1]
     body = request.read().decode()
@@ -476,12 +522,19 @@ async def test_order_snapshot_survives_product_change(*, db, user, commbitz_purc
 
 async def test_catalog_sync_preserves_manual_request_type(db):
     """P1-5：目录同步不得覆盖管理员人工指定的业务类型。"""
+
     class FakeCommbitz:
         async def get_all_plans(self, **filters):
-            return [{
-                "_id": "id-US-1", "sku": "US-1", "name": "new name", "simCategory": "esim",
-                "planIsFor": 3, "pricing": {"currency": {"code": "USD"}},
-            }]
+            return [
+                {
+                    "_id": "id-US-1",
+                    "sku": "US-1",
+                    "name": "new name",
+                    "simCategory": "esim",
+                    "planIsFor": 3,
+                    "pricing": {"currency": {"code": "USD"}},
+                }
+            ]
 
     await db.upsert_product_from_upstream(
         sku="US-1", name="n", description="d", upstream_plan_id="id-US-1", request_type="esim"
@@ -493,12 +546,15 @@ async def test_catalog_sync_preserves_manual_request_type(db):
     assert row is not None and row["request_type"] == "recharge"  # 人工配置保留
 
 
-async def test_account_level_kyc_requires_documents_before_creation(
-    *, db, esim_order, commbitz_purchaser, httpx_mock
-):
+async def test_account_level_kyc_requires_documents_before_creation(*, db, esim_order, commbitz_purchaser, httpx_mock):
     """P1-6：账户级强制 KYC 被拒后可补证件，重新创建时携带 kycDocuments。"""
-    httpx_mock.add_response(status_code=400, json={"statusCode": 400, "message":
-        "kycDocuments is mandatory for this distributor when creating activation or eSIM order"})
+    httpx_mock.add_response(
+        status_code=400,
+        json={
+            "statusCode": 400,
+            "message": "kycDocuments is mandatory for this distributor when creating activation or eSIM order",
+        },
+    )
     await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
     order = await commbitz_purchaser.fulfill(db, esim_order.id)
     assert order is not None and order.status == OrderStatus.PAID
@@ -514,11 +570,37 @@ async def test_account_level_kyc_requires_documents_before_creation(
     assert purchase.kyc_documents is not None and "passportFront" in purchase.kyc_documents
 
     # 重新创建：请求体携带 kycDocuments；成功后 kycStatus=pending → awaiting_kyc（等审核）
-    httpx_mock.add_response(json={"statusCode": 201, "data": {"success": True, "data": {
-        "_id": "up-9", "status": "pending", "requestType": "esim", "quantity": 1,
-        "kycStatus": "pending", "isKycRequired": True}}})
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-9", "status": "pending", "kycStatus": "pending", "isKycVerified": False, "esims": []}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 201,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-9",
+                    "status": "pending",
+                    "requestType": "esim",
+                    "quantity": 1,
+                    "kycStatus": "pending",
+                    "isKycRequired": True,
+                },
+            },
+        }
+    )
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-9",
+                    "status": "pending",
+                    "kycStatus": "pending",
+                    "isKycVerified": False,
+                    "esims": [],
+                },
+            },
+        }
+    )
     await commbitz_purchaser.fulfill(db, esim_order.id)
     request = [r for r in httpx_mock.get_requests() if r.url.path.endswith("/v1/request")][-1]
     assert "kycDocuments" in request.read().decode()
@@ -527,17 +609,28 @@ async def test_account_level_kyc_requires_documents_before_creation(
     assert purchase is not None and purchase.state == PurchaseState.AWAITING_KYC
     assert purchase.upstream_request_id == "up-9"
     # 上游标记 submitted → kyc_submitted
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-9", "status": "pending", "kycStatus": "submitted", "isKycVerified": False, "esims": []}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-9",
+                    "status": "pending",
+                    "kycStatus": "submitted",
+                    "isKycVerified": False,
+                    "esims": [],
+                },
+            },
+        }
+    )
     await commbitz_purchaser.fulfill(db, esim_order.id)
     purchase = await db.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.KYC_SUBMITTED
 
 
 async def purchaser_submit_links(purchaser, db, order_id):
-    return await purchaser.submit_kyc(
-        db, order_id, documents={"passportFront": "https://cdn.example/pf.jpg"}
-    )
+    return await purchaser.submit_kyc(db, order_id, documents={"passportFront": "https://cdn.example/pf.jpg"})
 
 
 def test_kyc_release_requires_verification_when_required():
@@ -555,25 +648,25 @@ async def test_kyc_submit_before_creation_rejects_files(*, db, user, commbitz_pu
     """未建单（账户级 KYC 被拒）时不支持文件直传，需提供 HTTPS 链接。"""
     order = await _seed_order(db, user.id, "IN-9", "esim")
     await orders.mark_paid(db, commbitz_purchaser, order.id)
-    httpx_mock.add_response(status_code=400, json={"statusCode": 400, "message":
-        "kycDocuments is mandatory for this distributor when creating activation or eSIM order"})
-    await commbitz_purchaser.fulfill(db, order.id)
-    ok, detail = await commbitz_purchaser.submit_kyc(
-        db, order.id, files=[("passportFront", "pf.jpg", b"x")]
+    httpx_mock.add_response(
+        status_code=400,
+        json={
+            "statusCode": 400,
+            "message": "kycDocuments is mandatory for this distributor when creating activation or eSIM order",
+        },
     )
+    await commbitz_purchaser.fulfill(db, order.id)
+    ok, detail = await commbitz_purchaser.submit_kyc(db, order.id, files=[("passportFront", "pf.jpg", b"x")])
     assert not ok and "HTTPS 链接" in detail
 
 
 # ---- 第二轮审计修复回归（7e5f8d5 审计报告）----
 
 
-async def test_bind_uses_order_plan_snapshot_and_refuses_unverifiable(
-    *, db, user, commbitz_purchaser, httpx_mock
-):
+async def test_bind_uses_order_plan_snapshot_and_refuses_unverifiable(*, db, user, commbitz_purchaser, httpx_mock):
     """P1-b：绑定用下单时套餐快照；商品被改后旧订单仍按原套餐核验；
     上游响应无套餐/SKU 标识时拒绝绑定而不是放行。"""
-    product = Product(1, "US 1GB", "", 4999, "CNY", sku="US-1",
-                      upstream_plan_id="id-US-1", request_type="esim")
+    product = Product(1, "US 1GB", "", 4999, "CNY", sku="US-1", upstream_plan_id="id-US-1", request_type="esim")
     await db.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
     await orders.mark_paid(db, commbitz_purchaser, order.id)
@@ -584,16 +677,35 @@ async def test_bind_uses_order_plan_snapshot_and_refuses_unverifiable(
         await conn.execute("UPDATE products SET upstream_plan_id = 'NEW-PLAN' WHERE id = 1")
 
     # 上游响应无 planId 也无 SKU → 订单有套餐快照，缺失即不匹配
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-x", "status": "Success", "requestType": "esim", "quantity": 1, "esims": []}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {"_id": "up-x", "status": "Success", "requestType": "esim", "quantity": 1, "esims": []},
+            },
+        }
+    )
     ok, detail = await commbitz_purchaser.bind_unknown_purchase(db, order.id, "up-x")
     assert not ok and "套餐 缺失 != id-US-1" in detail
 
     # planId 与下单快照一致（而非当前商品）→ 通过
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-x", "status": "Success", "requestType": "esim", "quantity": 1,
-        "planId": "id-US-1",
-        "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}]}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-x",
+                    "status": "Success",
+                    "requestType": "esim",
+                    "quantity": 1,
+                    "planId": "id-US-1",
+                    "esims": [{"iccid": "89", "lpa": "LPA:1", "qrCode": "https://q.png"}],
+                },
+            },
+        }
+    )
     ok, detail = await commbitz_purchaser.bind_unknown_purchase(db, order.id, "up-x")
     assert ok, detail
     purchase = await db.get_purchase_by_order(order.id)
@@ -605,8 +717,13 @@ async def test_server_error_with_kyc_message_stays_unknown_never_repurchases(
 ):
     """P1-c：500 + kycDocuments 文案属于结果不明，必须保持 submission_unknown。"""
     await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
-    httpx_mock.add_response(status_code=500, json={"statusCode": 500, "message":
-        "kycDocuments is mandatory for this distributor when creating activation or eSIM order"})
+    httpx_mock.add_response(
+        status_code=500,
+        json={
+            "statusCode": 500,
+            "message": "kycDocuments is mandatory for this distributor when creating activation or eSIM order",
+        },
+    )
     await commbitz_purchaser.fulfill(db, esim_order.id)
     purchase = await db.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN
@@ -629,8 +746,10 @@ async def test_interrupt_between_order_and_purchase_finalizes_on_recovery(
     purchase = await db.get_purchase_by_order(esim_order.id)
     assert purchase is not None
     await db.transition_purchase(
-        purchase.id, PurchaseState.UPSTREAM_PENDING,
-        from_state=PurchaseState.FULFILLED, upstream_request_id=None,
+        purchase.id,
+        PurchaseState.UPSTREAM_PENDING,
+        from_state=PurchaseState.FULFILLED,
+        upstream_request_id=None,
     )
     await recover_once(db, commbitz_purchaser, bot)
     purchase = await db.get_purchase_by_order(esim_order.id)
@@ -682,9 +801,7 @@ async def test_migration_survives_duplicate_upstream_ids(tmp_path, caplog):
 # ---- 第三轮审计修复回归（03d7a18 审计报告）----
 
 
-async def test_duplicate_legacy_purchases_frozen_and_excluded_from_delivery(
-    *, tmp_path, caplog, bot
-):
+async def test_duplicate_legacy_purchases_frozen_and_excluded_from_delivery(*, tmp_path, caplog, bot):
     """P1-1：重复上游单冻结为 submission_unknown，恢复循环不给两个买家发同一货品。"""
     path = str(tmp_path / "dup2.db")
     with sqlite3.connect(path) as conn:
@@ -737,8 +854,7 @@ async def test_duplicate_legacy_purchases_frozen_and_excluded_from_delivery(
 
 async def test_bind_atomic_conflict_under_concurrency(*, db, user, commbitz_purchaser, httpx_mock):
     """P1-1：无唯一索引时，并发绑定同一上游单也只有一个成功（事务内复核）。"""
-    product = Product(1, "US 1GB", "", 4999, "CNY", sku="US-1",
-                      upstream_plan_id="id-US-1", request_type="esim")
+    product = Product(1, "US 1GB", "", 4999, "CNY", sku="US-1", upstream_plan_id="id-US-1", request_type="esim")
     await db.seed_products([product])
     orders_list = [await orders.create_order(db, user.id, product, 1) for _ in range(2)]
     for order in orders_list:
@@ -773,15 +889,41 @@ async def test_bind_refused_when_local_snapshot_missing_and_upstream_plan_differ
     httpx_mock.add_response(status_code=503)
     await commbitz_purchaser.fulfill(db, order.id)
     # 上游只给 planId（无 SKU），与本地任何记录都无法匹配
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-x", "status": "Success", "requestType": "esim", "quantity": 1,
-        "planId": "OTHER-PLAN", "esims": []}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-x",
+                    "status": "Success",
+                    "requestType": "esim",
+                    "quantity": 1,
+                    "planId": "OTHER-PLAN",
+                    "esims": [],
+                },
+            },
+        }
+    )
     ok, detail = await commbitz_purchaser.bind_unknown_purchase(db, order.id, "up-x")
     assert not ok and "无法核对归属" in detail
     # 上游 SKU 与订单快照一致 → 交叉核对通过
-    httpx_mock.add_response(json={"statusCode": 200, "data": {"success": True, "data": {
-        "_id": "up-x", "status": "Success", "requestType": "esim", "quantity": 1,
-        "sku": "ORIGINAL-SKU", "esims": []}}})
+    httpx_mock.add_response(
+        json={
+            "statusCode": 200,
+            "data": {
+                "success": True,
+                "data": {
+                    "_id": "up-x",
+                    "status": "Success",
+                    "requestType": "esim",
+                    "quantity": 1,
+                    "sku": "ORIGINAL-SKU",
+                    "esims": [],
+                },
+            },
+        }
+    )
     ok, detail = await commbitz_purchaser.bind_unknown_purchase(db, order.id, "up-x")
     assert ok, detail
 
@@ -799,8 +941,10 @@ async def test_notified_delivered_order_with_pending_purchase_converges(
     assert purchase is not None
     # 模拟历史中断窗口：采购停留在 upstream_pending，且订单已通知完毕
     await db.transition_purchase(
-        purchase.id, PurchaseState.UPSTREAM_PENDING,
-        from_state=PurchaseState.FULFILLED, upstream_request_id=None,
+        purchase.id,
+        PurchaseState.UPSTREAM_PENDING,
+        from_state=PurchaseState.FULFILLED,
+        upstream_request_id=None,
     )
     await recover_once(db, commbitz_purchaser, bot)
     purchase = await db.get_purchase_by_order(esim_order.id)
@@ -810,9 +954,7 @@ async def test_notified_delivered_order_with_pending_purchase_converges(
 # ---- 第四轮审计修复回归（6bf171c 审计报告）----
 
 
-async def test_frozen_duplicate_purchases_block_notification_to_both_buyers(
-    *, tmp_path, caplog, bot
-):
+async def test_frozen_duplicate_purchases_block_notification_to_both_buyers(*, tmp_path, caplog, bot):
     """P1：冻结的重复采购必须同时拦截自动通知与手动补发（同一货品两个买家）。"""
     path = str(tmp_path / "dup3.db")
     with sqlite3.connect(path) as conn:

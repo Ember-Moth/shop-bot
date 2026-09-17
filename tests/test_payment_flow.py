@@ -90,9 +90,7 @@ def test_signature_with_non_ascii_and_urls():
 
 
 @pytest.mark.parametrize("method", ["GET", "POST"])
-async def test_callback_confirms_payment_and_worker_delivers_once(
-    *, http_client, db, pending, purchaser, bot, method
-):
+async def test_callback_confirms_payment_and_worker_delivers_once(*, http_client, db, pending, purchaser, bot, method):
     # 回调快速应答：只确认收款并建立采购任务（开发方案规则 1/2）
     kwargs = {"params" if method == "GET" else "data": callback_params(pending)}
     for _ in range(2):
@@ -236,9 +234,7 @@ async def test_restart_before_submit_becomes_manual_not_repurchase(*, tmp_path, 
 
 
 @pytest.mark.parametrize("status", [OrderStatus.PAID, OrderStatus.DELIVERY_FAILED])
-async def test_admin_can_resume_paid_or_failed_without_pending_reset(
-    *, db, pending, purchaser, bot, status
-):
+async def test_admin_can_resume_paid_or_failed_without_pending_reset(*, db, pending, purchaser, bot, status):
     await db.transition_order(pending.id, status, trade_no="T1")
     message = Message.model_validate(
         {
@@ -287,13 +283,16 @@ async def test_missing_or_invalid_webhook_secret_cannot_start(*, bot, secret):
 
 async def test_switching_product_resets_stale_order_context(db, pending, bot):
     """P1-a：切换商品时清空上一单残留的天数/号码，防止报价与订单金额不一致。"""
-    context = FSMContext(
-        storage=FSMStorage(db), key=StorageKey(bot_id=1, chat_id=42, user_id=42)
-    )
+    context = FSMContext(storage=FSMStorage(db), key=StorageKey(bot_id=1, chat_id=42, user_id=42))
     await context.set_state("OrderFlow:quantity")
-    await context.set_data({
-        "product_id": pending.product_id, "quantity": 2, "days": 30, "msisdn": "+8613800138000",
-    })
+    await context.set_data(
+        {
+            "product_id": pending.product_id,
+            "quantity": 2,
+            "days": 30,
+            "msisdn": "+8613800138000",
+        }
+    )
     callback = CallbackQuery.model_validate(
         {
             "id": "9",
@@ -315,10 +314,16 @@ async def test_dispatcher_serializes_duplicate_order_confirmation(db, pending, b
     dispatcher = build_dispatcher(db, DemoPurchaser(), None, None)
     context = dispatcher.fsm.get_context(bot=bot, chat_id=42, user_id=42)
     await context.set_state("OrderFlow:quantity")
-    await context.set_data({"product_id": pending.product_id, "quantity": 2, "product_quote": {
-        key: getattr(await db.get_product(pending.product_id), key)
-        for key in ("price_cents", "currency", "sku", "request_type", "upstream_plan_id")
-    }})
+    await context.set_data(
+        {
+            "product_id": pending.product_id,
+            "quantity": 2,
+            "product_quote": {
+                key: getattr(await db.get_product(pending.product_id), key)
+                for key in ("price_cents", "currency", "sku", "request_type", "upstream_plan_id")
+            },
+        }
+    )
 
     def confirm(update_id):
         return {

@@ -96,12 +96,8 @@ async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -
             )
             await bot.send_message(buyer.telegram_id, text)
         except Exception as exc:
-            logger.warning(
-                "topup notification failed", extra={"order_id": topup_id, "error": type(exc).__name__}
-            )
-    logger.info(
-        "topup credited", extra={"order_id": topup_id, "upstream_ref": payment.trade_no}
-    )
+            logger.warning("topup notification failed", extra={"order_id": topup_id, "error": type(exc).__name__})
+    logger.info("topup credited", extra={"order_id": topup_id, "upstream_ref": payment.trade_no})
     return web.Response(text="success")
 
 

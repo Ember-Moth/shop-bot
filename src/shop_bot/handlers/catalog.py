@@ -38,10 +38,7 @@ async def cb_product(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("商品不存在或已下架", show_alert=True)
         return
     text = (
-        f"**{escape_markdown(product.name)}**\n\n"
-        f"{escape_markdown(product.description)}\n\n价格：{product.price_text}"
+        f"**{escape_markdown(product.name)}**\n\n{escape_markdown(product.description)}\n\n价格：{product.price_text}"
     )
-    await _safe_edit(
-        callback, text, reply_markup=product_detail(product.id), parse_mode="Markdown"
-    )
+    await _safe_edit(callback, text, reply_markup=product_detail(product.id), parse_mode="Markdown")
     await callback.answer()

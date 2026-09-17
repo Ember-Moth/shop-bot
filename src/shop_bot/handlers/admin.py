@@ -130,8 +130,7 @@ async def cmd_status(message: Message, operations: Operations) -> None:
     else:
         lines.append("自动备份：已关闭")
     lines.append(
-        f"管理员告警：{'开启' if operations.settings.alerts_enabled else '关闭'}，"
-        f"收件人 {len(operations.admin_ids)} 个"
+        f"管理员告警：{'开启' if operations.settings.alerts_enabled else '关闭'}，收件人 {len(operations.admin_ids)} 个"
     )
     await message.answer("运行状态\n" + "\n".join(lines))
 

@@ -63,11 +63,7 @@ def main_menu_reply(kyc_enabled: bool = True) -> ReplyKeyboardMarkup:
 
 def catalog(products) -> InlineKeyboardMarkup:
     rows = [
-        [
-            InlineKeyboardButton(
-                text=f"{p.name} — {p.price_text}", callback_data=f"{CB_PRODUCT_PREFIX}{p.id}"
-            )
-        ]
+        [InlineKeyboardButton(text=f"{p.name} — {p.price_text}", callback_data=f"{CB_PRODUCT_PREFIX}{p.id}")]
         for p in products
     ]
     rows.append([InlineKeyboardButton(text="⬅️ 返回主菜单", callback_data="menu")])
@@ -97,14 +93,10 @@ def order_created(
 ) -> InlineKeyboardMarkup:
     rows = []
     if allow_balance:
-        rows.append(
-            [InlineKeyboardButton(text="💰 余额支付", callback_data=f"{CB_BALANCE_PAY}{order_id}")]
-        )
+        rows.append([InlineKeyboardButton(text="💰 余额支付", callback_data=f"{CB_BALANCE_PAY}{order_id}")])
     if pay_url:
         # Web App 按钮：在 Telegram 内嵌打开支付页面
-        rows.append(
-            [InlineKeyboardButton(text="💳 立即支付", web_app=WebAppInfo(url=pay_url))]
-        )
+        rows.append([InlineKeyboardButton(text="💳 立即支付", web_app=WebAppInfo(url=pay_url))])
     elif allow_online:
         rows.append([InlineKeyboardButton(text="💳 在线支付", callback_data=f"{CB_EPAY_PAY}{order_id}")])
     rows.append([InlineKeyboardButton(text="📦 查看我的订单", callback_data="myorders")])
