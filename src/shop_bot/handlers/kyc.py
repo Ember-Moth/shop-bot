@@ -47,6 +47,11 @@ async def _owned_order_or_reply(db: Database, message: Message, order_id: int | 
         return None
     from_user = message.from_user
     assert from_user is not None
+    await db.refresh_user_profile(
+        from_user.id,
+        from_user.username,
+        " ".join(filter(None, [from_user.first_name, from_user.last_name])) or None,
+    )
     user = await db.get_user_by_telegram_id(from_user.id)
     if not _is_admin(from_user.id) and (user is None or order.user_id != user.id):
         await message.answer("只能操作自己的订单")

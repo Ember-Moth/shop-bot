@@ -85,6 +85,7 @@ class User:
     telegram_id: int
     username: str | None
     created_at: datetime
+    display_name: str | None = None  # TG 昵称（first+last name），仅用于管理员检索展示
     balance_cents: int = 0  # 旧接口的 CNY 余额镜像；收付使用按币种的 wallet_balances
 
 

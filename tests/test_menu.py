@@ -4,7 +4,7 @@ from aiogram import Bot
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
-from aiogram.types import Message
+from aiogram.types import Message, User
 
 from shop_bot.config import FeaturesSettings, Settings
 from shop_bot.db import FSMStorage
@@ -157,6 +157,22 @@ async def test_cmd_start_clears_fsm_and_sets_keyboards(db, bot):
     texts = [m.text or "" for m in bot.session.sent]
     assert any("请选择功能" in t for t in texts)
     assert any("点击下方按钮快速使用" in t for t in texts)
+
+
+async def test_cmd_start_records_username_and_display_name(db, bot):
+    """/start 建档时记录 TG ID、用户名、昵称；改名后再次 /start 刷新。"""
+    context = FSMContext(storage=FSMStorage(db), key=StorageKey(bot_id=1, chat_id=42, user_id=42))
+    await start.cmd_start(menu_message(bot, "/start"), db, context)
+    user = await db.get_user_by_telegram_id(42)
+    assert user.username is None and user.display_name == "Tester"
+    renamed = menu_message(bot, "/start").model_copy(
+        update={
+            "from_user": User(id=42, is_bot=False, first_name="伟", last_name="张", username="zhangwei")
+        }
+    )
+    await start.cmd_start(renamed, db, context)
+    user = await db.get_user_by_telegram_id(42)
+    assert user.username == "zhangwei" and user.display_name == "伟 张"
 
 
 async def test_cmd_start_registers_admin_menu_after_reply(db, bot, monkeypatch):

@@ -233,6 +233,8 @@ class Database:
             user_columns = {row["name"] for row in await cur.fetchall()}
         if "balance_cents" not in user_columns:
             await conn.execute("ALTER TABLE users ADD COLUMN balance_cents INTEGER NOT NULL DEFAULT 0")
+        if "display_name" not in user_columns:
+            await conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT")
         async with conn.execute("PRAGMA table_info(balance_transactions)") as cur:
             tx_columns = {row["name"] for row in await cur.fetchall()}
         if "currency" not in tx_columns:
@@ -356,12 +358,15 @@ class Database:
         async with self.connection() as conn, conn.execute(sql, params) as cur:
             return list(await cur.fetchall())
 
-    async def upsert_user(self, telegram_id: int, username: str | None) -> User:
+    async def upsert_user(
+        self, telegram_id: int, username: str | None, display_name: str | None = None
+    ) -> User:
         async with self.transaction() as conn:
             async with conn.execute(
-                """INSERT INTO users (telegram_id, username) VALUES (?, ?)
-                ON CONFLICT(telegram_id) DO UPDATE SET username = excluded.username RETURNING *""",
-                (telegram_id, username),
+                """INSERT INTO users (telegram_id, username, display_name) VALUES (?, ?, ?)
+                ON CONFLICT(telegram_id) DO UPDATE SET username = excluded.username,
+                display_name = excluded.display_name RETURNING *""",
+                (telegram_id, username, display_name),
             ) as cur:
                 row = await cur.fetchone()
         assert row is not None
@@ -374,6 +379,27 @@ class Database:
     async def get_user_by_telegram_id(self, telegram_id: int) -> User | None:
         row = await self._one("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
         return _row_to_user(row) if row else None
+
+    async def search_users(self, query: str) -> list[User]:
+        """按 TG ID / 用户名 / 昵称模糊检索（管理员用，上限 20）。"""
+        like = f"%{query}%"
+        rows = await self._all(
+            """SELECT * FROM users
+            WHERE CAST(telegram_id AS TEXT) = ? OR username LIKE ? OR display_name LIKE ?
+            ORDER BY id LIMIT 20""",
+            (query, like, like),
+        )
+        return [_row_to_user(r) for r in rows]
+
+    async def refresh_user_profile(
+        self, telegram_id: int, username: str | None, display_name: str | None
+    ) -> None:
+        """已注册用户的资料刷新（改名/改昵称）；未注册则忽略（由 /start 建档）。"""
+        async with self.transaction() as conn:
+            await conn.execute(
+                "UPDATE users SET username = ?, display_name = ? WHERE telegram_id = ?",
+                (username, display_name, telegram_id),
+            )
 
     async def list_products(self) -> list[Product]:
         return [_row_to_product(r) for r in await self._all("SELECT * FROM products WHERE active = 1 ORDER BY id")]
@@ -1363,10 +1389,12 @@ class Database:
 
 
 def _row_to_user(row: aiosqlite.Row) -> User:
+    keys = row.keys()
     return User(
         id=row["id"],
         telegram_id=row["telegram_id"],
         username=row["username"],
+        display_name=row["display_name"] if "display_name" in keys else None,
         balance_cents=row["balance_cents"],
         created_at=row["created_at"],
     )

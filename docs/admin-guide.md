@@ -39,6 +39,7 @@
 | 命令 | 说明 |
 |---|---|
 | `/orders [状态]` | 查看订单，可按状态过滤：`pending_payment` `paid` `delivered` `delivery_failed` `cancelled` `refunded` |
+| `/whois <TG ID 或用户名或昵称关键词>` | 检索用户，返回内部编号、TG ID、@用户名、昵称（用于定位买家） |
 | `/query <订单号>` | 主动核单：查询支付状态、补履约；已发货订单会把交付资料重新私信给买家 |
 | `/paid <订单号>` | 手动确认收款并推进履约（EPay 回调丢失/延迟时的兜底；不重置已付款订单） |
 | `/cancel <订单号>` | 取消待支付订单 |

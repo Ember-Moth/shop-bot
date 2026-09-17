@@ -24,6 +24,25 @@ def _fmt(o) -> str:
     return f"#{o.id} · user_db_id={o.user_id} · x{o.quantity} · {o.amount_text} · {o.status}"
 
 
+def _fmt_user(u) -> str:
+    uname = f"@{u.username}" if u.username else "无用户名"
+    name = f"「{u.display_name}」" if u.display_name else ""
+    return f"#{u.id} · TG {u.telegram_id} · {uname}{name}"
+
+
+@router.message(Command("whois"))
+async def cmd_whois(message: Message, db: Database) -> None:
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip():
+        await message.answer("用法：/whois <TG ID 或用户名或昵称关键词>")
+        return
+    users = await db.search_users(parts[1].strip().lstrip("@"))
+    if not users:
+        await message.answer("没有匹配的用户")
+        return
+    await message.answer("👥 匹配用户\n\n" + "\n".join(_fmt_user(u) for u in users))
+
+
 @router.message(Command("products"))
 async def cmd_products(message: Message, db: Database) -> None:
     products = await db.list_all_products()

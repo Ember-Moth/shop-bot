@@ -35,6 +35,11 @@ async def start_topup(message: Message, db: Database, epay: EPayClient | None, s
     balance = 0
     from_user = message.from_user
     if from_user is not None:
+        await db.refresh_user_profile(
+            from_user.id,
+            from_user.username,
+            " ".join(filter(None, [from_user.first_name, from_user.last_name])) or None,
+        )
         user = await db.get_user_by_telegram_id(from_user.id)
         if user is not None:
             balance = await db.get_balance(user.id, epay.currency)

@@ -67,7 +67,8 @@ async def cmd_start(message: Message, db: Database, state: FSMContext) -> None:
     await state.clear()
     from_user = message.from_user
     assert from_user is not None  # aiogram 在私聊场景下保证非空
-    await db.upsert_user(from_user.id, from_user.username)
+    display_name = " ".join(filter(None, [from_user.first_name, from_user.last_name])) or None
+    await db.upsert_user(from_user.id, from_user.username, display_name)
     settings = get_settings()
     await message.answer("👇 请选择功能 👇", reply_markup=main_menu())
     # 常驻回复键盘：发送一次即驻留，用户点底部按钮即可触发功能

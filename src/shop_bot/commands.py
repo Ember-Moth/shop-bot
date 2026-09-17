@@ -35,6 +35,7 @@ def admin_commands() -> list[BotCommand]:
         BotCommand(command="unpublish", description="下架"),
         BotCommand(command="currency", description="设置计价币种"),
         BotCommand(command="orders", description="查看订单"),
+        BotCommand(command="whois", description="按 TG ID/用户名/昵称检索用户"),
         BotCommand(command="paid", description="确认收款并履约"),
         BotCommand(command="cancel", description="取消待支付订单"),
         BotCommand(command="refund", description="人工退款并关单"),

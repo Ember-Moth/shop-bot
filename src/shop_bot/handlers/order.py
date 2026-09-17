@@ -290,6 +290,11 @@ async def cb_pay_with_balance(callback: CallbackQuery, db: Database, purchaser: 
     order_id = int(data.removeprefix(keyboards.CB_BALANCE_PAY))
     from_user = callback.from_user
     assert from_user is not None
+    await db.refresh_user_profile(
+        callback.from_user.id,
+        callback.from_user.username,
+        " ".join(filter(None, [callback.from_user.first_name, callback.from_user.last_name])) or None,
+    )
     user = await db.get_user_by_telegram_id(from_user.id)
     if user is None:
         await callback.answer("请先发 /start 再操作", show_alert=True)
