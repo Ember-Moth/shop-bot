@@ -15,6 +15,7 @@ from shop_bot.services import orders
 from shop_bot.services.balance import format_cents, parse_signed_amount, parse_topup_amount
 from shop_bot.services.epay import _create_sign
 from shop_bot.services.fulfillment import recover_once
+from shop_bot.services.purchasing import PurchaseGateway
 from shop_bot.web.payment import register_epay_routes
 
 
@@ -460,7 +461,10 @@ async def test_recover_once_sends_refund_notification(db, user, bot):
     order = await orders.create_order(db, user.id, product, 1)
     await db.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
 
-    class _RefundingPurchaser:
+    class _RefundingPurchaser(PurchaseGateway):
+        async def ensure_purchase(self, db, order):
+            return None
+
         async def fulfill(self, db, order_id):
             await db.refund_order_to_balance(order_id, "test")
             return await db.get_order(order_id)
