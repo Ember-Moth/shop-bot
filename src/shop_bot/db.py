@@ -717,6 +717,9 @@ class Database:
             name = name.strip()
             if not 0 < len(name) <= 100:
                 raise ValueError("名称需为 1–100 个字符")
+            if any(ord(c) < 0x20 or c == "\x7f" for c in name):
+                # 名称会进入买家可见的目录按钮与详情，换行等控制字符会破坏排版
+                raise ValueError("名称不能包含换行等控制字符")
         async with self.transaction() as conn:
             async with conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)) as cur:
                 row = await cur.fetchone()

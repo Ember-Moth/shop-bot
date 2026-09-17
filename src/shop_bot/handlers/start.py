@@ -69,14 +69,15 @@ async def cmd_start(message: Message, db: Database, state: FSMContext) -> None:
     assert from_user is not None  # aiogram 在私聊场景下保证非空
     await db.upsert_user(from_user.id, from_user.username)
     settings = get_settings()
-    if settings.admin_ids and from_user.id in settings.admin_ids:
-        # 管理员首次私聊后补齐其命令菜单（chat scope 要求会话已存在，启动时可能尚未私聊）
-        bot = message.bot
-        assert bot is not None
-        await register_admin_menu(bot, from_user.id, settings)
     await message.answer("👇 请选择功能 👇", reply_markup=main_menu())
     # 常驻回复键盘：发送一次即驻留，用户点底部按钮即可触发功能
     await message.answer("点击下方按钮快速使用", reply_markup=main_menu_reply(settings.features.kyc))
+    if settings.admin_ids and from_user.id in settings.admin_ids:
+        # 先回复再注册菜单：Telegram API 抖动不影响 /start 响应（审计 P3-2）；
+        # chat scope 要求会话已存在，管理员首次私聊时这里补上启动时可能失败的注册
+        bot = message.bot
+        assert bot is not None
+        await register_admin_menu(bot, from_user.id, settings)
 
 
 @router.callback_query(F.data == "menu")

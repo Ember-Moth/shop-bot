@@ -144,6 +144,25 @@ async def test_cmd_start_clears_fsm_and_sets_keyboards(db, bot):
     assert any("点击下方按钮快速使用" in t for t in texts)
 
 
+async def test_cmd_start_registers_admin_menu_after_reply(db, bot, monkeypatch):
+    """管理员 /start：先回复主菜单，再注册其命令菜单（审计 P3-2 的顺序约束）。"""
+    monkeypatch.setattr(start, "get_settings", lambda: Settings(admin_ids=[42]))
+    context = FSMContext(storage=FSMStorage(db), key=StorageKey(bot_id=1, chat_id=42, user_id=42))
+    await start.cmd_start(menu_message(bot, "/start"), db, context)
+    menus = [m for m in bot.session.sent if m.__api_method__ == "setMyCommands"]
+    assert len(menus) == 1 and menus[0].scope.chat_id == 42
+    assert bot.session.sent[-1].__api_method__ == "setMyCommands"  # 注册在回复之后
+
+
+async def test_cmd_start_answers_even_if_admin_menu_fails(db, bot, monkeypatch):
+    monkeypatch.setattr(start, "get_settings", lambda: Settings(admin_ids=[42]))
+    bot.session.fail_commands_for.add(42)
+    context = FSMContext(storage=FSMStorage(db), key=StorageKey(bot_id=1, chat_id=42, user_id=42))
+    await start.cmd_start(menu_message(bot, "/start"), db, context)
+    texts = [getattr(m, "text", None) or "" for m in bot.session.sent]
+    assert any("请选择功能" in t for t in texts)
+
+
 async def test_menu_router_buy_and_orders(db, user, bot):
     start._menu_last_seen.clear()
     await db.seed_products([Product(1, "美国 1GB", "", 999, "CNY")])

@@ -69,6 +69,11 @@ async def test_admin_rename_and_audit(db, bot):
     assert any("用法" in (m.text or "") for m in bot.session.sent)
     with pytest.raises(ValueError, match="名称"):
         await db.configure_product(1, name="   ")
+    # 名称进入买家可见目录，多行消息注入的换行必须拒绝（审计 P2-1）
+    with pytest.raises(ValueError, match="控制字符"):
+        await db.configure_product(1, name="美国\n1GB")
+    await admin.cmd_rename(msg.model_copy(update={"text": "/rename 1 美国\n1GB"}), db)
+    assert any("控制字符" in (m.text or "") for m in bot.session.sent)
 
 
 async def test_live_publish_requires_mapping(db, product):
