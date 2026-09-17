@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import Field, field_validator
@@ -21,7 +21,7 @@ from .money import normalize_currency
 class UpstreamSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SHOP_BOT_UPSTREAM_")
 
-    provider: str = ""  # "commbitz" 启用上游目录同步；发货仍为模拟，见 docs/reseller-bot-development.md
+    provider: Literal["", "commbitz"] = ""  # 留空模拟；commbitz 启用真实采购
     environment: str = "uat"  # uat / live
     api_key: str = ""
     secret_key: str = ""
@@ -75,6 +75,28 @@ class LoggingSettings(BaseSettings):
     json_logs: bool = False  # 是否用 JSON 格式（生产环境建议开）
 
 
+class OperationsSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SHOP_BOT_OPERATIONS_")
+
+    alerts_enabled: bool = True
+    check_interval_seconds: float = Field(default=30, ge=1)
+    alert_cooldown_seconds: float = Field(default=1800, ge=1)
+    stale_order_seconds: int = Field(default=900, ge=1)
+    notification_stale_seconds: int = Field(default=300, ge=1)
+    worker_stale_seconds: float = Field(default=180, ge=1)
+    health_timeout_seconds: float = Field(default=2, gt=0, le=30)
+
+
+class BackupSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SHOP_BOT_BACKUP_")
+
+    enabled: bool = True
+    directory: str = Field(default="backups", min_length=1)  # 相对路径按数据库所在目录解析
+    interval_seconds: float = Field(default=86400, ge=60)
+    keep: int = Field(default=14, ge=1, le=365)
+    timeout_seconds: float = Field(default=120, ge=1)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SHOP_BOT_", env_nested_delimiter="__")
 
@@ -87,6 +109,8 @@ class Settings(BaseSettings):
     epay: EPaySettings = Field(default_factory=EPaySettings)
     features: FeaturesSettings = Field(default_factory=FeaturesSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    operations: OperationsSettings = Field(default_factory=OperationsSettings)
+    backup: BackupSettings = Field(default_factory=BackupSettings)
 
     @classmethod
     def settings_customise_sources(

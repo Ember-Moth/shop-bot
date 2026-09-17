@@ -13,11 +13,14 @@ from .db import Database, FSMStorage
 from .handlers import admin, balance, catalog, kyc, order, start
 from .logging_config import get_logger, setup_logging
 from .models import Product
+from .services.backup import BackupManager
 from .services.catalog_sync import sync_catalog
 from .services.commbitz_api import CommbitzClient, CommbitzError, base_url_for
 from .services.epay import EPayClient, EPayConfig
 from .services.fulfillment import recovery_loop
+from .services.operations import Operations, RuntimeState
 from .services.purchasing import CommbitzPurchaser, DemoPurchaser, Purchaser
+from .web.health import register_health_routes
 from .web.payment import register_epay_routes
 from .web.telegram import register_telegram_routes, validate_webhook_secret
 
@@ -87,12 +90,13 @@ async def amain() -> None:
         raise SystemExit("SHOP_BOT_BOT_TOKEN is not set")
 
     validate_webhook_secret(settings.webhook.secret_token)
+    runtime = RuntimeState()
 
     async with AsyncExitStack() as resources:
         db = Database(settings.database_path)
         await db.connect()
         resources.push_async_callback(db.close)
-        if not await db.list_products():
+        if not settings.upstream.provider and not await db.list_all_products():
             await db.seed_products(DEMO_PRODUCTS)
 
         # Commbitz 共享客户端：目录同步 + 采购 + 人工核对共用，随进程生命周期关闭
@@ -102,13 +106,19 @@ async def amain() -> None:
             try:
                 await sync_catalog(db, commbitz_client)
             except CommbitzError as exc:
-                logger.warning("upstream catalog sync failed: %s", exc)
+                runtime.failures["catalog_sync"] = "上游目录同步失败，请检查配置和日志；恢复后重启服务重试同步"
+                logger.warning("upstream catalog sync failed", extra={"error": type(exc).__name__})
             except Exception:
-                logger.exception("upstream catalog sync failed unexpectedly")
+                runtime.failures["catalog_sync"] = "上游目录同步异常，请检查配置和日志"
+                logger.error("upstream catalog sync failed unexpectedly")  # noqa: TRY400 - 异常原文可能含敏感信息
         purchaser = build_purchaser(commbitz_client)
 
         bot = Bot(settings.bot_token)
         resources.push_async_callback(bot.session.close)
+        backups = BackupManager(settings.database_path, settings.backup)
+        operations = Operations(db, bot, settings.admin_ids, settings.operations, runtime=runtime, backups=backups)
+        if settings.operations.alerts_enabled and not settings.admin_ids:
+            logger.warning("operator alerts have no recipients; configure admin_ids")
 
         epay_client = None
         if settings.epay.pid and settings.epay.key and settings.epay.url:
@@ -123,6 +133,8 @@ async def amain() -> None:
             )
             resources.push_async_callback(epay_client.close)
         dp = build_dispatcher(db, purchaser, epay_client, commbitz_client)
+        dp["operations"] = operations
+        dp.errors.register(operations.on_handler_error)
         app = aiohttp_web.Application()
         app["db"] = db
         app["purchaser"] = purchaser
@@ -130,6 +142,7 @@ async def amain() -> None:
         app["bot"] = bot
         app["epay"] = epay_client
         register_telegram_routes(app, dp, bot, settings.webhook.path, settings.webhook.secret_token)
+        register_health_routes(app, operations)
         setup_application(app, dp, bot=bot)
         if epay_client is not None:
             register_epay_routes(app, settings.payment.callback_path)
@@ -141,19 +154,39 @@ async def amain() -> None:
         webhook_url = f"{settings.webhook.url.rstrip('/')}{settings.webhook.path}"
         await bot.set_webhook(webhook_url, secret_token=settings.webhook.secret_token)
         resources.push_async_callback(bot.delete_webhook)
+        runtime.webhook_ready = True
         logger.info("webhook registered: %s", webhook_url)
         logger.info("listening on %s:%d", settings.webhook.host, settings.webhook.port)
-        recovery_task = asyncio.create_task(recovery_loop(db, purchaser, bot))
-        resources.push_async_callback(_stop_recovery, recovery_task)
+        runtime.tasks["recovery"] = asyncio.create_task(recovery_loop(db, purchaser, bot, runtime))
+        runtime.tasks["monitor"] = asyncio.create_task(operations.run())
+        if settings.backup.enabled:
+            runtime.tasks["backup"] = asyncio.create_task(backups.run())
+        for name, task in runtime.tasks.items():
+            runtime.beat(name)
+            resources.push_async_callback(_stop_task, task)
+        resources.callback(setattr, runtime, "stopping", True)
         stop = asyncio.Event()
         if sys.platform != "win32":
             loop = asyncio.get_running_loop()
             loop.add_signal_handler(signal.SIGTERM, stop.set)
             resources.callback(loop.remove_signal_handler, signal.SIGTERM)
-        await stop.wait()
+        stop_task = asyncio.create_task(stop.wait())
+        resources.push_async_callback(_stop_task, stop_task)
+        done, _ = await asyncio.wait([stop_task, *runtime.tasks.values()], return_when=asyncio.FIRST_COMPLETED)
+        if stop_task not in done:
+            failed_name = next(name for name, task in runtime.tasks.items() if task in done)
+            logger.error("background worker exited", extra={"error": failed_name})
+            # supervisor(systemd) 将重启服务；告警失败不阻挡退出。
+            try:
+                async with asyncio.timeout(10):
+                    await db.set_alert(f"worker_{failed_name}", f"后台任务 {failed_name} 退出，服务将重启")
+                    await operations.deliver_alerts()
+            except Exception:
+                logger.warning("worker failure alert unavailable")
+            raise RuntimeError(f"background worker exited: {failed_name}")
 
 
-async def _stop_recovery(task: asyncio.Task[None]) -> None:
+async def _stop_task(task: asyncio.Task) -> None:
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
 

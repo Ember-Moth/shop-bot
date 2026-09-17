@@ -1,4 +1,3 @@
-
 from aiogram.client.session.base import BaseSession
 from aiogram.types import Message, User
 
@@ -8,6 +7,7 @@ class FakeSession(BaseSession):
         super().__init__()
         self.sent = []
         self.fail_send = False
+        self.fail_photo = False
 
     async def close(self):
         pass
@@ -26,6 +26,18 @@ class FakeSession(BaseSession):
                     "date": 0,
                     "chat": {"id": chat_id, "type": "private" if chat_id > 0 else "supergroup"},
                     "text": method.text,
+                }
+            )
+        if method.__api_method__ == "sendPhoto":
+            if self.fail_send or self.fail_photo:
+                raise RuntimeError("simulated Telegram image unavailable")
+            return Message.model_validate(
+                {
+                    "message_id": 100,
+                    "date": 0,
+                    "chat": {"id": int(method.chat_id), "type": "private"},
+                    "caption": method.caption,
+                    "photo": [{"file_id": "photo", "file_unique_id": "photo-id", "width": 512, "height": 512}],
                 }
             )
         return True

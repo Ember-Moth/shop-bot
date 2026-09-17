@@ -341,9 +341,9 @@ async def test_multi_esim_notification_sends_in_chunks(*, db, user, commbitz_pur
     order = await commbitz_purchaser.fulfill(db, order.id)
     assert order is not None and order.payload
     assert await notify_owner(db, bot, order.id)
-    goods_messages = [m for m in bot.session.sent if "ICCID" in (m.text or "")]
+    goods_messages = [m for m in bot.session.sent if "ICCID" in (getattr(m, "text", "") or "")]
     assert len(goods_messages) > 1  # 分条发送
-    assert all(len(m.text) <= 4096 for m in bot.session.sent)
+    assert all(len(getattr(m, "text", "")) <= 4096 for m in bot.session.sent)
 
 
 # ---- 审计修复回归（d2bbca7/21b4bdb/1950679 审计报告）----
@@ -352,7 +352,9 @@ async def test_multi_esim_notification_sends_in_chunks(*, db, user, commbitz_pur
 async def _seed_order(db, user_id, sku, request_type):
     product = Product(1, "p", "", 999, "CNY", sku=sku, request_type=request_type)
     await db.seed_products([product])
-    return await orders.create_order(db, user_id, product, 1)
+    stored = await db.get_product(product.id)
+    assert stored is not None
+    return await orders.create_order(db, user_id, stored, 1)
 
 
 async def test_recharge_days_included_in_payment_amount(db, user):

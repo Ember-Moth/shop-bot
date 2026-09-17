@@ -15,7 +15,7 @@ from shop_bot.db import Database, FSMStorage
 from shop_bot.handlers.admin import cmd_adjust, cmd_currency, cmd_refund
 from shop_bot.handlers.balance import start_topup, topup_amount_input
 from shop_bot.handlers.kyc import cmd_kyc
-from shop_bot.handlers.order import cb_confirm, cb_pay_online, cb_pay_with_balance
+from shop_bot.handlers.order import cb_confirm, cb_pay_online, cb_pay_with_balance, product_quote
 from shop_bot.models import OrderStatus, Product, PurchaseState
 from shop_bot.services import orders
 from shop_bot.services.commbitz_api import CommbitzError
@@ -236,7 +236,7 @@ async def test_confirmation_only_creates_link_after_channel_selection(db, bot):
     user, _ = await new_order(db)
     await db.adjust_balance(user.id, 10000, "funding", "USD")
     context = FSMContext(storage=FSMStorage(db), key=StorageKey(bot_id=1, chat_id=42, user_id=42))
-    await context.set_data({"product_id": 1, "quantity": 1})
+    await context.set_data({"product_id": 1, "quantity": 1, "product_quote": product_quote(await db.get_product(1))})
     epay = EPayClient(EPayConfig("1000", "audit-secret", "https://pay.example.com", currency="USD"))
     try:
         callback = _balance_callback(bot, 1).model_copy(update={"data": "order:confirm"})

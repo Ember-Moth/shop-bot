@@ -22,7 +22,7 @@ from .models import (
     TopupState,
     User,
 )
-from .money import normalize_currency
+from .money import REQUEST_TYPES, normalize_currency
 
 logger = get_logger(__name__)
 
@@ -85,6 +85,31 @@ CREATE TABLE IF NOT EXISTS products (
     active INTEGER NOT NULL DEFAULT 1,
     sku TEXT,
     upstream_plan_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS product_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    actor_id INTEGER,
+    before_json TEXT NOT NULL,
+    after_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS operator_alerts (
+    key TEXT PRIMARY KEY,
+    summary TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    revision INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS alert_deliveries (
+    alert_key TEXT NOT NULL,
+    admin_id INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    last_sent REAL NOT NULL,
+    PRIMARY KEY (alert_key, admin_id)
 );
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -188,6 +213,12 @@ class Database:
                 await conn.execute(f"ALTER TABLE orders ADD COLUMN {column} TEXT")
         if "input_days" not in columns:
             await conn.execute("ALTER TABLE orders ADD COLUMN input_days INTEGER")
+        if "delivery_esims" not in columns:
+            await conn.execute("ALTER TABLE orders ADD COLUMN delivery_esims TEXT")
+        if "notification_cursor" not in columns:
+            await conn.execute("ALTER TABLE orders ADD COLUMN notification_cursor INTEGER NOT NULL DEFAULT 0")
+        if "notification_retry_at" not in columns:
+            await conn.execute("ALTER TABLE orders ADD COLUMN notification_retry_at REAL")
         if "payment_method" not in columns:
             await conn.execute("ALTER TABLE orders ADD COLUMN payment_method TEXT")
             # 旧待付单可能已生成可用的 EPay 链接，升级后不允许再切换到余额。
@@ -483,6 +514,7 @@ class Database:
         from_purchase_state: PurchaseState,
         upstream_ref: str | None,
         payload: str | None,
+        delivery_esims: str | None = None,
     ) -> Order | None:
         """同一事务内交付订单并落采购终态（审计 P2：消除两阶段提交中断窗口）。
 
@@ -530,10 +562,10 @@ class Database:
                 return None
             async with conn.execute(
                 """UPDATE orders SET status = ?, upstream_ref = ?,
-                payload = ?, updated_at = datetime('now'),
-                notification_pending = 1
+                payload = ?, delivery_esims = ?, updated_at = datetime('now'),
+                notification_pending = 1, notification_cursor = 0, notification_retry_at = NULL
                 WHERE id = ? AND status = 'paid' RETURNING *""",
-                (OrderStatus.DELIVERED, upstream_ref, payload, order_id),
+                (OrderStatus.DELIVERED, upstream_ref, payload, delivery_esims, order_id),
             ) as cur:
                 updated = await cur.fetchone()
             await conn.execute(
@@ -552,6 +584,7 @@ class Database:
         """调用方持有事务：仅撤销旧交付资料，金额、支付交易号与付款事实保持不变。"""
         async with conn.execute(
             """UPDATE orders SET status = 'paid', upstream_ref = NULL, payload = NULL,
+            delivery_esims = NULL, notification_cursor = 0, notification_retry_at = NULL,
             notification_pending = 0, notified_at = NULL, updated_at = datetime('now')
             WHERE id = ? RETURNING *""",
             (order["id"],),
@@ -664,14 +697,135 @@ class Database:
     async def list_all_products(self) -> list[Product]:
         return [_row_to_product(r) for r in await self._all("SELECT * FROM products ORDER BY id")]
 
-    async def set_product_currency(self, product_id: int, currency: str) -> Product | None:
-        currency = normalize_currency(currency)
+    async def configure_product(
+        self,
+        product_id: int,
+        *,
+        actor_id: int | None = None,
+        price_cents: int | None = None,
+        currency: str | None = None,
+        active: bool | None = None,
+        require_upstream: bool = False,
+    ) -> Product | None:
+        if price_cents is not None and not 0 < price_cents <= 999999999:
+            raise ValueError("价格需大于零且不超过 9999999.99")
+        if currency is not None:
+            currency = normalize_currency(currency)
         async with self.transaction() as conn:
-            async with conn.execute(
-                "UPDATE products SET currency = ? WHERE id = ? RETURNING *", (currency, product_id)
-            ) as cur:
+            async with conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)) as cur:
                 row = await cur.fetchone()
-        return _row_to_product(row) if row else None
+            if row is None:
+                return None
+            before = {key: row[key] for key in ("price_cents", "currency", "active")}
+            after = {
+                "price_cents": price_cents if price_cents is not None else row["price_cents"],
+                "currency": currency if currency is not None else row["currency"],
+                "active": int(active) if active is not None else row["active"],
+            }
+            if active:
+                if after["price_cents"] <= 0:
+                    raise ValueError("请先用 /price 设置有效售价")
+                normalize_currency(after["currency"])
+                if require_upstream and (
+                    not row["sku"] or not row["upstream_plan_id"] or row["request_type"] not in REQUEST_TYPES
+                ):
+                    raise ValueError("真实商品缺少 SKU、上游套餐或明确业务类型，暂不能上架")
+            async with conn.execute(
+                "UPDATE products SET price_cents = ?, currency = ?, active = ? WHERE id = ? RETURNING *",
+                (after["price_cents"], after["currency"], after["active"], product_id),
+            ) as cur:
+                updated = await cur.fetchone()
+            if before != after:
+                await conn.execute(
+                    "INSERT INTO product_events (product_id, actor_id, before_json, after_json) VALUES (?, ?, ?, ?)",
+                    (product_id, actor_id, json.dumps(before), json.dumps(after)),
+                )
+        return _row_to_product(updated) if updated else None
+
+    async def set_product_currency(
+        self,
+        product_id: int,
+        currency: str,
+        *,
+        actor_id: int | None = None,
+    ) -> Product | None:
+        return await self.configure_product(product_id, currency=currency, actor_id=actor_id)
+
+    async def ping(self) -> None:
+        await self._one("SELECT 1 FROM users LIMIT 1")
+
+    async def operational_issues(self, stale_seconds: int, notification_seconds: int) -> dict[str, str]:
+        queries = {
+            "manual_purchases": (
+                """SELECT o.id, COUNT(*) OVER() AS total FROM orders o JOIN purchases p ON p.order_id = o.id
+                WHERE o.status IN ('paid', 'delivered') AND p.state = 'submission_unknown' ORDER BY o.id LIMIT 5""",
+                (),
+                "采购结果不明，需 /purchases 核对",
+            ),
+            "stalled_orders": (
+                """SELECT o.id, COUNT(*) OVER() AS total FROM orders o LEFT JOIN purchases p ON p.order_id = o.id
+                WHERE o.status = 'paid' AND (p.id IS NULL OR p.state IN (
+                    'ready', 'submitting', 'upstream_pending', 'refund_pending', 'rejected'
+                )) AND COALESCE(p.updated_at, o.updated_at) <= datetime('now', ?)
+                ORDER BY o.id LIMIT 5""",
+                (f"-{stale_seconds} seconds",),
+                "付款后履约/退款长时间未完成",
+            ),
+            "pending_notifications": (
+                """SELECT id, COUNT(*) OVER() AS total FROM orders
+                WHERE notification_pending = 1 AND status IN ('delivered', 'refunded')
+                AND updated_at <= datetime('now', ?) ORDER BY id LIMIT 5""",
+                (f"-{notification_seconds} seconds",),
+                "买家通知持续未送达",
+            ),
+        }
+        issues = {}
+        for key, (sql, params, summary) in queries.items():
+            rows = await self._all(sql, params)
+            if rows:
+                ids = ", ".join(f"#{r['id']}" for r in rows)
+                issues[key] = f"{summary}：{rows[0]['total']} 单（{ids}）"
+        return issues
+
+    async def set_alert(self, key: str, summary: str | None) -> None:
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT * FROM operator_alerts WHERE key = ?", (key,)) as cur:
+                old = await cur.fetchone()
+            if summary is None:
+                if old is not None and old["active"]:
+                    await conn.execute(
+                        """UPDATE operator_alerts SET active = 0, revision = revision + 1,
+                        updated_at = datetime('now') WHERE key = ?""",
+                        (key,),
+                    )
+            elif old is None:
+                await conn.execute("INSERT INTO operator_alerts (key, summary) VALUES (?, ?)", (key, summary))
+            elif not old["active"] or old["summary"] != summary:
+                await conn.execute(
+                    """UPDATE operator_alerts SET summary = ?, active = 1, revision = revision + 1,
+                    updated_at = datetime('now') WHERE key = ?""",
+                    (summary, key),
+                )
+
+    async def pending_alerts(self, admin_id: int, now: float, cooldown: float) -> list[dict[str, Any]]:
+        rows = await self._all(
+            """SELECT a.* FROM operator_alerts a LEFT JOIN alert_deliveries d
+            ON d.alert_key = a.key AND d.admin_id = ?
+            WHERE (a.active = 1 OR d.revision IS NOT NULL)
+            AND (d.revision IS NULL OR a.revision > d.revision OR (a.active = 1 AND d.last_sent <= ?))
+            ORDER BY COALESCE(d.last_sent, 0), a.key LIMIT 10""",
+            (admin_id, now - cooldown),
+        )
+        return [dict(row) for row in rows]
+
+    async def mark_alert_sent(self, key: str, admin_id: int, revision: int, now: float) -> None:
+        async with self.transaction() as conn:
+            await conn.execute(
+                """INSERT INTO alert_deliveries (alert_key, admin_id, revision, last_sent) VALUES (?, ?, ?, ?)
+                ON CONFLICT(alert_key, admin_id) DO UPDATE SET revision = excluded.revision,
+                last_sent = excluded.last_sent""",
+                (key, admin_id, revision, now),
+            )
 
     async def get_balance(self, user_id: int, currency: str) -> int:
         row = await self._one(
@@ -1032,12 +1186,26 @@ class Database:
         sku: str | None = None,
         request_type: str | None = None,
         plan_id: str | None = None,
+        expected_product: Product | None = None,
     ) -> Order:
         """创建订单并固定本次采购输入快照（SKU/业务类型/套餐/数量/天数/ICCID/号码）。
 
         快照在下单时锁定，之后商品目录变更不影响已创建订单的采购与交付核验。
         """
         async with self.transaction() as conn:
+            if expected_product is not None:
+                async with conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)) as cur:
+                    current = await cur.fetchone()
+                if (
+                    current is None
+                    or not current["active"]
+                    or current["price_cents"] <= 0
+                    or any(
+                        current[key] != getattr(expected_product, key)
+                        for key in ("price_cents", "currency", "sku", "request_type", "upstream_plan_id")
+                    )
+                ):
+                    raise ValueError("商品已下架或报价已变化，请重新下单")
             async with conn.execute(
                 """INSERT INTO orders (user_id, product_id, quantity, amount_cents, currency,
                 input_iccid, input_msisdn, input_days, input_sku, input_request_type, input_plan_id)
@@ -1094,7 +1262,8 @@ class Database:
     async def mark_notified(self, order_id: int) -> None:
         async with self.transaction() as conn:
             await conn.execute(
-                """UPDATE orders SET notified_at = datetime('now'), notification_pending = 0
+                """UPDATE orders SET notified_at = datetime('now'), notification_pending = 0,
+                notification_retry_at = NULL
                 WHERE id = ? AND status IN ('delivered', 'refunded')""",
                 (order_id,),
             )
@@ -1102,7 +1271,26 @@ class Database:
     async def request_notification(self, order_id: int) -> None:
         async with self.transaction() as conn:
             await conn.execute(
-                "UPDATE orders SET notification_pending = 1 WHERE id = ? AND status = 'delivered'", (order_id,)
+                "UPDATE orders SET notification_pending = 1, notification_cursor = 0"
+                " WHERE id = ? AND status = 'delivered'",
+                (order_id,),
+            )
+
+    async def advance_notification(self, order_id: int, expected_cursor: int) -> bool:
+        async with self.transaction() as conn:
+            async with conn.execute(
+                """UPDATE orders SET notification_cursor = notification_cursor + 1
+                WHERE id = ? AND status = 'delivered' AND notification_pending = 1
+                AND notification_cursor = ? RETURNING id""",
+                (order_id, expected_cursor),
+            ) as cur:
+                return await cur.fetchone() is not None
+
+    async def defer_notification(self, order_id: int, retry_at: float) -> None:
+        async with self.transaction() as conn:
+            await conn.execute(
+                "UPDATE orders SET notification_retry_at = ? WHERE id = ? AND notification_pending = 1",
+                (retry_at, order_id),
             )
 
     async def transition_order(
@@ -1238,6 +1426,9 @@ def _row_to_order(row: aiosqlite.Row) -> Order:
         input_request_type=row["input_request_type"],
         input_plan_id=row["input_plan_id"],
         payment_method=row["payment_method"],
+        delivery_esims=row["delivery_esims"],
+        notification_cursor=row["notification_cursor"],
+        notification_retry_at=row["notification_retry_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

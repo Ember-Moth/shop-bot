@@ -6,6 +6,7 @@
 
 - 一台有公网 IP 的服务器（Ubuntu 22.04 / Debian 12 或类似）
 - 一个域名，解析到服务器 IP（例如 `bot.example.com`）
+- 将 uv 安装到系统 PATH，并安装服务用户可读取的 Python ≥ 3.14.7
 - 服务器上已安装 `nginx` 和 `certbot`（或自行处理 TLS 证书）
 
 ## 1. 安装代码
@@ -15,13 +16,15 @@
 sudo git clone <你的仓库地址> /opt/shop-bot
 cd /opt/shop-bot
 
-# 用 uv 装依赖并生成虚拟环境
-sudo uv sync
+# 将解释器放到服务用户可读取的位置，避免 .venv 指向 /root 下的私有解释器
+sudo env UV_PYTHON_INSTALL_DIR=/opt/shop-bot-python uv python install 3.14.7
+sudo env UV_PYTHON_INSTALL_DIR=/opt/shop-bot-python uv sync --frozen --no-dev --python 3.14.7
 ```
 
 ## 2. 配置
 
 ```bash
+sudo useradd --system --user-group --home-dir /opt/shop-bot --shell /usr/sbin/nologin shop-bot
 sudo nano /opt/shop-bot/config.yaml
 ```
 
@@ -37,9 +40,25 @@ epay:
   pid: "1000"
   key: "你的商户密钥"
   url: "https://pay.example.com"
+  currency: USD                # 必须与网关实际收款币种一致
 ```
 
-## 3. 配置 Nginx 反向代理
+```bash
+sudo chown root:shop-bot /opt/shop-bot/config.yaml
+sudo chmod 640 /opt/shop-bot/config.yaml
+```
+
+仅演示时可不填 EPay 和上游凭据，使用管理员调入的测试余额。真实模式请先同步目录、用 `/price` 定价，再 `/publish` 上架。
+
+## 3. 首次申请 TLS 证书
+
+先确认域名解析和 80 端口可用。证书尚不存在时，不要先加载引用该证书的 HTTPS 配置。可先启用只监听 80 的临时 Nginx 站点，再运行：
+
+```bash
+sudo certbot --nginx -d bot.example.com
+```
+
+## 4. 配置 Nginx 反向代理
 
 ```bash
 sudo cp /opt/shop-bot/examples/nginx.conf /etc/nginx/sites-available/shop-bot
@@ -59,6 +78,14 @@ server {
 
     ssl_certificate     /etc/letsencrypt/live/bot.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/bot.example.com/privkey.pem;
+
+    location = /healthz {
+        proxy_pass http://127.0.0.1:8080;
+    }
+    location = /readyz {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_read_timeout 5s;
+    }
 
     location /webhook {
         proxy_pass http://127.0.0.1:8080;
@@ -83,13 +110,6 @@ sudo systemctl reload nginx
 
 完整 Nginx 配置模板在 `examples/nginx.conf`，复制后只需改 `server_name` 和证书路径。
 
-## 4. 申请 TLS 证书（首次）
-
-```bash
-sudo certbot --nginx -d bot.example.com
-# 按提示完成验证，certbot 会自动改好 Nginx 配置
-```
-
 ## 5. 配置 systemd
 
 ```bash
@@ -98,7 +118,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now shop-bot
 ```
 
-service 文件默认用 `root` 运行，如果路径不是 `/opt/shop-bot`，改 `WorkingDirectory` 和 `ExecStart` 两行即可。
+service 使用 `shop-bot` 专用用户，数据库保存到 `/var/lib/shop-bot/shop_bot.db`，自动备份保存到其 `backups` 子目录；代码目录只读。若路径不是 `/opt/shop-bot`，同步修改 `WorkingDirectory` 和 `ExecStart`。
 
 ## 6. 验证
 
@@ -111,6 +131,8 @@ journalctl -u shop-bot -f
 
 # 在 Telegram 里给 bot 发 /start，应该收到主菜单
 ```
+
+部署后检查 `curl --fail https://bot.example.com/readyz`，管理员私聊发送 `/status`。给管理员发起过私聊后才能接收异常告警。备份/恢复说明见 [商品与运维](operations.md)。
 
 ## 7. 日常维护
 
@@ -142,6 +164,6 @@ journalctl -u shop-bot -n 100
 ```bash
 cd /opt/shop-bot
 sudo git pull
-sudo uv sync
+sudo env UV_PYTHON_INSTALL_DIR=/opt/shop-bot-python uv sync --frozen --no-dev --python 3.14.7
 sudo systemctl restart shop-bot
 ```

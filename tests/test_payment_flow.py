@@ -315,7 +315,10 @@ async def test_dispatcher_serializes_duplicate_order_confirmation(db, pending, b
     dispatcher = build_dispatcher(db, DemoPurchaser(), None, None)
     context = dispatcher.fsm.get_context(bot=bot, chat_id=42, user_id=42)
     await context.set_state("OrderFlow:quantity")
-    await context.set_data({"product_id": pending.product_id, "quantity": 2})
+    await context.set_data({"product_id": pending.product_id, "quantity": 2, "product_quote": {
+        key: getattr(await db.get_product(pending.product_id), key)
+        for key in ("price_cents", "currency", "sku", "request_type", "upstream_plan_id")
+    }})
 
     def confirm(update_id):
         return {

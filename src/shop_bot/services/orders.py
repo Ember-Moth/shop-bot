@@ -67,6 +67,7 @@ async def create_order(
         sku=product.sku,
         request_type=product.request_type,
         plan_id=product.upstream_plan_id,
+        expected_product=product,
     )
     logger.info(
         "order created",

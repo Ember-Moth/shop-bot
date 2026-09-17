@@ -66,6 +66,10 @@ epay:
 
 - `/products` — 查看所有商品（含下架商品）的编号、价格、币种、SKU
 - `/currency <商品ID> <币种>` — 设置商品计价币种；新商品默认 USD
+- `/price <商品ID> <售价> [币种]` — 定价；省略币种保留原币种，不自动上架
+- `/publish <商品ID>` / `/unpublish <商品ID>` — 上架/下架，已有订单保留快照
+- `/status` — 查看就绪状态、最近备份和告警收件人数
+- `/ackalert <标识>` — 确认已处理告警，持续异常会再次触发
 - `/orders [状态]` — 查看订单
 - `/paid <订单号>` — 手动确认付款并推进履约（不重置已付款订单）
 - `/cancel <订单号>` — 取消待支付订单
@@ -122,6 +126,7 @@ src/shop_bot/
 - [架构设计](docs/architecture.md) — 模块划分、数据流、订单状态机
 - [部署指南](docs/deployment.md) — 配置项、systemd、Nginx 示例
 - [部署教程](docs/deploy-tutorial.md) — 从零到上线的完整步骤
+- [商品与运维](docs/operations.md) — 定价上下架、健康检查、管理员告警和自动备份/恢复
 - [功能进度](docs/progress.md) — 完成度、TODO、接入指南
 - [转售开发方案](docs/reseller-bot-development.md) — 上游采购状态机与分阶段验收
 
@@ -145,3 +150,20 @@ src/shop_bot/
 - 每笔外部交易保存到 `payment_receipts`，订单和充值单共享交易号唯一性校验。历史重复收款、关单后新增的真实收款按原币种补入钱包，重复回调不重复补款；已由 `/paid` 确认的第一笔回调只补齐交易号。
 - 上游明确拒绝先记为 `refund_pending`；余额入账、退款流水、订单与采购 `refunded` 终态在同一事务提交。写入失败或重启后继续退款；旧版 `paid + rejected` 也会恢复补退。
 - 人工退款、采购、KYC 共用订单锁。已退款订单不能补交 KYC、重购或重绑；退款通知失败会由恢复循环补发。
+
+## 运维能力
+
+提供 `/healthz` 存活检查与 `/readyz` 就绪检查；后台任务退出由进程监督和 systemd 重启处理。
+管理员告警按收件人持久化去重与重试，覆盖人工采购、履约停滞、通知失败、后台任务、数据库和备份异常。
+默认启动及每 24 小时在线备份 SQLite，校验成功后保留最近 14 份；也可运行 `shop-bot-backup`。
+配置与恢复流程见 [商品与运维](docs/operations.md)。
+
+## eSIM 二维码图片交付
+
+真实 eSIM 订单核验完成后，机器人私信买家 ICCID、LPA 安装码和二维码图片；多张订单逐张标注编号。图片由已验证、已落库的 LPA 原文在本地生成 PNG，再通过 Telegram `sendPhoto` 上传，不需要二维码链接继续有效，也不调用第三方二维码生成服务。
+
+文本和每张图片分别持久化发送进度。发送失败或进程重启后从未完成步骤继续；Telegram 限流时按其等待时间重试，不重新采购。全部步骤完成才标记通知成功。管理员或买家 `/query <订单号>` 可主动从头补发，图片始终只发给订单买家。
+
+升级不会主动给已通知的历史订单补发图片；旧版标准格式的 ICCID/LPA 文本订单可通过 `/query` 补发二维码。重绑时图片资料与发送进度一起清除，重新核验后生成新二维码。模拟模式仍发送明确的模拟货品；真实二维码可否安装激活，仍需实单验收。
+
+实现使用 [Segno 标准 QR 编码](https://segno.readthedocs.io/en/stable/serializers.html) 和 [Telegram 图片发送接口](https://core.telegram.org/bots/api#sendphoto)。

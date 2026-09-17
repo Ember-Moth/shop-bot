@@ -97,7 +97,10 @@ async def frozen_orders(tmp_path):
 
 
 def goods_messages(bot, buyer_id):
-    return [m.text for m in bot.session.sent if m.chat_id == buyer_id and "LPA:" in (m.text or "")]
+    return [
+        getattr(m, "text", "") for m in bot.session.sent
+        if m.chat_id == buyer_id and "LPA:" in (getattr(m, "text", "") or "")
+    ]
 
 
 @pytest.mark.parametrize("already_notified", [False, True])
@@ -134,7 +137,7 @@ async def test_rebind_invalidates_old_delivery_and_rechecks_both_buyers(frozen_o
     assert len(goods_messages(bot, 43)) == 1
     assert "NEW-VERIFIED" in goods_messages(bot, 43)[0]
     assert not goods_messages(bot, 42)
-    assert all(STALE_GOODS not in (m.text or "") for m in bot.session.sent)
+    assert all(STALE_GOODS not in (getattr(m, "text", "") or "") for m in bot.session.sent)
 
     # 第一名买家绑定回原单也必须重新读取，不能直接解冻旧缓存。
     ok, reason = await purchaser.bind_unknown_purchase(db, first, OLD_REF)
@@ -198,7 +201,7 @@ async def test_manual_entry_only_sends_new_goods_to_owner(frozen_orders, bot, co
         await cmd_paid(message, db, purchaser, bot)
     assert len(goods_messages(bot, 43)) == 1 and "NEW-VERIFIED" in goods_messages(bot, 43)[0]
     assert not goods_messages(bot, 700)
-    assert all(STALE_GOODS not in (m.text or "") for m in bot.session.sent)
+    assert all(STALE_GOODS not in (getattr(m, "text", "") or "") for m in bot.session.sent)
     assert gateway.create_calls == 0
 
 

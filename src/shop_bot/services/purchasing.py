@@ -18,6 +18,7 @@ from ..db import Database
 from ..logging_config import get_logger
 from ..models import Order, OrderStatus, Purchase, PurchaseState
 from .commbitz_api import CommbitzError
+from .esim_media import MAX_LPA_BYTES, serialize_esims
 
 logger = get_logger(__name__)
 
@@ -110,7 +111,12 @@ def build_payload(details: dict[str, Any]) -> str | None:
 
 def _esim_content_complete(esim: dict[str, Any]) -> bool:
     # 安装必需：ICCID + LPA；二维码缺失时上游可能后补，先要求齐备避免发出不可用货品
-    return bool(esim.get("iccid") and esim.get("lpa") and esim.get("qrCode"))
+    if not all(isinstance(esim.get(key), str) and esim[key] for key in ("iccid", "lpa", "qrCode")):
+        return False
+    lpa = esim["lpa"]
+    return (
+        lpa.startswith("LPA:") and len(lpa.encode("utf-8")) <= MAX_LPA_BYTES and not any(c in lpa for c in "\r\n\x00")
+    )
 
 
 def _delivery_content(request_type: str, details: dict[str, Any], quantity: int) -> tuple[bool, str | None, str | None]:
@@ -451,6 +457,7 @@ class CommbitzPurchaser:
             from_purchase_state=purchase.state,
             upstream_ref=purchase.upstream_request_id,
             payload=payload,
+            delivery_esims=serialize_esims(details["esims"]) if purchase.request_type == "esim" else None,
         )
         if final is None:
             logger.warning("delivery not finalized: purchase state or reference changed", extra={"order_id": order.id})

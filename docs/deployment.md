@@ -114,10 +114,10 @@ journalctl -u shop-bot -f   # 看日志
 FSM 保留旧版本实际读取的最早行，避免被后续重复行中的空字段覆盖。
 环境变量只覆盖指定字段，例如注入 `SHOP_BOT_EPAY__KEY` 会保留 YAML 中的 `pid/url/type`。
 
-仅部署一个 bot 进程。恢复任务在启动后及每 30 秒处理已付款未完成的订单和通知失败的订单。
+仅部署一个 bot 进程。恢复任务在启动后及每 5 秒处理已付款未完成的订单和通知失败的订单。
 升级前已发货订单不会主动重发，可用 `/query` 补发已保存的货品。
 发货失败需要管理员 `/paid` 重试；`/query` 与 `/paid` 补发的货品都只私信订单买家。
-接入真实上游前必须验证 `order.id` 幂等性，包括“上游已成功、本地进程中断后重试”的场景。
+接入真实上游前必须验证实际扣款与交付；提交结果不明时转人工核对，不盲目重购。
 EPay V1 查询在 URL 中携带密钥，因此 HTTPX/HTTPCORE 请求调试日志被禁用，支付错误只输出安全的业务信息。
 
 ## 币种与升级
@@ -127,3 +127,24 @@ EPay V1 查询在 URL 中携带密钥，因此 HTTPX/HTTPCORE 请求调试日志
 继续使用 EPay；`epay.currency: USD` 仅适用于商户侧实际按 USD 收款的服务。设置该字段不能改变网关实际扣款币种，详见 [币种说明](../README.md#商品与收款币种)。旧币种未完成支付应在更换收款币种前处理完毕。
 
 升级自动建立钱包/外部收款记录及退款恢复状态，保留既有数据。旧待付 CNY 订单可能已有收银台链接，因此迁移后只允许在线支付；新的订单先选择渠道，再生成链接。
+
+## 商品管理、监控与备份
+
+实现和配置详见 [商品与运维](operations.md)。新增环境变量组：
+
+| YAML | 环境变量 | 默认 |
+|---|---|---|
+| `operations.alerts_enabled` | `SHOP_BOT_OPERATIONS__ALERTS_ENABLED` | true，收件人为 admin_ids |
+| `operations.check_interval_seconds` | `SHOP_BOT_OPERATIONS__CHECK_INTERVAL_SECONDS` | 30 |
+| `operations.alert_cooldown_seconds` | `SHOP_BOT_OPERATIONS__ALERT_COOLDOWN_SECONDS` | 1800 |
+| `operations.stale_order_seconds` | `SHOP_BOT_OPERATIONS__STALE_ORDER_SECONDS` | 900 |
+| `operations.notification_stale_seconds` | `SHOP_BOT_OPERATIONS__NOTIFICATION_STALE_SECONDS` | 300 |
+| `operations.worker_stale_seconds` | `SHOP_BOT_OPERATIONS__WORKER_STALE_SECONDS` | 180 |
+| `operations.health_timeout_seconds` | `SHOP_BOT_OPERATIONS__HEALTH_TIMEOUT_SECONDS` | 2 |
+| `backup.enabled` | `SHOP_BOT_BACKUP__ENABLED` | true |
+| `backup.directory` | `SHOP_BOT_BACKUP__DIRECTORY` | 数据库目录下 backups |
+| `backup.interval_seconds` | `SHOP_BOT_BACKUP__INTERVAL_SECONDS` | 86400 |
+| `backup.keep` | `SHOP_BOT_BACKUP__KEEP` | 14 |
+| `backup.timeout_seconds` | `SHOP_BOT_BACKUP__TIMEOUT_SECONDS` | 120 |
+
+systemd 模板现在使用 `shop-bot` 专用用户，`StateDirectory=shop-bot` 提供 `/var/lib/shop-bot` 数据目录，数据库和默认备份均在此目录。请先创建该用户并授予配置文件读取权限；代码目录保持只读。启用文件日志或额外备份磁盘时，在 `ReadWritePaths` 中允许对应目录。

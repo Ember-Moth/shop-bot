@@ -162,3 +162,11 @@ EPay 网关 GET 或 POST 到 `/payment/callback`，form-urlencoded，带 MD5 签
 - `epay.currency` 声明当前商户实际收款币种，回调与查询核验相同；网关若回传币种也须一致。本店没有自动换汇机制。
 - 明确失败先持久化 `refund_pending`，再在一笔事务内写余额、退款流水、订单和采购的 `refunded` 终态；中断后继续退款。历史 `paid + rejected` 也进入补退。退款通知使用持久化待通知标记。
 - 人工退款与履约、KYC 使用同一订单锁；只允许未提交或已明确拒绝、人工核对的采购退款。上游仍在处理时必须先核对或取消。退款终态同时阻断 KYC、重绑和采购重试。
+
+## eSIM 图片通知
+
+`finalize_delivery` 同时保存文本货品和白名单字段组成的 ICCID/LPA JSON（`delivery_esims`），通知层只读取这份已核验的数据。二维码使用标准 QR，由 LPA 原文在内存中生成 PNG，作为 Telegram 图片上传；不下载二维码 URL，不把安装码写入日志或临时文件。
+
+通知依次发送订单提示、文本资料、逐张二维码，`notification_cursor` 保存成功步骤。失败后只续发尚未确认步骤；Telegram `retry_after` 写入 `notification_retry_at`，等待时间跨重启保留。全部发送完成才清除 `notification_pending`。Telegram 已发送但游标尚未写入时中断，仍可能重复最后一步，这是通知至少一次送达的边界，不会重新采购。
+
+主动补发重置游标；重绑清除旧图片 JSON、游标和等待时间。冻结采购、KYC 未放行、引用冲突仍不能发送图片。旧版标准文本格式可解析出 LPA 生成图片；已成功通知的历史订单不自动重发。

@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.28",
     "pydantic-settings>=2.7",
     "pyyaml>=6.0",
+    "segno>=1.6,<2",
     "uvloop>=0.21; sys_platform != 'win32'",
 ]
 
@@ -27,6 +28,7 @@ dev = [
 
 [project.scripts]
 shop-bot = "shop_bot:main"
+shop-bot-backup = "shop_bot.services.backup:main"
 
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]

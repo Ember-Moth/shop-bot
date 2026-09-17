@@ -70,6 +70,9 @@ class Order:
     input_request_type: str | None = None  # 下单时锁定的业务类型
     input_plan_id: str | None = None  # 下单时锁定的上游套餐 ID（交付/绑定核验依据）
     payment_method: str | None = None  # epay / balance；生成收银台链接前锁定渠道
+    delivery_esims: str | None = None  # 已验证的 ICCID/LPA JSON，与货品一起原子落库
+    notification_cursor: int = 0  # 已成功发送并记账的文本/图片步骤数
+    notification_retry_at: float | None = None  # Telegram 限流后的最早重试时间
 
     @property
     def amount_text(self) -> str:

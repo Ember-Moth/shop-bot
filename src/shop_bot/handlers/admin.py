@@ -6,10 +6,11 @@ from ..config import get_settings
 from ..db import Database
 from ..logging_config import get_logger
 from ..models import OrderStatus, PurchaseState
-from ..money import SUPPORTED_CURRENCIES, normalize_currency
+from ..money import SUPPORTED_CURRENCIES, normalize_currency, parse_price
 from ..services import orders
 from ..services.balance import format_cents, parse_signed_amount
 from ..services.fulfillment import notify_owner, notify_refund
+from ..services.operations import Operations
 from ..services.orders import OrderError
 from ..services.purchasing import CommbitzPurchaser, Purchaser, split_payload_chunks
 
@@ -41,7 +42,11 @@ async def cmd_currency(message: Message, db: Database) -> None:
         await message.answer("用法：/currency <商品ID> <币种>，例如 /currency 1 USD；商品编号见 /products")
         return
     try:
-        product = await db.set_product_currency(int(parts[1]), parts[2])
+        product = await db.set_product_currency(
+            int(parts[1]),
+            parts[2],
+            actor_id=message.from_user.id if message.from_user else None,
+        )
     except ValueError:
         await message.answer("支持的币种：" + " / ".join(sorted(SUPPORTED_CURRENCIES)))
         return
@@ -53,6 +58,93 @@ async def cmd_currency(message: Message, db: Database) -> None:
         "金额数值未换算；已创建订单保持原价格和币种。在线支付要求 EPay 商户支持同一币种。"
     )
     logger.info("product currency changed", extra={"product_id": product.id})
+
+
+@router.message(Command("price"))
+async def cmd_price(message: Message, db: Database) -> None:
+    parts = (message.text or "").split()
+    if len(parts) not in (3, 4) or not _valid_product_id(parts[1]):
+        await message.answer("用法：/price <商品ID> <售价> [币种]，例如 /price 1 9.99 USD；省略币种时保留原币种")
+        return
+    try:
+        product = await db.configure_product(
+            int(parts[1]),
+            price_cents=parse_price(parts[2]),
+            currency=parts[3] if len(parts) == 4 else None,
+            actor_id=message.from_user.id if message.from_user else None,
+        )
+    except ValueError as exc:
+        await message.answer(f"❌ {exc}")
+        return
+    if product is None:
+        await message.answer("商品不存在")
+        return
+    await message.answer(f"✅ 商品 #{product.id} 售价：{product.price_text}；原有订单金额不变，定价不自动上架")
+
+
+def _valid_product_id(value: str) -> bool:
+    return value.isascii() and value.isdecimal() and 0 < len(value) <= 18 and int(value) > 0
+
+
+async def _set_published(message: Message, db: Database, active: bool) -> None:
+    parts = (message.text or "").split()
+    if len(parts) != 2 or not _valid_product_id(parts[1]):
+        await message.answer("用法：/publish <商品ID> 上架；/unpublish <商品ID> 下架")
+        return
+    try:
+        product = await db.configure_product(
+            int(parts[1]),
+            active=active,
+            require_upstream=get_settings().upstream.provider == "commbitz",
+            actor_id=message.from_user.id if message.from_user else None,
+        )
+    except ValueError as exc:
+        await message.answer(f"❌ {exc}")
+        return
+    if product is None:
+        await message.answer("商品不存在")
+        return
+    await message.answer(
+        f"✅ 商品 #{product.id} 已{'上架' if active else '下架'}，售价 {product.price_text}；已创建订单继续按原订单处理"
+    )
+
+
+@router.message(Command("publish"))
+async def cmd_publish(message: Message, db: Database) -> None:
+    await _set_published(message, db, True)
+
+
+@router.message(Command("unpublish"))
+async def cmd_unpublish(message: Message, db: Database) -> None:
+    await _set_published(message, db, False)
+
+
+@router.message(Command("status"))
+async def cmd_status(message: Message, operations: Operations) -> None:
+    checks = await operations.readiness()
+    lines = [f"{name}: {'正常' if ok else '未就绪'}" for name, ok in checks.items()]
+    backup = operations.backups
+    if backup.settings.enabled:
+        lines.append(f"最近备份：{backup.last_success or '本进程尚未完成'}")
+        lines.append(f"备份状态：{backup.error or '正常'}")
+    else:
+        lines.append("自动备份：已关闭")
+    lines.append(
+        f"管理员告警：{'开启' if operations.settings.alerts_enabled else '关闭'}，"
+        f"收件人 {len(operations.admin_ids)} 个"
+    )
+    await message.answer("运行状态\n" + "\n".join(lines))
+
+
+@router.message(Command("ackalert"))
+async def cmd_ackalert(message: Message, db: Database, operations: Operations) -> None:
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("用法：/ackalert <告警标识>，例如 /ackalert telegram_handler")
+        return
+    operations.runtime.failures.pop(parts[1], None)
+    await db.set_alert(parts[1], None)
+    await message.answer("告警已确认；监控条件仍存在时会再次触发。")
 
 
 @router.message(Command("orders"))

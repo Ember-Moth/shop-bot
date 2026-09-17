@@ -33,6 +33,12 @@ class OrderFlow(StatesGroup):
     extra = State()  # activation/recharge 的 ICCID、号码、天数采集
 
 
+def product_quote(product: Product) -> dict:
+    return {
+        key: getattr(product, key) for key in ("price_cents", "currency", "sku", "request_type", "upstream_plan_id")
+    }
+
+
 def _summary(product: Product, quantity: int, days: int | None = None, extra: str = "") -> str:
     # 按日套餐计价公式：unitPrice × quantity × days（与上游 totalAmount 公式一致）
     amount = product.price_cents * quantity * (days or 1)
@@ -94,7 +100,9 @@ async def cb_start_order(callback: CallbackQuery, state: FSMContext, db: Databas
         return
     await state.set_state(OrderFlow.quantity)
     # 重置上一单可能残留的上下文（天数/ICCID/号码），防止切换商品后报价与订单不一致
-    await state.update_data(product_id=product.id, quantity=None, iccid=None, msisdn=None, days=None)
+    await state.update_data(
+        product_id=product.id, quantity=None, iccid=None, msisdn=None, days=None, product_quote=None
+    )
     msg = callback.message
     if msg is None or isinstance(msg, InaccessibleMessage):
         await callback.answer()
@@ -130,6 +138,7 @@ async def msg_quantity(message: Message, state: FSMContext, db: Database) -> Non
         await state.set_state(OrderFlow.extra)
         await message.answer(hint, parse_mode="Markdown")
         return
+    await state.update_data(product_quote=product_quote(product))
     await message.answer(
         _summary(product, quantity),
         reply_markup=keyboards.confirm_order(),
@@ -156,7 +165,7 @@ async def msg_extra(message: Message, state: FSMContext, db: Database) -> None:
         extra.append(f"ICCID：`{iccid}`")
     if msisdn:
         extra.append(f"手机号：`{msisdn}`")
-    await state.update_data(iccid=iccid, msisdn=msisdn, days=days)
+    await state.update_data(iccid=iccid, msisdn=msisdn, days=days, product_quote=product_quote(product))
     await message.answer(
         _summary(product, data["quantity"], days=days, extra="、".join(extra)),
         reply_markup=keyboards.confirm_order(),
@@ -167,7 +176,6 @@ async def msg_extra(message: Message, state: FSMContext, db: Database) -> None:
 @router.callback_query(F.data == keyboards.CB_CONFIRM_ORDER)
 async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, epay: EPayClient | None) -> None:
     data = await state.get_data()
-    await state.clear()
     product_id = data.get("product_id")
     quantity = data.get("quantity")
     if product_id is None or quantity is None:
@@ -175,21 +183,45 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, e
         return
     product = await db.get_product(product_id)
     if product is None or not product.active:
+        await state.clear()
         await callback.answer("商品不存在或已下架，下单失败", show_alert=True)
+        return
+    if data.get("product_quote") != product_quote(product):
+        # 旧会话或调价/改币种后必须重新确认；业务类型变动须重新采集输入。
+        previous = data.get("product_quote") or {}
+        if previous.get("request_type") != product.request_type:
+            await state.clear()
+            await callback.answer("商品业务信息已变化，请重新选择商品下单", show_alert=True)
+            return
+        await state.update_data(product_quote=product_quote(product))
+        msg = callback.message
+        if msg is not None and not isinstance(msg, InaccessibleMessage):
+            await msg.edit_text(
+                "商品报价已更新，请重新确认：\n\n" + _summary(product, quantity, days=data.get("days")),
+                parse_mode="Markdown",
+                reply_markup=keyboards.confirm_order(),
+            )
+        await callback.answer("请确认最新报价", show_alert=True)
         return
     user = await db.get_user_by_telegram_id(callback.from_user.id)
     if user is None:
         await callback.answer("请先发 /start 再下单", show_alert=True)
         return
-    order = await orders.create_order(
-        db,
-        user.id,
-        product,
-        quantity,
-        iccid=data.get("iccid"),
-        msisdn=data.get("msisdn"),
-        days=data.get("days"),
-    )
+    try:
+        order = await orders.create_order(
+            db,
+            user.id,
+            product,
+            quantity,
+            iccid=data.get("iccid"),
+            msisdn=data.get("msisdn"),
+            days=data.get("days"),
+        )
+    except ValueError:
+        await state.clear()
+        await callback.answer("商品已下架或报价已变化，请重新下单", show_alert=True)
+        return
+    await state.clear()
     msg = callback.message
     if msg is None or isinstance(msg, InaccessibleMessage):
         await callback.answer()
@@ -291,8 +323,11 @@ async def cb_pay_with_balance(callback: CallbackQuery, db: Database, purchaser: 
     if final is None or final.status != OrderStatus.DELIVERED:
         await callback.answer("✅ 已用余额支付，系统正在履约", show_alert=True)
         return
-    await notify_owner(db, bot, order_id)
-    await callback.answer("✅ 支付成功，货品已私信发送", show_alert=True)
+    notified = await notify_owner(db, bot, order_id)
+    await callback.answer(
+        "✅ 支付成功，货品已私信发送" if notified else "✅ 已支付，交付资料已保存；私信发送尚未完成，系统会继续重试",
+        show_alert=True,
+    )
 
 
 @router.callback_query(F.data == keyboards.CB_CANCEL_ORDER)
