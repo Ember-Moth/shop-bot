@@ -136,7 +136,7 @@ async def msg_kyc_text(message: Message, db: Database, purchaser: CommbitzPurcha
         return
     data = await state.get_data()
     order_id = data["order_id"]
-    documents = dict(zip(KYC_FIELDS, urls, strict=False))
+    documents: dict[str, str] = dict(zip(KYC_FIELDS, urls, strict=False))
     ok, detail = await purchaser.submit_kyc(db, order_id, documents=documents)
     await state.clear()
     await message.answer(("✅ " if ok else "❌ ") + detail)
