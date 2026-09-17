@@ -17,7 +17,7 @@ Telegram 商店 bot（webhook 模式）：用户浏览商品、下单，EPay 支
 
 ```bash
 uv sync
-# 编辑 config.yaml 或设置环境变量
+cp config.example.yaml config.yaml  # 首次运行；config.yaml 不入库，编辑它或设置环境变量
 shop-bot            # 或 uv run python -m shop_bot
 ```
 

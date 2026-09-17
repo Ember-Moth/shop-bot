@@ -25,6 +25,7 @@ sudo env UV_PYTHON_INSTALL_DIR=/opt/shop-bot-python uv sync --frozen --no-dev --
 
 ```bash
 sudo useradd --system --user-group --home-dir /opt/shop-bot --shell /usr/sbin/nologin shop-bot
+sudo cp /opt/shop-bot/config.example.yaml /opt/shop-bot/config.yaml
 sudo nano /opt/shop-bot/config.yaml
 ```
 

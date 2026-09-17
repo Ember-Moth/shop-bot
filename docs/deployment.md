@@ -66,13 +66,13 @@ server {
 
 ```bash
 uv sync
-# 编辑 config.yaml 或设置环境变量
+cp config.example.yaml config.yaml  # 首次运行；config.yaml 不入库，编辑它或设置环境变量
 shop-bot
 # 或
 uv run python -m shop_bot
 ```
 
-首次启动自动建表；商品表为空时写入 `src/shop_bot/__init__.py` 里的 `DEMO_PRODUCTS`。
+首次启动自动建表；模拟模式（未配置 `upstream.provider`）且商品表为空时写入 `src/shop_bot/__init__.py` 里的 `DEMO_PRODUCTS`，真实模式不植入演示商品。
 
 ## 本地开发
 
