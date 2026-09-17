@@ -464,8 +464,38 @@ def test_parse_money_cents_accepts_epay_four_decimal_places():
     assert parse_money_cents("100") == 10000
     assert parse_money_cents("50.50") == 5050
     assert parse_money_cents("0.01") == 1
-    # 非法：非数字、5 位小数、负数、空
+    assert parse_money_cents("9.990") == 999  # 3 位小数按正确金额解析
+    # 非法：非数字、5 位小数、负数、空、空白、非纯小数形式
     assert parse_money_cents("abc") is None
     assert parse_money_cents("1.00001") is None
     assert parse_money_cents("-5") is None
     assert parse_money_cents("") is None
+    assert parse_money_cents(" 20") is None
+    assert parse_money_cents("1e2") is None
+    assert parse_money_cents("+5") is None
+
+
+async def test_topup_callback_accepts_three_decimal_money(db, bot, purchaser):
+    """9.990（3 位小数）金额数值正确，应放行入账（回归：旧用例曾误判为拒绝）。"""
+    user, _order = await new_order(db)
+    epay = EPayClient(EPayConfig("1000", "audit-secret", "https://pay.example.com", currency="USD"))
+    app = web.Application()
+    app.update({"db": db, "bot": bot, "purchaser": purchaser, "epay": epay})
+    register_epay_routes(app, "/callback")
+    topup = await db.create_topup(user.id, 9990, "USD")
+    try:
+        async with TestClient(TestServer(app)) as client:
+            params = {
+                "pid": "1000",
+                "out_trade_no": f"T{topup.id}",
+                "trade_no": "TRADE-3DP",
+                "money": "99.90",
+                "trade_status": "TRADE_SUCCESS",
+                "currency": "USD",
+            }
+            params["sign"] = _create_sign(params, "audit-secret")
+            response = await client.get("/callback", params=params)
+            assert response.status == 200
+        assert await db.get_balance(user.id, "USD") == 9990
+    finally:
+        await epay.close()
