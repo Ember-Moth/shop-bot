@@ -53,12 +53,36 @@ async def notify_owner(db: Database, bot: Bot, order_id: int, *, resend: bool = 
         return True
 
 
+async def notify_refund(db: Database, bot: Bot, order_id: int) -> bool:
+    """退款到账私信。退款在状态翻转当次通知一次；失败仅记日志，买家可在「我的余额」核实。"""
+    order = await db.get_order(order_id)
+    if order is None or order.status != OrderStatus.REFUNDED:
+        return False
+    owner = await db.get_user(order.user_id)
+    if owner is None:
+        return False
+    try:
+        await bot.send_message(
+            owner.telegram_id,
+            f"❌ 订单 #{order.id} 无法完成交付，{order.amount_cents / 100:.2f} 元已退回余额\n"
+            f"当前余额：{owner.balance_cents / 100:.2f} 元",
+        )
+    except Exception as exc:
+        logger.warning("refund notification failed", extra={"order_id": order_id, "error": type(exc).__name__})
+        return False
+    return True
+
+
 async def recover_once(db: Database, purchaser: Purchaser, bot: Bot | None) -> None:
     """恢复扫描：fulfill 幂等推进 paid 履约并收敛 delivered 订单的采购终态，补发未送达通知。"""
     for order in await db.list_recovery_orders():
         try:
-            await purchaser.fulfill(db, order.id)
-            if bot is not None:
+            final = await purchaser.fulfill(db, order.id)
+            if bot is None:
+                continue
+            if final is not None and final.status == OrderStatus.REFUNDED:
+                await notify_refund(db, bot, final.id)
+            else:
                 await notify_owner(db, bot, order.id)
         except Exception as exc:
             logger.warning("recovery failed", extra={"order_id": order.id, "error": type(exc).__name__})

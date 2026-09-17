@@ -387,3 +387,84 @@ async def test_cmd_adjust_replies_and_notifies_user(db, user, bot):
     assert any("余额调整 +5.50 元" in t and "测试调账" in t for t in texts)  # 用户私信
     user_after = await db.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 550
+
+
+# ---- 退款到余额（失败自动退 + 人工 /refund）----
+
+from shop_bot.handlers.admin import cmd_refund  # noqa: E402
+from shop_bot.models import OrderStatus  # noqa: E402
+
+
+async def test_refund_order_to_balance_success_and_guards(db, user):
+    """paid → refunded：余额入账 + refund 流水；重复退款与非 paid 订单拒绝（防双退）。"""
+    product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
+    await db.seed_products([product])
+    order = await orders.create_order(db, user.id, product, 1)
+    refunded, err = await db.refund_order_to_balance(order.id, "too early")
+    assert refunded is None and err == "not refundable"  # pending_payment 不可退
+    await db.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
+    refunded, err = await db.refund_order_to_balance(order.id, "test refund")
+    assert err is None and refunded is not None and refunded.status == OrderStatus.REFUNDED
+    user_after = await db.get_user(user.id)
+    assert user_after is not None and user_after.balance_cents == order.amount_cents
+    again, err = await db.refund_order_to_balance(order.id, "again")
+    assert again is None and err == "not refundable"  # 幂等：余额不翻倍
+    user_after = await db.get_user(user.id)
+    assert user_after is not None and user_after.balance_cents == order.amount_cents
+    txs = await db.list_balance_transactions(user.id)
+    assert len(txs) == 1 and txs[0].kind == "refund" and txs[0].amount_cents == order.amount_cents
+
+
+async def test_balance_paid_order_refund_cycle(db, user):
+    """余额支付闭环：充值 → 支付 → 履约失败退款 → 余额复原，流水完整可溯。"""
+    product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
+    await db.seed_products([product])
+    order = await orders.create_order(db, user.id, product, 1)
+    topup = await db.create_topup(user.id, 1000_00)
+    await db.complete_topup(topup.id, trade_no="TX")
+    paid, err = await db.pay_order_with_balance(order.id, user.id, order.amount_cents)
+    assert err is None and paid is not None
+    refunded, err = await db.refund_order_to_balance(order.id, "upstream rejected")
+    assert err is None and refunded is not None
+    user_after = await db.get_user(user.id)
+    assert user_after is not None and user_after.balance_cents == 1000_00
+    txs = await db.list_balance_transactions(user.id)
+    assert [t.kind for t in txs] == ["refund", "purchase", "topup"]
+
+
+async def test_cmd_refund_paid_order_notifies_buyer(db, user, bot):
+    """人工退款：/refund 关单、回复管理员并私信买家；已退款订单再次拒绝。"""
+    product = Product(1, "p", "", 100, "CNY")
+    await db.seed_products([product])
+    order = await orders.create_order(db, user.id, product, 1)
+    await db.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
+    msg = Message.model_validate(
+        {"message_id": 1, "date": 0, "chat": {"id": 1, "type": "private"},
+         "from": {"id": 1, "is_bot": False, "first_name": "A"}, "text": f"/refund {order.id}"},
+        context={"bot": bot},
+    )
+    await cmd_refund(msg, db, bot)
+    order_after = await db.get_order(order.id)
+    assert order_after is not None and order_after.status == OrderStatus.REFUNDED
+    texts = [m.text or "" for m in bot.session.sent]
+    assert any("已退款 1.00 元" in t for t in texts)  # 管理员确认
+    assert any("已退回余额" in t and f"#{order.id}" in t for t in texts)  # 买家私信
+    await cmd_refund(msg, db, bot)
+    assert "无法退款" in (bot.session.sent[-1].text or "")
+
+
+async def test_recover_once_sends_refund_notification(db, user, bot):
+    """恢复循环：fulfill 结果为 refunded 时发退款私信（而非交付通知）。"""
+    product = Product(1, "p", "", 100, "CNY")
+    await db.seed_products([product])
+    order = await orders.create_order(db, user.id, product, 1)
+    await db.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
+
+    class _RefundingPurchaser:
+        async def fulfill(self, db, order_id):
+            await db.refund_order_to_balance(order_id, "test")
+            return await db.get_order(order_id)
+
+    await recover_once(db, _RefundingPurchaser(), bot)
+    texts = [m.text or "" for m in bot.session.sent]
+    assert any("已退回余额" in t and f"#{order.id}" in t for t in texts)

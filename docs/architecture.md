@@ -54,9 +54,9 @@ EPay 网关 ──GET/POST /payment/callback──> 验签核单 ──> mark_pa
                                               │
                               ┌───────────────┴──────────────┐
                               v                              v
-                        delivered + 通知买家         submission_unknown/rejected
-                                                      → /purchases 人工核对
-                                                      → /bind 绑定 或 /retry 重试
+                        delivered + 通知买家         rejected → 退款到余额并关单
+                                              submission_unknown → /purchases 人工核对
+                                                      → /bind 绑定 或 /refund 退款
 ```
 
 ## 订单生命周期
@@ -68,6 +68,7 @@ EPay 网关 ──GET/POST /payment/callback──> 验签核单 ──> mark_pa
 pending_payment --epay_callback--> paid --采购+交付--> delivered
       |                                |                  （订单与采购终态同一事务落账）
       |                                +--履约需人工--> awaiting_dispatch（实体卡，/dispatch 确认）
+      |                                +--上游明确拒绝--> refunded（自动退款到买家余额，终态）
       +--cancel--> cancelled
 ```
 
@@ -78,8 +79,8 @@ ready → submitting → upstream_pending → fulfilled
             │              │
             │              ├── awaiting_kyc → kyc_submitted（INR/强制 KYC，审核释放后才交付）
             │              └── awaiting_dispatch（实体 SIM 受理成功 ≠ 已发货）
-            └── 超时/5xx/缺 _id → submission_unknown（停止自动重购，/bind 人工核对）
-     4xx 明确拒绝 → rejected（/retry 仅允许无上游单号的记录重试）
+            └── 超时/5xx/缺 _id → submission_unknown（钱货不明，人工核对后 /bind 或 /refund）
+     4xx 明确拒绝 → rejected → 订单自动退款到余额并关闭（refunded，防双退）
 ```
 
 - 用户下单后，bot 返回「立即支付」按钮（Telegram Web App）
@@ -105,7 +106,8 @@ ready → submitting → upstream_pending → fulfilled
 
 采购安全规则：创建请求前先持久化提交意图；收到响应立即保存上游 `_id`；
 已有 ID 只查询；超时/5xx/缺 `_id` 转 `submission_unknown` 人工核对（上游无幂等键，
-绝不自动重购）；rejected 仅无上游单号的记录可受控重试。
+绝不自动重购）；上游明确拒绝（rejected）即货不会发，订单自动退款到买家余额并关闭，
+/refund 供人工核对后退款，`/retry` 仅兼容自动退款前的历史数据。
 
 人工核对入口：`/purchases` 列表、`/retry <订单号>`、`/bind <订单号> <上游请求ID>`
 （事务内复核上游单唯一性，并按下单快照核对业务类型/数量/套餐）。

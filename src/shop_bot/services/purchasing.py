@@ -5,7 +5,8 @@
   超时、断网、5xx、成功响应缺失 `_id` 一律转 submission_unknown，绝不自动重购。
 - 已知 ID 只查询：upstream_pending 状态只调用详情接口。
 - 货品先持久化再通知；采购与通知分别恢复。
-- submission_unknown / rejected 停止自动处理，由管理员人工核对或受控重试。
+- 上游明确拒绝（rejected）即货不会发：自动退款到买家余额并关闭订单；
+  submission_unknown 钱货状态不明，保持人工核对（/bind 或 /refund）。
 """
 
 from __future__ import annotations
@@ -346,9 +347,12 @@ class CommbitzPurchaser:
                 )
             elif exc.definite_rejection:
                 logger.warning("purchase rejected by upstream", extra={"order_id": order.id})
-                await db.transition_purchase(
+                rejected = await db.transition_purchase(
                     purchase.id, PurchaseState.REJECTED, from_state=PurchaseState.SUBMITTING, last_error=str(exc)
                 )
+                if rejected is not None:
+                    # 建单前被明确拒绝：货不会发也未扣上游成本，自动退款到余额并关单
+                    await db.refund_order_to_balance(order.id, "upstream rejected before creation")
             else:
                 logger.warning("purchase submission unknown", extra={"order_id": order.id, "error": type(exc).__name__})
                 await db.transition_purchase(
@@ -412,12 +416,16 @@ class CommbitzPurchaser:
         purchase = await db.get_purchase_by_order(order.id) or purchase
         status = classify_status(details.get("status"))
         if status == "failure":
-            await db.transition_purchase(
+            rejected = await db.transition_purchase(
                 purchase.id,
                 PurchaseState.REJECTED,
                 from_state=purchase.state,
                 last_error=f"upstream status: {details.get('status')}",
             )
+            if rejected is not None:
+                # 上游明确宣告失败：货不会发，自动退款到余额并关单；
+                # 平台侧成本与上游对账另算（阶段 D），与买家无关
+                await db.refund_order_to_balance(order.id, f"upstream failed: {details.get('status')}")
             return
         if status != "success":
             return  # pending：等待下次轮询
@@ -563,14 +571,18 @@ class CommbitzPurchaser:
         return True, f"订单 #{order_id} 已确认发货并通知买家"
 
     async def retry_rejected(self, db: Database, order_id: int) -> tuple[bool, str]:
-        """受控重试：仅「创建前被拒绝」（无上游单号）可回退 ready。
+        """受控重试：仅「创建前被拒绝」（无上游单号）且订单仍 paid 可回退 ready。
 
         已建单但履约失败（有 upstream_request_id）的 rejected 绝不能重试——
         重新创建会造成重复扣款，且丢失原单关联（审计 P1-3）。
+        现行规则下 rejected 会立即自动退款关单；本命令仅兼容自动退款前的历史数据。
         """
         purchase = await db.get_purchase_by_order(order_id)
         if purchase is None:
             return False, "该订单没有采购记录"
+        order = await db.get_order(order_id)
+        if order is None or order.status != OrderStatus.PAID:
+            return False, "订单已退款关闭或不存在，不能重试"
         if purchase.state != PurchaseState.REJECTED:
             return False, f"采购状态为 {purchase.state.value}，只有 rejected 可以重试"
         if purchase.upstream_request_id is not None:

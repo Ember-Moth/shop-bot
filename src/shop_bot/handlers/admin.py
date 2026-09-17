@@ -8,7 +8,7 @@ from ..logging_config import get_logger
 from ..models import OrderStatus, PurchaseState
 from ..services import orders
 from ..services.balance import format_cents, parse_signed_amount
-from ..services.fulfillment import notify_owner
+from ..services.fulfillment import notify_owner, notify_refund
 from ..services.orders import OrderError
 from ..services.purchasing import CommbitzPurchaser, Purchaser
 
@@ -158,6 +158,23 @@ async def cmd_cancel(message: Message, db: Database) -> None:
         await message.answer(f"❌ {exc}")
         return
     await message.answer(f"🚫 订单 #{order.id} 已取消")
+
+
+@router.message(Command("refund"))
+async def cmd_refund(message: Message, db: Database, bot: Bot) -> None:
+    """人工退款关单：submission_unknown 核对确认未发货等场景；上游明确拒绝的由系统自动退。"""
+    order_id = _parse_order_id(message)
+    if order_id is None:
+        await message.answer("用法：/refund <订单号>")
+        return
+    order, err = await db.refund_order_to_balance(order_id, "admin refund")
+    if err is not None or order is None:
+        current = await db.get_order(order_id)
+        status = current.status if current is not None else "不存在"
+        await message.answer(f"❌ 无法退款：订单状态为 {status}（仅 paid 可退）")
+        return
+    await notify_refund(db, bot, order_id)
+    await message.answer(f"✅ 订单 #{order_id} 已退款 {order.amount_cents / 100:.2f} 元到买家余额并关闭")
 
 
 @router.message(Command("adjust"))

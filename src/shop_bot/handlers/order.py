@@ -10,7 +10,7 @@ from ..keyboards import escape_markdown
 from ..models import OrderStatus, Product
 from ..services import orders
 from ..services.epay import EPayClient, EPayOrder
-from ..services.fulfillment import notify_owner
+from ..services.fulfillment import notify_owner, notify_refund
 from ..services.purchasing import Purchaser
 
 router = Router()
@@ -264,6 +264,10 @@ async def cb_pay_with_balance(
         return
     await purchaser.ensure_purchase(db, paid)
     final = await purchaser.fulfill(db, order_id)
+    if final is not None and final.status == OrderStatus.REFUNDED:
+        await notify_refund(db, bot, order_id)
+        await callback.answer("❌ 订单无法交付，已退款到余额", show_alert=True)
+        return
     if final is None or final.status != OrderStatus.DELIVERED:
         await callback.answer("✅ 已用余额支付，系统正在履约", show_alert=True)
         return

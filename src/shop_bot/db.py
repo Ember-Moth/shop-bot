@@ -730,6 +730,45 @@ class Database:
             )
         return row["balance_cents"]
 
+    async def refund_order_to_balance(self, order_id: int, note: str) -> tuple[Order | None, str | None]:
+        """退款到买家余额并关闭订单：paid → refunded 与余额入账、流水同一事务。
+
+        仅 paid 订单可退（refunded/cancelled/delivered 一律拒绝，条件转换防双退）。
+        返回 (订单, None) 成功；(None, "not refundable") 状态不符。
+        """
+        async with self.transaction() as conn:
+            async with conn.execute(
+                "SELECT * FROM orders WHERE id = ? AND status = 'paid'", (order_id,)
+            ) as cur:
+                order = await cur.fetchone()
+            if order is None:
+                return None, "not refundable"
+            async with conn.execute(
+                """UPDATE orders SET status = 'refunded', updated_at = datetime('now')
+                WHERE id = ? AND status = 'paid' RETURNING *""",
+                (order_id,),
+            ) as cur:
+                refunded = await cur.fetchone()
+            assert refunded is not None  # BEGIN IMMEDIATE 串行化写者，状态不会再变
+            async with conn.execute(
+                "UPDATE users SET balance_cents = balance_cents + ? WHERE id = ? RETURNING balance_cents",
+                (refunded["amount_cents"], refunded["user_id"]),
+            ) as cur:
+                bal_row = await cur.fetchone()
+            assert bal_row is not None
+            await conn.execute(
+                "INSERT INTO order_events (order_id, from_status, to_status, note)"
+                " VALUES (?, 'paid', 'refunded', ?)",
+                (order_id, note),
+            )
+            await conn.execute(
+                """INSERT INTO balance_transactions
+                (user_id, amount_cents, balance_after, kind, order_id, note)
+                VALUES (?, ?, ?, 'refund', ?, ?)""",
+                (refunded["user_id"], refunded["amount_cents"], bal_row["balance_cents"], order_id, note),
+            )
+        return _row_to_order(refunded), None
+
     async def list_balance_transactions(self, user_id: int, limit: int = 5) -> list[BalanceTransaction]:
         rows = await self._all(
             "SELECT * FROM balance_transactions WHERE user_id = ? ORDER BY id DESC LIMIT ?",

@@ -25,7 +25,7 @@ from ..logging_config import get_logger
 from ..models import OrderStatus
 from ..services import orders
 from ..services.epay import EPayClient, EPayError
-from ..services.fulfillment import notify_owner
+from ..services.fulfillment import notify_owner, notify_refund
 from ..services.orders import OrderError
 from ..services.purchasing import Purchaser
 from .balance import render_balance, start_topup
@@ -241,6 +241,9 @@ async def cmd_query(
         await message.answer("只能查询自己的订单")
         return
 
+    if order.status == OrderStatus.REFUNDED:
+        await message.answer(f"订单 #{order.id} 已退款到余额，可在「💳 我的余额」查看")
+        return
     if order.status in (OrderStatus.CANCELLED, OrderStatus.DELIVERY_FAILED):
         await message.answer(f"订单 #{order.id} 当前状态：{order.status}，如需协助请联系管理员")
         return
@@ -269,6 +272,10 @@ async def cmd_query(
         await message.answer(f"订单 #{order.id} 暂时无法发货，请联系管理员")
         return
     assert order is not None
+    if order.status == OrderStatus.REFUNDED:
+        await notify_refund(db, bot, order.id)
+        await message.answer(f"订单 #{order.id} 无法交付，已退款到余额")
+        return
     if order.status != OrderStatus.DELIVERED:
         await message.answer(f"订单 #{order.id} 已支付，正在履约（状态：{order.status}），请稍等")
         return

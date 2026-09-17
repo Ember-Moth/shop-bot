@@ -151,26 +151,32 @@ async def test_timeout_becomes_submission_unknown(*, db, esim_order, commbitz_pu
     assert purchase is not None
     assert purchase.state == PurchaseState.SUBMISSION_UNKNOWN
     assert "network" in (purchase.last_error or "")
+    # 钱货状态不明绝不自动退款：订单保持 paid，等人工核对后 /bind 或 /refund
+    order_after = await db.get_order(esim_order.id)
+    assert order_after is not None and order_after.status == OrderStatus.PAID
 
 
-async def test_definite_rejection_marks_rejected_and_admin_retry_resubmits(
-    *, db, esim_order, commbitz_purchaser, httpx_mock
+async def test_definite_rejection_auto_refunds_and_closes_order(
+    *, db, user, esim_order, commbitz_purchaser, httpx_mock
 ):
+    """建单前被上游明确拒绝：自动退款到买家余额并关单，不再允许重试（退款规则）。"""
     httpx_mock.add_response(status_code=404, json={"statusCode": 404, "message": "Plan not found with SKU: US-1"})
     purchaser = commbitz_purchaser
     await orders.mark_paid(db, purchaser, esim_order.id)
     order = await purchaser.fulfill(db, esim_order.id)
-    assert order is not None and order.status == OrderStatus.PAID  # 付款事实保留
+    assert order is not None and order.status == OrderStatus.REFUNDED
     purchase = await db.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.REJECTED
-    # 管理员受控重试 → ready → 重新提交成功
+    # 全额退款到余额并写 refund 流水
+    user_after = await db.get_user(user.id)
+    assert user_after is not None and user_after.balance_cents == esim_order.amount_cents
+    txs = await db.list_balance_transactions(user.id)
+    assert [t.kind for t in txs] == ["refund"] and txs[0].amount_cents == esim_order.amount_cents
+    # 已退款关闭的订单不能重试，也不会再发创建请求
     ok, detail = await purchaser.retry_rejected(db, esim_order.id)
-    assert ok, detail
-    httpx_mock.add_response(json=_create_ok(request_id="up-2"))
-    _details_mock(httpx_mock)
-    order = await purchaser.fulfill(db, esim_order.id)
-    assert order is not None and order.status == OrderStatus.DELIVERED
-    assert order.upstream_ref == "up-2"
+    assert not ok and "已退款关闭" in detail
+    paths = [r.url.path for r in httpx_mock.get_requests()]
+    assert paths.count("/distributor-api/v1/request") == 1
 
 
 async def test_retry_refuses_unknown_state(*, db, esim_order, commbitz_purchaser, httpx_mock):
@@ -192,16 +198,17 @@ async def test_missing_id_in_success_response_becomes_unknown(*, db, esim_order,
     assert purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN
 
 
-async def test_upstream_failure_status_rejects_but_payment_stays(
-    *, db, esim_order, commbitz_purchaser, httpx_mock
-):
+async def test_upstream_failure_status_auto_refunds(*, db, user, esim_order, commbitz_purchaser, httpx_mock):
+    """已建单但上游明确宣告失败：货不会发，自动退款到余额并关单（平台成本与上游对账另算）。"""
     httpx_mock.add_response(json=_create_ok())
     _details_mock(httpx_mock, status="failed")
     await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
     order = await commbitz_purchaser.fulfill(db, esim_order.id)
-    assert order is not None and order.status == OrderStatus.PAID
+    assert order is not None and order.status == OrderStatus.REFUNDED
     purchase = await db.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.REJECTED
+    user_after = await db.get_user(user.id)
+    assert user_after is not None and user_after.balance_cents == esim_order.amount_cents
 
 
 async def test_partial_esims_keep_waiting(*, db, esim_order, commbitz_purchaser, httpx_mock):
@@ -402,13 +409,13 @@ async def test_retry_refuses_when_upstream_order_exists(*, db, esim_order, commb
     await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
     await commbitz_purchaser.fulfill(db, esim_order.id)
     httpx_mock.add_response(json=_details(status="failed", esims=[]))
-    await commbitz_purchaser.fulfill(db, esim_order.id)  # 详情 failed → rejected
+    await commbitz_purchaser.fulfill(db, esim_order.id)  # 详情 failed → rejected → 自动退款关单
     purchase = await db.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.REJECTED
     assert purchase.upstream_request_id == "remote-1"
 
     ok, detail = await commbitz_purchaser.retry_rejected(db, esim_order.id)
-    assert not ok and "不能重新购买" in detail
+    assert not ok and "已退款关闭" in detail
     # 状态不变，也不发新的创建请求
     assert (await db.get_purchase_by_order(esim_order.id)).state == PurchaseState.REJECTED
     paths = [r.url.path for r in httpx_mock.get_requests()]

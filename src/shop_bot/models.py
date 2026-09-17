@@ -11,6 +11,7 @@ class OrderStatus(StrEnum):
     DELIVERED = "delivered"
     DELIVERY_FAILED = "delivery_failed"
     CANCELLED = "cancelled"
+    REFUNDED = "refunded"  # 履约失败，已退款到买家余额（终态，不再履约/取消）
 
 
 class PurchaseState(StrEnum):
@@ -24,7 +25,7 @@ class PurchaseState(StrEnum):
     KYC_SUBMITTED = "kyc_submitted"  # 证件已提交，等待审核释放
     AWAITING_DISPATCH = "awaiting_dispatch"  # 实体 SIM 已受理，物流未确认；不自动记为已发货
     FULFILLED = "fulfilled"  # 货品已确认并持久化
-    REJECTED = "rejected"  # 上游明确拒绝；保留付款事实，由管理员重试/退款
+    REJECTED = "rejected"  # 上游明确拒绝；订单自动退款到买家余额并关闭（终态）
 
 
 @dataclass(slots=True)
