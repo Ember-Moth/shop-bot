@@ -9,6 +9,7 @@ from __future__ import annotations
 from ..db import Database
 from ..logging_config import get_logger
 from ..models import Order, OrderStatus, Product
+from .epay import EPayClient, EPayQueryResult
 from .purchasing import Purchaser
 
 logger = get_logger(__name__)
@@ -18,6 +19,27 @@ class OrderError(Exception):
     def __init__(self, message: str, order: Order | None = None) -> None:
         super().__init__(message)
         self.order = order
+
+
+async def confirm_epay_payment(
+    db: Database,
+    purchaser: Purchaser,
+    epay: EPayClient,
+    order: Order,
+    payment: EPayQueryResult,
+) -> Order:
+    """核单后持久化每笔外部收款；多收的钱按原币种入钱包，不重复采购。"""
+    epay.validate_payment(order, payment, allow_additional=True)
+    async with db.order_operation(order.id):
+        try:
+            confirmed, disposition = await db.record_epay_payment(order.id, payment.trade_no)
+        except ValueError as exc:
+            raise OrderError(str(exc), order) from None
+        if confirmed.status == OrderStatus.PAID:
+            await purchaser.ensure_purchase(db, confirmed)
+        if disposition == "wallet_credit":
+            logger.warning("additional payment credited to wallet", extra={"order_id": order.id})
+        return confirmed
 
 
 async def create_order(

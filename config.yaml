@@ -21,6 +21,7 @@ epay:                        # EPay（易支付）网关配置
   key: ""                    # 商户密钥
   url: ""                    # 网关地址，例如 https://pay.example.com
   type: alipay               # 默认支付方式
+  currency: USD              # 必须与 EPay 商户实际收款币种一致；人民币商户请设为 CNY，不自动换汇
 
 features:                    # 功能开关
   kyc: true                  # 是否向买家开放 KYC 证件补交（按钮与 /kyc 命令）

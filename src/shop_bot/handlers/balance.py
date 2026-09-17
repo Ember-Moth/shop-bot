@@ -26,23 +26,19 @@ class TopupFlow(StatesGroup):
     amount = State()
 
 
-async def start_topup(
-    message: Message, db: Database, epay: EPayClient | None, state: FSMContext
-) -> None:
+async def start_topup(message: Message, db: Database, epay: EPayClient | None, state: FSMContext) -> None:
     if epay is None:
         await message.answer("支付渠道未配置，充值功能暂不可用，请联系管理员")
         return
     await state.set_state(TopupFlow.amount)
     await message.answer(
-        "💰 充值余额\n\n请直接回复充值金额（元，1–10000，最多两位小数），"
+        f"💰 充值余额\n\n请直接回复充值金额（{epay.currency}，1–10000，最多两位小数），"
         "例如 `100` 或 `50.50`。\n完成后将生成支付链接；发送 /start 取消。"
     )
 
 
 @router.message(TopupFlow.amount, F.text)
-async def topup_amount_input(
-    message: Message, db: Database, epay: EPayClient | None, state: FSMContext
-) -> None:
+async def topup_amount_input(message: Message, db: Database, epay: EPayClient | None, state: FSMContext) -> None:
     if epay is None:
         await message.answer("支付渠道未配置，充值功能暂不可用，请联系管理员")
         return
@@ -54,7 +50,7 @@ async def topup_amount_input(
         return
     amount_cents = parse_topup_amount(text)
     if amount_cents is None:
-        await message.answer("金额无效（需 1–10000 元、最多两位小数），请重新回复，或发 /start 取消。")
+        await message.answer(f"金额无效（需 1–10000 {epay.currency}、最多两位小数），请重新回复，或发 /start 取消。")
         return
     from_user = message.from_user
     assert from_user is not None
@@ -63,7 +59,7 @@ async def topup_amount_input(
         await state.clear()
         await message.answer("请先发送 /start 完成注册")
         return
-    topup = await db.create_topup(user.id, amount_cents)
+    topup = await db.create_topup(user.id, amount_cents, epay.currency)
     await state.clear()
 
     settings = get_settings()
@@ -75,12 +71,13 @@ async def topup_amount_input(
             name="余额充值",
             order_no=f"T{topup.id}",
             amount=amount_cents / 100,
+            currency=topup.currency,
             notify_url=f"{settings.webhook.url.rstrip('/')}{settings.payment.callback_path}",
             return_url=f"https://t.me/{me.username}",
         )
     )
     await message.answer(
-        f"💰 充值单 `{topup.id}` 已创建\n金额：{format_cents(amount_cents)} CNY\n\n"
+        f"💰 充值单 `{topup.id}` 已创建\n金额：{format_cents(amount_cents)} {topup.currency}\n\n"
         "点击下方按钮完成支付，到账后自动通知：",
         parse_mode="Markdown",
         reply_markup=keyboards.order_created(topup.id, pay_url),
@@ -100,15 +97,24 @@ async def render_balance(message: Message, db: Database) -> None:
     if user is None:
         await message.answer("请先发送 /start 完成注册")
         return
-    lines = [f"当前余额：{format_cents(user.balance_cents)} CNY"]
+    balances = await db.get_balances(user.id)
+    balances.setdefault("USD", 0)
+    lines = [f"当前余额：{format_cents(value)} {currency}" for currency, value in sorted(balances.items())]
     txs = await db.list_balance_transactions(user.id)
     if txs:
         lines.append("")
         lines.append("最近记录：")
         for tx in txs:
             sign = "+" if tx.amount_cents >= 0 else "-"
-            kind = "充值" if tx.kind == "topup" else "消费"
+            kind = {
+                "topup": "充值",
+                "purchase": "消费",
+                "refund": "退款",
+                "adjust": "调账",
+                "payment_credit": "重复/关单收款补偿",
+            }.get(tx.kind, tx.kind)
             lines.append(
-                f"{sign}{format_cents(abs(tx.amount_cents))}（{kind}）→ 余额 {format_cents(tx.balance_after)}"
+                f"{sign}{format_cents(abs(tx.amount_cents))} {tx.currency}（{kind}）"
+                f"→ 余额 {format_cents(tx.balance_after)} {tx.currency}"
             )
     await message.answer("💳 我的余额\n\n" + "\n".join(lines))

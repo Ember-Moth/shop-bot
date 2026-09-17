@@ -22,6 +22,7 @@ import httpx
 
 from ..logging_config import get_logger
 from ..models import Order
+from ..money import normalize_currency
 
 logger = get_logger(__name__)
 
@@ -32,6 +33,7 @@ class EPayConfig:
     key: str  # 商户密钥
     url: str  # 网关地址，例如 https://pay.example.com
     type: str = "alipay"  # 默认支付方式
+    currency: str = "CNY"  # 单个商户的 money 单位；V1 没有标准跨币种换汇字段
 
 
 @dataclass(slots=True)
@@ -41,6 +43,7 @@ class EPayOrder:
     amount: float  # 金额，元
     notify_url: str  # 异步回调地址
     return_url: str  # 同步跳转地址
+    currency: str = "CNY"
 
 
 @dataclass(slots=True)
@@ -51,6 +54,7 @@ class EPayQueryResult:
     paid: bool
     message: str
     pid: str = ""
+    currency: str = ""  # 网关未回传时，通过配置的商户收款币种核验
 
 
 class EPayError(Exception):
@@ -90,6 +94,7 @@ def _format_money(amount: float) -> str:
 
 class EPayClient:
     def __init__(self, config: EPayConfig) -> None:
+        config.currency = normalize_currency(config.currency)
         self._config = config
         # V1 查询必须把商户密钥放在 URL 中，禁用第三方请求/线路调试日志。
         for name in ("httpx", "httpcore"):
@@ -101,11 +106,17 @@ class EPayClient:
         """商户 ID，供回调/查询核验使用。"""
         return self._config.pid
 
+    @property
+    def currency(self) -> str:
+        return self._config.currency
+
     async def close(self) -> None:
         await self._http.aclose()
 
     def create_pay_url(self, order: EPayOrder) -> str:
         """生成用户跳转的支付链接。"""
+        if order.currency != self.currency:
+            raise EPayError("payment currency does not match gateway")
         params = {
             "money": _format_money(order.amount),
             "name": order.name,
@@ -142,9 +153,10 @@ class EPayClient:
             message="",
             # 部分 V1 网关不回传 pid；此时商户身份来自已鉴权的查询上下文。
             pid=str(data.get("pid", self._config.pid)),
+            currency=str(data.get("currency") or ""),
         )
 
-    def validate_payment(self, order: Order, payment: EPayQueryResult) -> None:
+    def validate_payment(self, order: Order, payment: EPayQueryResult, *, allow_additional: bool = False) -> None:
         """回调与主动查询共用核单规则；验签/鉴权必须在调用此方法前完成。"""
         if not payment.paid or payment.order_no != str(order.id):
             raise EPayError("payment order does not match")
@@ -152,9 +164,11 @@ class EPayClient:
             raise EPayError("payment merchant does not match")
         if not payment.trade_no.strip() or payment.trade_no != payment.trade_no.strip():
             raise EPayError("payment transaction is missing or invalid")
-        if order.trade_no and order.trade_no != payment.trade_no:
+        if not allow_additional and order.trade_no and order.trade_no != payment.trade_no:
             raise EPayError("payment transaction does not match")
-        if order.currency != "CNY" or not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", payment.money):
+        if order.currency != self.currency or (payment.currency and payment.currency != order.currency):
+            raise EPayError("payment currency does not match gateway")
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", payment.money):
             raise EPayError("payment currency or amount is invalid")
         if Decimal(payment.money) <= 0 or Decimal(payment.money) * 100 != order.amount_cents:
             raise EPayError("payment amount does not match")
@@ -171,4 +185,5 @@ class EPayClient:
             pid=params.get("pid", ""),
             paid=params.get("trade_status") == "TRADE_SUCCESS",
             message="",
+            currency=params.get("currency", ""),
         )

@@ -156,7 +156,7 @@ async def test_kyc_submit_rejects_wrong_states(*, db, user, purchaser):
     ok, detail = await purchaser.submit_kyc(db, order.id, documents={"passportFront": "https://x/1.jpg"})
     assert not ok and "ready" in detail
     ok, detail = await purchaser.submit_kyc(db, 999, documents={"passportFront": "https://x/1.jpg"})
-    assert not ok and "没有采购记录" in detail
+    assert not ok and "不可履约" in detail
 
 
 async def test_kyc_requires_at_least_one_document(purchaser):

@@ -11,7 +11,7 @@ from aiohttp import web
 from ..db import Database
 from ..logging_config import get_logger
 from ..services.epay import EPayClient, EPayError
-from ..services.orders import OrderError, mark_paid
+from ..services.orders import OrderError, confirm_epay_payment
 from ..services.purchasing import Purchaser
 
 logger = get_logger(__name__)
@@ -33,7 +33,7 @@ async def epay_callback(request: web.Request) -> web.Response:
         return web.Response(text="success")
     order_no = payment.order_no
     # 充值单使用 T<id> 前缀，与商品订单（纯数字）区分
-    if order_no[:1] == "T" and order_no[1:].isdecimal() and len(order_no) <= 19:
+    if order_no[:1] == "T" and order_no.isascii() and order_no[1:].isdecimal() and len(order_no) <= 19:
         return await _handle_topup_callback(request, int(order_no[1:]), payment)
     if not order_no.isascii() or not order_no.isdecimal() or len(order_no) > 18:
         return web.Response(text="fail", status=400)
@@ -42,13 +42,9 @@ async def epay_callback(request: web.Request) -> web.Response:
     if order is None:
         return web.Response(text="fail", status=404)
     try:
-        epay.validate_payment(order, payment)
-    except EPayError:
+        await confirm_epay_payment(db, purchaser, epay, order, payment)
+    except EPayError, OrderError:
         logger.warning("payment validation failed", extra={"order_id": order_id})
-        return web.Response(text="fail", status=422)
-    try:
-        await mark_paid(db, purchaser, order.id, trade_no=payment.trade_no)
-    except OrderError:
         return web.Response(text="fail", status=422)
     # 收款已持久化、采购任务已建立；重复成功回调幂等返回 success，不重复履约。
     return web.Response(text="success")
@@ -68,6 +64,10 @@ async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -
     if payment.pid != epay.pid:
         logger.warning("topup callback merchant mismatch", extra={"order_id": topup_id})
         return web.Response(text="fail", status=422)
+    if payment.order_no != f"T{topup.id}":
+        return web.Response(text="fail", status=422)
+    if topup.currency != epay.currency or (payment.currency and payment.currency != topup.currency):
+        return web.Response(text="fail", status=422)
     if not payment.trade_no.strip() or payment.trade_no != payment.trade_no.strip():
         return web.Response(text="fail", status=400)
     if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", payment.money):
@@ -77,18 +77,22 @@ async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -
         logger.warning("topup callback amount mismatch", extra={"order_id": topup_id})
         return web.Response(text="fail", status=422)
 
-    # complete_topup 幂等：已到账不重复入账
-    credited = await db.complete_topup(topup.id, trade_no=payment.trade_no)
+    # 同一外部交易幂等；网关若确实收取另一笔款，则记录该交易并入账。
+    try:
+        credited = await db.complete_topup(topup.id, trade_no=payment.trade_no)
+    except ValueError:
+        return web.Response(text="fail", status=422)
     if credited is None:
         return web.Response(text="fail", status=422)
 
     buyer = await db.get_user(topup.user_id)
     bot = request.app["bot"]
     if buyer is not None and bot is not None:
+        balance = await db.get_balance(buyer.id, topup.currency)
         try:
             text = (
-                f"💰 充值到账 {topup.amount_cents / 100:.2f} CNY\n"
-                f"当前余额：{buyer.balance_cents / 100:.2f} CNY"
+                f"💰 充值到账 {topup.amount_cents / 100:.2f} {topup.currency}\n"
+                f"当前余额：{balance / 100:.2f} {topup.currency}"
             )
             await bot.send_message(buyer.telegram_id, text)
         except Exception as exc:

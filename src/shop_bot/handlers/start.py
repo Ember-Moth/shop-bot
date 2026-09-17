@@ -256,12 +256,12 @@ async def cmd_query(
             if not payment.paid:
                 await message.answer(f"订单 #{order.id} 尚未支付")
                 return
-            epay.validate_payment(order, payment)
-        except EPayError:
+            order = await orders.confirm_epay_payment(db, purchaser, epay, order, payment)
+        except EPayError, OrderError:
             logger.warning("payment query or validation failed", extra={"order_id": order.id})
             await message.answer("支付信息暂时无法确认，请稍后再试或联系管理员")
             return
-        trade_no = payment.trade_no
+        trade_no = order.trade_no
     else:
         trade_no = order.trade_no
     try:

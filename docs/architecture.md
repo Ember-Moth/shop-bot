@@ -1,6 +1,6 @@
 # 架构
 
-本文描述当前代码；Commbitz 真实采购尚未接入。目标资金流、采购状态及开发改造见 [转售 Bot 开发方案](reseller-bot-development.md)。
+本文描述当前代码；Commbitz 采购适配器已实现，真实扣款与交付验收仍待完成。目标资金流、采购状态及开发改造见 [转售 Bot 开发方案](reseller-bot-development.md)。
 
 ## 模块划分
 
@@ -34,14 +34,14 @@ shop_bot/
 ```
 用户 ──/start──> bot ──> 商品目录
   │
-  └─选商品 ──> FSM 确认数量 ──> 创建订单 ──> 生成 EPay 支付链接
+  └─选商品 ──> FSM 确认数量 ──> 创建订单 ──> 锁定在线渠道 ──> 生成 EPay 支付链接
                                               │
                                               v
                                     Web App 打开 EPay 收银台
                                               v
                                     用户完成支付
                                               v
-EPay 网关 ──GET/POST /payment/callback──> 验签核单 ──> mark_paid() 确认收款
+EPay 网关 ──GET/POST /payment/callback──> 验签核单 ──> confirm_epay_payment() 确认收款
                                               │          + purchases 建任务（ready）
                                               v
                                     立即应答 success（规则 2）
@@ -54,7 +54,7 @@ EPay 网关 ──GET/POST /payment/callback──> 验签核单 ──> mark_pa
                                               │
                               ┌───────────────┴──────────────┐
                               v                              v
-                        delivered + 通知买家         rejected → 退款到余额并关单
+                        delivered + 通知买家         refund_pending → 同币种退款并关单
                                               submission_unknown → /purchases 人工核对
                                                       → /bind 绑定 或 /refund 退款
 ```
@@ -80,10 +80,10 @@ ready → submitting → upstream_pending → fulfilled
             │              ├── awaiting_kyc → kyc_submitted（INR/强制 KYC，审核释放后才交付）
             │              └── awaiting_dispatch（实体 SIM 受理成功 ≠ 已发货）
             └── 超时/5xx/缺 _id → submission_unknown（钱货不明，人工核对后 /bind 或 /refund）
-     4xx 明确拒绝 → rejected → 订单自动退款到余额并关闭（refunded，防双退）
+     4xx 明确拒绝 → refund_pending → 订单与采购 refunded（同币种退款、账本和关单原子提交）
 ```
 
-- 用户下单后，bot 返回「立即支付」按钮（Telegram Web App）
+- 用户下单后先选择余额或在线支付；在线渠道在生成链接前持久化，此后同一订单不能扣余额
 - Web App 直接打开 EPay 收银台（`submit.php`），用户在 Telegram 内完成支付
 - 支付成功后，EPay 网关 GET 或 POST 到 `/payment/callback`，带 MD5 签名
 - 回调只做验签、核单、确认收款并建立采购任务（ready），随即应答（规则 2）
@@ -106,7 +106,7 @@ ready → submitting → upstream_pending → fulfilled
 
 采购安全规则：创建请求前先持久化提交意图；收到响应立即保存上游 `_id`；
 已有 ID 只查询；超时/5xx/缺 `_id` 转 `submission_unknown` 人工核对（上游无幂等键，
-绝不自动重购）；上游明确拒绝（rejected）即货不会发，订单自动退款到买家余额并关闭，
+绝不自动重购）；上游明确拒绝先持久化 `refund_pending`，再原子退款到买家同币种余额并关闭，
 /refund 供人工核对后退款，`/retry` 仅兼容自动退款前的历史数据。
 
 人工核对入口：`/purchases` 列表、`/retry <订单号>`、`/bind <订单号> <上游请求ID>`
@@ -118,8 +118,9 @@ EPay 网关 GET 或 POST 到 `/payment/callback`，form-urlencoded，带 MD5 签
 `web/payment.py` 里的 `epay_callback()` 做验证和分发，`services/epay.py` 封装协议细节。
 
 回调处理流程：
-1. 验证 MD5 签名 → 2. 解析 `out_trade_no` 拿订单号 → 3. `orders.mark_paid()` 触发上游发货 →
-4. 成功则 `bot.send_message()` 通知买家。
+1. 验证 MD5 签名并解析订单号、核验金额/币种/商户 → 2. 持久化外部交易与付款事实 →
+3. 为已付款订单建立采购任务后应答；重复或关单后的新增收款同币种补入钱包 →
+4. 后台推进采购并通知买家。
 
 ### Telegram 原生支付（备选）
 
@@ -150,4 +151,14 @@ EPay 网关 GET 或 POST 到 `/payment/callback`，form-urlencoded，带 MD5 签
 
 后台只查询已绑定单据，不重新创建采购。等待、缺少安装资料、查询失败或 KYC 未通过时不发送货品；核验完成后，通过 `finalize_delivery()` 在一个事务中保存新引用、新货品及采购终态。实体 SIM 继续等待独立的发货确认。
 
-通知入口要求有采购记录的订单已处于 `fulfilled`，订单交付引用与采购引用一致，且该上游引用没有其他订单占用。模拟模式使用明确的 `STUB-<订单号>` 引用。旧版错误重绑留下的引用不一致记录，即使已经通知、采购已为 `fulfilled`，也会被恢复扫描发现并重新核验；`submission_unknown` 和 `rejected` 仍由人工处理。
+通知入口要求有采购记录的订单已处于 `fulfilled`，订单交付引用与采购引用一致，且该上游引用没有其他订单占用。模拟模式使用明确的 `STUB-<订单号>` 引用。旧版错误重绑留下的引用不一致记录，即使已经通知、采购已为 `fulfilled`，也会被恢复扫描发现并重新核验；`submission_unknown` 仍由人工处理；历史 `paid + rejected` 由恢复循环补退。
+
+## 多币种钱包、收款与退款
+
+- `products.currency` 默认 USD，管理员 `/currency` 修改；订单创建时固定币种和金额，商品更新不影响已创建订单。
+- `wallet_balances` 按 `(user_id, currency)` 记账；所有流水包含 `currency`，支付/退款使用订单快照币种。旧 `users.balance_cents` 保留为 CNY 兼容镜像，资金操作只写钱包事务。
+- `orders.payment_method` 在生成 EPay 签名链接前设为 `epay`；余额扣款的事务检查该字段，保证两种支付方式互斥。旧待付 CNY 订单保守迁移为在线支付，以覆盖已发出的旧链接。
+- `payment_receipts` 记录真实交易号和处理结果，订单/充值单共用交易号归属检查。重复回调只返回既有结果；余额付款后的真实在线收款、已关单后的新增收款，原子记入同币种钱包。人工先 `/paid` 的第一笔回调仅补齐原收款证据。
+- `epay.currency` 声明当前商户实际收款币种，回调与查询核验相同；网关若回传币种也须一致。本店没有自动换汇机制。
+- 明确失败先持久化 `refund_pending`，再在一笔事务内写余额、退款流水、订单和采购的 `refunded` 终态；中断后继续退款。历史 `paid + rejected` 也进入补退。退款通知使用持久化待通知标记。
+- 人工退款与履约、KYC 使用同一订单锁；只允许未提交或已明确拒绝、人工核对的采购退款。上游仍在处理时必须先核对或取消。退款终态同时阻断 KYC、重绑和采购重试。

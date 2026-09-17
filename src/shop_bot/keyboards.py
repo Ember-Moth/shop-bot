@@ -11,6 +11,7 @@ CB_ORDER_PREFIX = "o:"
 CB_CONFIRM_ORDER = "order:confirm"
 CB_CANCEL_ORDER = "order:cancel"
 CB_BALANCE_PAY = "bal:"
+CB_EPAY_PAY = "epay:"
 
 # 主菜单文案（回复键盘与文本路由共用，改文案需同步 handlers/start.py）
 MENU_BUY = "🛒 购买商品"
@@ -92,7 +93,7 @@ def confirm_order() -> InlineKeyboardMarkup:
 
 
 def order_created(
-    order_id: int, pay_url: str | None = None, allow_balance: bool = False
+    order_id: int, pay_url: str | None = None, allow_balance: bool = False, allow_online: bool = False
 ) -> InlineKeyboardMarkup:
     rows = []
     if allow_balance:
@@ -104,6 +105,8 @@ def order_created(
         rows.append(
             [InlineKeyboardButton(text="💳 立即支付", web_app=WebAppInfo(url=pay_url))]
         )
+    elif allow_online:
+        rows.append([InlineKeyboardButton(text="💳 在线支付", callback_data=f"{CB_EPAY_PAY}{order_id}")])
     rows.append([InlineKeyboardButton(text="📦 查看我的订单", callback_data="myorders")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

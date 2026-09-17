@@ -118,6 +118,7 @@ async def amain() -> None:
                     key=settings.epay.key,
                     url=settings.epay.url,
                     type=settings.epay.type,
+                    currency=settings.epay.currency,
                 )
             )
             resources.push_async_callback(epay_client.close)

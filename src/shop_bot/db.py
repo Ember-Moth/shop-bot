@@ -22,6 +22,7 @@ from .models import (
     TopupState,
     User,
 )
+from .money import normalize_currency
 
 logger = get_logger(__name__)
 
@@ -57,6 +58,23 @@ CREATE TABLE IF NOT EXISTS balance_transactions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_balance_tx_user ON balance_transactions(user_id, id);
+
+CREATE TABLE IF NOT EXISTS wallet_balances (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    currency TEXT NOT NULL,
+    balance_cents INTEGER NOT NULL DEFAULT 0 CHECK (balance_cents >= 0),
+    PRIMARY KEY (user_id, currency)
+);
+
+CREATE TABLE IF NOT EXISTS payment_receipts (
+    trade_no TEXT PRIMARY KEY,
+    order_id INTEGER REFERENCES orders(id),
+    topup_id INTEGER REFERENCES balance_topups(id),
+    amount_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL,
+    disposition TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,10 +188,33 @@ class Database:
                 await conn.execute(f"ALTER TABLE orders ADD COLUMN {column} TEXT")
         if "input_days" not in columns:
             await conn.execute("ALTER TABLE orders ADD COLUMN input_days INTEGER")
+        if "payment_method" not in columns:
+            await conn.execute("ALTER TABLE orders ADD COLUMN payment_method TEXT")
+            # 旧待付单可能已生成可用的 EPay 链接，升级后不允许再切换到余额。
+            await conn.execute("UPDATE orders SET payment_method = 'epay' WHERE currency = 'CNY'")
+            await conn.execute("""
+                UPDATE orders SET payment_method = 'balance'
+                WHERE trade_no = 'BAL' || id AND EXISTS (
+                    SELECT 1 FROM balance_transactions WHERE order_id = orders.id AND kind = 'purchase'
+                )
+            """)
         async with conn.execute("PRAGMA table_info(users)") as cur:
             user_columns = {row["name"] for row in await cur.fetchall()}
         if "balance_cents" not in user_columns:
             await conn.execute("ALTER TABLE users ADD COLUMN balance_cents INTEGER NOT NULL DEFAULT 0")
+        async with conn.execute("PRAGMA table_info(balance_transactions)") as cur:
+            tx_columns = {row["name"] for row in await cur.fetchall()}
+        if "currency" not in tx_columns:
+            await conn.execute("ALTER TABLE balance_transactions ADD COLUMN currency TEXT NOT NULL DEFAULT 'CNY'")
+        async with conn.execute("PRAGMA table_info(balance_topups)") as cur:
+            topup_columns = {row["name"] for row in await cur.fetchall()}
+        if "currency" not in topup_columns:
+            await conn.execute("ALTER TABLE balance_topups ADD COLUMN currency TEXT NOT NULL DEFAULT 'CNY'")
+        # 原 users.balance_cents 仅表示人民币；迁移不能把它重新解释为美元。
+        await conn.execute("""
+            INSERT OR IGNORE INTO wallet_balances (user_id, currency, balance_cents)
+            SELECT id, 'CNY', balance_cents FROM users
+        """)
         async with conn.execute("PRAGMA table_info(products)") as cur:
             product_columns = {row["name"] for row in await cur.fetchall()}
         for column in ("sku", "upstream_plan_id", "request_type"):
@@ -208,6 +249,10 @@ class Database:
             purchase_columns = {row["name"] for row in await cur.fetchall()}
         if "kyc_documents" not in purchase_columns:
             await conn.execute("ALTER TABLE purchases ADD COLUMN kyc_documents TEXT")
+        await conn.execute("""
+            UPDATE purchases SET state = 'refunded'
+            WHERE order_id IN (SELECT id FROM orders WHERE status = 'refunded')
+        """)
         # 上游请求 ID 全局唯一：一份货品只能归属一个本店订单（防重复交付）。
         # 旧版本允许重复绑定：存在冲突时跳过索引、冻结冲突记录履约与通知并告警，
         # 由管理员人工核对后手动清空多余记录的 upstream_request_id
@@ -226,7 +271,7 @@ class Database:
                 WHERE upstream_request_id IN (
                     SELECT upstream_request_id FROM purchases WHERE upstream_request_id IS NOT NULL
                     GROUP BY upstream_request_id HAVING COUNT(*) > 1
-                )"""
+                ) AND order_id NOT IN (SELECT id FROM orders WHERE status = 'refunded')"""
             )
             logger.error(
                 "duplicate upstream request ids found in purchases; unique index skipped, "
@@ -333,7 +378,7 @@ class Database:
                 await conn.execute(
                     """INSERT INTO products
                         (name, description, price_cents, currency, active, sku, upstream_plan_id, request_type)
-                    VALUES (?, ?, 0, 'CNY', 0, ?, ?, ?)""",
+                    VALUES (?, ?, 0, 'USD', 0, ?, ?, ?)""",
                     (name, description, sku, upstream_plan_id, request_type),
                 )
                 return True
@@ -454,7 +499,12 @@ class Database:
                 purchase = await cur.fetchone()
             if purchase is None or purchase["state"] != from_purchase_state:
                 return None
-            if purchase["state"] in (PurchaseState.SUBMISSION_UNKNOWN, PurchaseState.REJECTED):
+            if purchase["state"] in (
+                PurchaseState.SUBMISSION_UNKNOWN,
+                PurchaseState.REJECTED,
+                PurchaseState.REFUND_PENDING,
+                PurchaseState.REFUNDED,
+            ):
                 return None
             expected_ref = purchase["upstream_request_id"] or f"STUB-{order_id:06d}"
             if upstream_ref != expected_ref:
@@ -611,11 +661,175 @@ class Database:
             return None, None
         return _row_to_purchase(updated), None
 
-    async def create_topup(self, user_id: int, amount_cents: int) -> Topup:
+    async def list_all_products(self) -> list[Product]:
+        return [_row_to_product(r) for r in await self._all("SELECT * FROM products ORDER BY id")]
+
+    async def set_product_currency(self, product_id: int, currency: str) -> Product | None:
+        currency = normalize_currency(currency)
         async with self.transaction() as conn:
             async with conn.execute(
-                "INSERT INTO balance_topups (user_id, amount_cents) VALUES (?, ?) RETURNING *",
-                (user_id, amount_cents),
+                "UPDATE products SET currency = ? WHERE id = ? RETURNING *", (currency, product_id)
+            ) as cur:
+                row = await cur.fetchone()
+        return _row_to_product(row) if row else None
+
+    async def get_balance(self, user_id: int, currency: str) -> int:
+        row = await self._one(
+            "SELECT balance_cents FROM wallet_balances WHERE user_id = ? AND currency = ?",
+            (user_id, normalize_currency(currency)),
+        )
+        return row["balance_cents"] if row else 0
+
+    async def get_balances(self, user_id: int) -> dict[str, int]:
+        rows = await self._all("SELECT currency, balance_cents FROM wallet_balances WHERE user_id = ?", (user_id,))
+        return {row["currency"]: row["balance_cents"] for row in rows}
+
+    async def _change_wallet(
+        self,
+        conn: aiosqlite.Connection,
+        user_id: int,
+        currency: str,
+        amount: int,
+        kind: str,
+        *,
+        order_id: int | None = None,
+        topup_id: int | None = None,
+        note: str = "",
+    ) -> int | None:
+        """调用方持有事务；余额和币种明确的流水原子写入。"""
+        currency = normalize_currency(currency)
+        async with conn.execute("SELECT id FROM users WHERE id = ?", (user_id,)) as cur:
+            if await cur.fetchone() is None:
+                return None
+        await conn.execute(
+            "INSERT OR IGNORE INTO wallet_balances (user_id, currency) VALUES (?, ?)", (user_id, currency)
+        )
+        async with conn.execute(
+            """UPDATE wallet_balances SET balance_cents = balance_cents + ?
+            WHERE user_id = ? AND currency = ? AND balance_cents + ? >= 0 RETURNING balance_cents""",
+            (amount, user_id, currency, amount),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        balance = row["balance_cents"]
+        if currency == "CNY":
+            # 兼容旧 User.balance_cents 只读接口；业务收付一律使用 wallet_balances。
+            await conn.execute("UPDATE users SET balance_cents = ? WHERE id = ?", (balance, user_id))
+        await conn.execute(
+            """INSERT INTO balance_transactions
+            (user_id, currency, amount_cents, balance_after, kind, order_id, topup_id, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, currency, amount, balance, kind, order_id, topup_id, note),
+        )
+        return balance
+
+    async def _check_receipt(
+        self,
+        conn: aiosqlite.Connection,
+        trade_no: str,
+        *,
+        order_id: int | None = None,
+        topup_id: int | None = None,
+    ) -> aiosqlite.Row | None:
+        if not trade_no or trade_no != trade_no.strip():
+            raise ValueError("invalid payment transaction")
+        async with conn.execute("SELECT * FROM payment_receipts WHERE trade_no = ?", (trade_no,)) as cur:
+            receipt = await cur.fetchone()
+        if receipt is not None and (receipt["order_id"] != order_id or receipt["topup_id"] != topup_id):
+            raise ValueError("payment transaction belongs to another order")
+        # 尚未进入 payment_receipts 的历史支付也参与全局唯一性核验。
+        for table, target in (("orders", order_id), ("balance_topups", topup_id)):
+            clause = " AND payment_method IS NOT 'balance'" if table == "orders" else ""
+            async with conn.execute(
+                f"SELECT id FROM {table} WHERE trade_no = ?{clause}",  # noqa: S608
+                (trade_no,),
+            ) as cur:
+                if any(row["id"] != target for row in await cur.fetchall()):
+                    raise ValueError("payment transaction belongs to another order")
+        return receipt
+
+    async def reserve_epay(self, order_id: int, user_id: int, currency: str) -> Order | None:
+        """先锁定在线渠道，再生成签名链接；余额扣款不能跨过这个持久化选择。"""
+        async with self.transaction() as conn:
+            async with conn.execute(
+                """UPDATE orders SET payment_method = 'epay' WHERE id = ? AND user_id = ?
+                AND currency = ? AND amount_cents > 0 AND status = 'pending_payment'
+                AND (payment_method IS NULL OR payment_method = 'epay') RETURNING *""",
+                (order_id, user_id, currency),
+            ) as cur:
+                row = await cur.fetchone()
+        return _row_to_order(row) if row else None
+
+    async def record_epay_payment(self, order_id: int, trade_no: str) -> tuple[Order, str]:
+        """调用方已验签并核对订单/金额/币种；重复收款同币种补偿入钱包。"""
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cur:
+                order = await cur.fetchone()
+            if order is None:
+                raise ValueError("order not found")
+            receipt = await self._check_receipt(conn, trade_no, order_id=order_id)
+            if receipt is not None:
+                return _row_to_order(order), receipt["disposition"]
+            # /paid 可能先于真实回调确认了同一笔收款；首次补齐交易号不能再次送余额。
+            is_original = order["payment_method"] != "balance" and (
+                order["trade_no"] == trade_no
+                or (
+                    order["trade_no"] is None
+                    and order["status"]
+                    in (
+                        "paid",
+                        "delivered",
+                        "delivery_failed",
+                        "refunded",
+                    )
+                )
+            )
+            disposition = "order" if order["status"] == "pending_payment" or is_original else "wallet_credit"
+            if disposition == "wallet_credit":
+                balance = await self._change_wallet(
+                    conn,
+                    order["user_id"],
+                    order["currency"],
+                    order["amount_cents"],
+                    "payment_credit",
+                    order_id=order_id,
+                    note=f"additional/closed-order payment: {trade_no}",
+                )
+                if balance is None:
+                    raise ValueError("payment owner missing")
+            elif order["status"] == "pending_payment":
+                await conn.execute(
+                    """UPDATE orders SET status = 'paid', trade_no = ?, payment_method = 'epay',
+                    updated_at = datetime('now') WHERE id = ?""",
+                    (trade_no, order_id),
+                )
+                await conn.execute(
+                    "INSERT INTO order_events (order_id, from_status, to_status, note) VALUES (?, ?, 'paid', ?)",
+                    (order_id, order["status"], "verified epay payment"),
+                )
+            elif order["trade_no"] is None:
+                await conn.execute(
+                    "UPDATE orders SET trade_no = ?, payment_method = 'epay' WHERE id = ?", (trade_no, order_id)
+                )
+            await conn.execute(
+                """INSERT INTO payment_receipts (trade_no, order_id, amount_cents, currency, disposition)
+                VALUES (?, ?, ?, ?, ?)""",
+                (trade_no, order_id, order["amount_cents"], order["currency"], disposition),
+            )
+            async with conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cur:
+                updated = await cur.fetchone()
+        assert updated is not None
+        return _row_to_order(updated), disposition
+
+    async def create_topup(self, user_id: int, amount_cents: int, currency: str = "CNY") -> Topup:
+        currency = normalize_currency(currency)
+        if amount_cents <= 0:
+            raise ValueError("topup amount must be positive")
+        async with self.transaction() as conn:
+            async with conn.execute(
+                "INSERT INTO balance_topups (user_id, amount_cents, currency) VALUES (?, ?, ?) RETURNING *",
+                (user_id, amount_cents, currency),
             ) as cur:
                 row = await cur.fetchone()
         assert row is not None
@@ -626,49 +840,44 @@ class Database:
         return _row_to_topup(row) if row else None
 
     async def complete_topup(self, topup_id: int, trade_no: str) -> Topup | None:
-        """充值单到账：pending → paid 与余额入账同一事务，天然幂等。
-
-        已是 paid 时原样返回（不重复入账）；非 pending 非 paid 返回 None。
-        """
         async with self.transaction() as conn:
             async with conn.execute("SELECT * FROM balance_topups WHERE id = ?", (topup_id,)) as cur:
                 topup = await cur.fetchone()
             if topup is None:
                 return None
-            if topup["status"] == "paid":
+            receipt = await self._check_receipt(conn, trade_no, topup_id=topup_id)
+            if receipt is not None or topup["trade_no"] == trade_no:
                 return _row_to_topup(topup)
-            if topup["status"] != "pending":
+            if topup["status"] not in ("pending", "paid"):
                 return None
+            balance = await self._change_wallet(
+                conn,
+                topup["user_id"],
+                topup["currency"],
+                topup["amount_cents"],
+                "topup",
+                topup_id=topup_id,
+                note=trade_no,
+            )
+            if balance is None:
+                raise ValueError("topup owner missing")
+            await conn.execute(
+                """INSERT INTO payment_receipts (trade_no, topup_id, amount_cents, currency, disposition)
+                VALUES (?, ?, ?, ?, 'topup')""",
+                (trade_no, topup_id, topup["amount_cents"], topup["currency"]),
+            )
             async with conn.execute(
-                """UPDATE balance_topups SET status = 'paid', trade_no = ?,
-                updated_at = datetime('now') WHERE id = ? AND status = 'pending' RETURNING *""",
+                """UPDATE balance_topups SET status = 'paid', trade_no = COALESCE(trade_no, ?),
+                updated_at = datetime('now') WHERE id = ? RETURNING *""",
                 (trade_no, topup_id),
             ) as cur:
                 paid = await cur.fetchone()
-            assert paid is not None
-            async with conn.execute(
-                "UPDATE users SET balance_cents = balance_cents + ? WHERE id = ? RETURNING balance_cents",
-                (paid["amount_cents"], paid["user_id"]),
-            ) as cur:
-                bal_row = await cur.fetchone()
-            assert bal_row is not None  # UPDATE 已命中（上面刚插入的充值单用户必然存在）
-            balance_after = bal_row["balance_cents"]
-            await conn.execute(
-                """INSERT INTO balance_transactions
-                (user_id, amount_cents, balance_after, kind, topup_id, note)
-                VALUES (?, ?, ?, 'topup', ?, ?)""",
-                (paid["user_id"], paid["amount_cents"], balance_after, topup_id, trade_no),
-            )
+        assert paid is not None
         return _row_to_topup(paid)
 
     async def pay_order_with_balance(
         self, order_id: int, user_id: int, amount_cents: int
     ) -> tuple[Order | None, str | None]:
-        """余额支付订单：扣款 + 订单转 paid + 流水同一事务。
-
-        返回 (订单, None) 成功；(None, "insufficient") 余额不足；
-        (None, "order not payable") / (None, "order mismatch") 状态或归属不符。
-        """
         async with self.transaction() as conn:
             async with conn.execute(
                 "SELECT * FROM orders WHERE id = ? AND status = 'pending_payment'", (order_id,)
@@ -676,97 +885,118 @@ class Database:
                 order = await cur.fetchone()
             if order is None:
                 return None, "order not payable"
-            if order["user_id"] != user_id or order["amount_cents"] != amount_cents:
+            if order["user_id"] != user_id or order["amount_cents"] != amount_cents or amount_cents <= 0:
                 return None, "order mismatch"
-            async with conn.execute(
-                """UPDATE users SET balance_cents = balance_cents - ?
-                WHERE id = ? AND balance_cents >= ? RETURNING balance_cents""",
-                (amount_cents, user_id, amount_cents),
-            ) as cur:
-                bal_row = await cur.fetchone()
-            if bal_row is None:
+            if order["payment_method"] == "epay":
+                return None, "online payment selected"
+            balance = await self._change_wallet(
+                conn,
+                user_id,
+                order["currency"],
+                -amount_cents,
+                "purchase",
+                order_id=order_id,
+                note=f"order #{order_id}",
+            )
+            if balance is None:
                 return None, "insufficient"
-            # 占位 trade_no 阻断重复收款：余额支付后若 EPay 收银台又付款，
-            # 回调会因 trade_no 一致性校验（validate_payment/transition_order）被拒并告警。
             async with conn.execute(
-                """UPDATE orders SET status = 'paid', trade_no = ?, updated_at = datetime('now')
-                WHERE id = ? AND status = 'pending_payment' RETURNING *""",
+                """UPDATE orders SET status = 'paid', payment_method = 'balance',
+                trade_no = ?, updated_at = datetime('now') WHERE id = ? RETURNING *""",
                 (f"BAL{order_id}", order_id),
             ) as cur:
                 paid = await cur.fetchone()
-            assert paid is not None  # BEGIN IMMEDIATE 串行化写者，状态不会再变
             await conn.execute(
                 "INSERT INTO order_events (order_id, from_status, to_status, note)"
                 " VALUES (?, 'pending_payment', 'paid', 'balance payment')",
                 (order_id,),
             )
-            await conn.execute(
-                """INSERT INTO balance_transactions
-                (user_id, amount_cents, balance_after, kind, order_id, note)
-                VALUES (?, ?, ?, 'purchase', ?, ?)""",
-                (user_id, -amount_cents, bal_row["balance_cents"], order_id, f"order #{order_id}"),
-            )
+        assert paid is not None
         return _row_to_order(paid), None
 
-    async def adjust_balance(self, user_id: int, delta_cents: int, note: str) -> int | None:
-        """管理员调账：余额修正与 adjust 流水同一事务，不允许扣成负余额。
-
-        返回调账后的余额（分）；用户不存在或负向调整超额返回 None。
-        """
+    async def adjust_balance(self, user_id: int, delta_cents: int, note: str, currency: str = "CNY") -> int | None:
         async with self.transaction() as conn:
-            async with conn.execute(
-                """UPDATE users SET balance_cents = balance_cents + ?
-                WHERE id = ? AND balance_cents + ? >= 0 RETURNING balance_cents""",
-                (delta_cents, user_id, delta_cents),
-            ) as cur:
-                row = await cur.fetchone()
-            if row is None:
-                return None
-            await conn.execute(
-                """INSERT INTO balance_transactions
-                (user_id, amount_cents, balance_after, kind, note)
-                VALUES (?, ?, ?, 'adjust', ?)""",
-                (user_id, delta_cents, row["balance_cents"], note),
-            )
-        return row["balance_cents"]
+            return await self._change_wallet(conn, user_id, currency, delta_cents, "adjust", note=note)
 
     async def refund_order_to_balance(self, order_id: int, note: str) -> tuple[Order | None, str | None]:
-        """退款到买家余额并关闭订单：paid → refunded 与余额入账、流水同一事务。
+        """人工退款与履约/KYC 共用订单锁；正在上游处理的订单不得直接退款。"""
+        async with self.order_operation(order_id), self.transaction() as conn:
+            async with conn.execute("SELECT * FROM purchases WHERE order_id = ?", (order_id,)) as cur:
+                purchase = await cur.fetchone()
+            if purchase is not None and purchase["state"] not in (
+                PurchaseState.READY,
+                PurchaseState.REJECTED,
+                PurchaseState.REFUND_PENDING,
+                PurchaseState.SUBMISSION_UNKNOWN,
+                PurchaseState.REFUNDED,
+            ):
+                return None, "upstream purchase active; reconcile or cancel upstream first"
+            return await self._refund_in_transaction(conn, order_id, note)
 
-        仅 paid 订单可退（refunded/cancelled/delivered 一律拒绝，条件转换防双退）。
-        返回 (订单, None) 成功；(None, "not refundable") 状态不符。
-        """
+    async def reject_and_refund(
+        self,
+        order_id: int,
+        purchase_id: int,
+        from_state: PurchaseState,
+        note: str,
+    ) -> tuple[Order | None, str | None]:
+        """fulfill 已持有订单锁；先保存退款意图，再原子写余额、账本和两侧终态。"""
+        # 先持久化明确拒绝的证据；退款事务中断后，恢复循环仍知道应退而非重购。
         async with self.transaction() as conn:
             async with conn.execute(
-                "SELECT * FROM orders WHERE id = ? AND status = 'paid'", (order_id,)
+                """UPDATE purchases SET state = 'refund_pending', last_error = ?, updated_at = datetime('now')
+                WHERE id = ? AND order_id = ? AND state = ? AND EXISTS (
+                    SELECT 1 FROM orders WHERE id = ? AND status = 'paid'
+                ) RETURNING id""",
+                (note, purchase_id, order_id, from_state, order_id),
             ) as cur:
-                order = await cur.fetchone()
-            if order is None:
-                return None, "not refundable"
+                if await cur.fetchone() is None:
+                    return None, "purchase state changed"
+        async with self.transaction() as conn:
             async with conn.execute(
-                """UPDATE orders SET status = 'refunded', updated_at = datetime('now')
-                WHERE id = ? AND status = 'paid' RETURNING *""",
-                (order_id,),
+                "SELECT id FROM purchases WHERE id = ? AND order_id = ? AND state = ?",
+                (purchase_id, order_id, PurchaseState.REFUND_PENDING),
             ) as cur:
-                refunded = await cur.fetchone()
-            assert refunded is not None  # BEGIN IMMEDIATE 串行化写者，状态不会再变
-            async with conn.execute(
-                "UPDATE users SET balance_cents = balance_cents + ? WHERE id = ? RETURNING balance_cents",
-                (refunded["amount_cents"], refunded["user_id"]),
-            ) as cur:
-                bal_row = await cur.fetchone()
-            assert bal_row is not None
-            await conn.execute(
-                "INSERT INTO order_events (order_id, from_status, to_status, note)"
-                " VALUES (?, 'paid', 'refunded', ?)",
-                (order_id, note),
-            )
-            await conn.execute(
-                """INSERT INTO balance_transactions
-                (user_id, amount_cents, balance_after, kind, order_id, note)
-                VALUES (?, ?, ?, 'refund', ?, ?)""",
-                (refunded["user_id"], refunded["amount_cents"], bal_row["balance_cents"], order_id, note),
-            )
+                if await cur.fetchone() is None:
+                    return None, "purchase state changed"
+            return await self._refund_in_transaction(conn, order_id, note)
+
+    async def _refund_in_transaction(
+        self,
+        conn: aiosqlite.Connection,
+        order_id: int,
+        note: str,
+    ) -> tuple[Order | None, str | None]:
+        async with conn.execute("SELECT * FROM orders WHERE id = ? AND status = 'paid'", (order_id,)) as cur:
+            order = await cur.fetchone()
+        if order is None:
+            return None, "not refundable"
+        balance = await self._change_wallet(
+            conn,
+            order["user_id"],
+            order["currency"],
+            order["amount_cents"],
+            "refund",
+            order_id=order_id,
+            note=note,
+        )
+        if balance is None:
+            raise ValueError("refund owner missing")
+        async with conn.execute(
+            """UPDATE orders SET status = 'refunded', notification_pending = 1, notified_at = NULL,
+            updated_at = datetime('now') WHERE id = ? RETURNING *""",
+            (order_id,),
+        ) as cur:
+            refunded = await cur.fetchone()
+        await conn.execute(
+            "UPDATE purchases SET state = 'refunded', last_error = ?, updated_at = datetime('now') WHERE order_id = ?",
+            (note, order_id),
+        )
+        await conn.execute(
+            "INSERT INTO order_events (order_id, from_status, to_status, note) VALUES (?, 'paid', 'refunded', ?)",
+            (order_id, note),
+        )
+        assert refunded is not None
         return _row_to_order(refunded), None
 
     async def list_balance_transactions(self, user_id: int, limit: int = 5) -> list[BalanceTransaction]:
@@ -850,7 +1080,7 @@ class Database:
         已交付但采购未落终态的历史残留（审计 P2：中断后状态必须可收敛）。"""
         rows = await self._all(
             """SELECT * FROM orders WHERE status = 'paid'
-            OR (status = 'delivered' AND notification_pending = 1)
+            OR (status IN ('delivered', 'refunded') AND notification_pending = 1)
             OR (status = 'delivered' AND EXISTS (
                 SELECT 1 FROM purchases WHERE purchases.order_id = orders.id
                 AND purchases.state NOT IN ('rejected', 'submission_unknown')
@@ -865,7 +1095,7 @@ class Database:
         async with self.transaction() as conn:
             await conn.execute(
                 """UPDATE orders SET notified_at = datetime('now'), notification_pending = 0
-                WHERE id = ? AND status = 'delivered'""",
+                WHERE id = ? AND status IN ('delivered', 'refunded')""",
                 (order_id,),
             )
 
@@ -963,6 +1193,7 @@ def _row_to_topup(row: aiosqlite.Row) -> Topup:
     return Topup(
         id=row["id"],
         user_id=row["user_id"],
+        currency=row["currency"],
         amount_cents=row["amount_cents"],
         status=TopupState(row["status"]),
         trade_no=row["trade_no"],
@@ -975,6 +1206,7 @@ def _row_to_balance_tx(row: aiosqlite.Row) -> BalanceTransaction:
     return BalanceTransaction(
         id=row["id"],
         user_id=row["user_id"],
+        currency=row["currency"],
         amount_cents=row["amount_cents"],
         balance_after=row["balance_after"],
         kind=row["kind"],
@@ -1005,6 +1237,7 @@ def _row_to_order(row: aiosqlite.Row) -> Order:
         input_sku=row["input_sku"],
         input_request_type=row["input_request_type"],
         input_plan_id=row["input_plan_id"],
+        payment_method=row["payment_method"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

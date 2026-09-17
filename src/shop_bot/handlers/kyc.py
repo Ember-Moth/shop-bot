@@ -90,6 +90,9 @@ async def cmd_kyc(
     if not await _require_private(message):
         return
     purchase = await db.get_purchase_by_order(order.id)
+    if order.status.value != "paid":
+        await message.answer("订单已关闭或不可履约，不能提交证件")
+        return
     if purchase is None:
         await message.answer("该订单没有采购记录")
         return

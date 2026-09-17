@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+from .money import normalize_currency
 
 
 class UpstreamSettings(BaseSettings):
@@ -51,6 +53,12 @@ class EPaySettings(BaseSettings):
     key: str = ""  # 商户密钥
     url: str = ""  # 网关地址，例如 https://pay.example.com
     type: str = "alipay"  # 默认支付方式
+    currency: str = "CNY"  # 兼容旧配置；新部署样例为 USD，必须与网关商户实际收款币种一致
+
+    @field_validator("currency")
+    @classmethod
+    def validate_currency(cls, value: str) -> str:
+        return normalize_currency(value)
 
 
 class FeaturesSettings(BaseSettings):

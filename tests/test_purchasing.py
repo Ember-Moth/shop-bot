@@ -166,7 +166,7 @@ async def test_definite_rejection_auto_refunds_and_closes_order(
     order = await purchaser.fulfill(db, esim_order.id)
     assert order is not None and order.status == OrderStatus.REFUNDED
     purchase = await db.get_purchase_by_order(esim_order.id)
-    assert purchase is not None and purchase.state == PurchaseState.REJECTED
+    assert purchase is not None and purchase.state == PurchaseState.REFUNDED
     # 全额退款到余额并写 refund 流水
     user_after = await db.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == esim_order.amount_cents
@@ -206,7 +206,7 @@ async def test_upstream_failure_status_auto_refunds(*, db, user, esim_order, com
     order = await commbitz_purchaser.fulfill(db, esim_order.id)
     assert order is not None and order.status == OrderStatus.REFUNDED
     purchase = await db.get_purchase_by_order(esim_order.id)
-    assert purchase is not None and purchase.state == PurchaseState.REJECTED
+    assert purchase is not None and purchase.state == PurchaseState.REFUNDED
     user_after = await db.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == esim_order.amount_cents
 
@@ -411,13 +411,13 @@ async def test_retry_refuses_when_upstream_order_exists(*, db, esim_order, commb
     httpx_mock.add_response(json=_details(status="failed", esims=[]))
     await commbitz_purchaser.fulfill(db, esim_order.id)  # 详情 failed → rejected → 自动退款关单
     purchase = await db.get_purchase_by_order(esim_order.id)
-    assert purchase is not None and purchase.state == PurchaseState.REJECTED
+    assert purchase is not None and purchase.state == PurchaseState.REFUNDED
     assert purchase.upstream_request_id == "remote-1"
 
     ok, detail = await commbitz_purchaser.retry_rejected(db, esim_order.id)
     assert not ok and "已退款关闭" in detail
     # 状态不变，也不发新的创建请求
-    assert (await db.get_purchase_by_order(esim_order.id)).state == PurchaseState.REJECTED
+    assert (await db.get_purchase_by_order(esim_order.id)).state == PurchaseState.REFUNDED
     paths = [r.url.path for r in httpx_mock.get_requests()]
     assert paths.count("/distributor-api/v1/request") == 1
 

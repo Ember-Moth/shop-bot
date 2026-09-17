@@ -21,6 +21,7 @@
 | `epay.key` | `SHOP_BOT_EPAY__KEY` | EPay 商户密钥 |
 | `epay.url` | `SHOP_BOT_EPAY__URL` | EPay 网关地址 |
 | `epay.type` | `SHOP_BOT_EPAY__TYPE` | 默认支付方式（`alipay`/`wxpay` 等） |
+| `epay.currency` | `SHOP_BOT_EPAY__CURRENCY` | 商户实际收款币种；新样例 USD，省略字段的旧配置保持 CNY；不自动换汇 |
 | `features.kyc` | `SHOP_BOT_FEATURES__KYC` | 是否向买家开放 KYC 证件补交入口（默认 `true`） |
 | `logging.level` | `SHOP_BOT_LOGGING__LEVEL` | 日志级别（默认 `INFO`） |
 | `logging.log_dir` | `SHOP_BOT_LOGGING__LOG_DIR` | 日志文件目录（空表示只输出到 stdout） |
@@ -118,3 +119,11 @@ FSM 保留旧版本实际读取的最早行，避免被后续重复行中的空�
 发货失败需要管理员 `/paid` 重试；`/query` 与 `/paid` 补发的货品都只私信订单买家。
 接入真实上游前必须验证 `order.id` 幂等性，包括“上游已成功、本地进程中断后重试”的场景。
 EPay V1 查询在 URL 中携带密钥，因此 HTTPX/HTTPCORE 请求调试日志被禁用，支付错误只输出安全的业务信息。
+
+## 币种与升级
+
+新商品默认 USD，使用 `/products` 查询商品 ID，`/currency <ID> <币种>` 设置币种。已有商品和订单不自动改币种。钱包按币种隔离，旧版余额、充值和流水自动迁移为 CNY。
+
+继续使用 EPay；`epay.currency: USD` 仅适用于商户侧实际按 USD 收款的服务。设置该字段不能改变网关实际扣款币种，详见 [币种说明](../README.md#商品与收款币种)。旧币种未完成支付应在更换收款币种前处理完毕。
+
+升级自动建立钱包/外部收款记录及退款恢复状态，保留既有数据。旧待付 CNY 订单可能已有收银台链接，因此迁移后只允许在线支付；新的订单先选择渠道，再生成链接。

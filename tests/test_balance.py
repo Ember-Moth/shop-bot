@@ -293,8 +293,8 @@ async def test_render_balance_unknown_user_prompts_start(db, bot):
     assert any("/start" in t and "注册" in t for t in texts)
 
 
-async def test_epay_callback_rejected_after_balance_payment(*, http_client, db, user, epay):
-    """P2：余额支付后占位 trade_no 阻断 EPay 收银台重复收款（双重支付窗口）。"""
+async def test_epay_callback_compensates_after_legacy_balance_payment(*, http_client, db, user, epay):
+    """历史余额单收到真实收款后同币种补偿，重放同一交易只补一次。"""
     product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
     await db.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
@@ -303,7 +303,7 @@ async def test_epay_callback_rejected_after_balance_payment(*, http_client, db, 
     paid, err = await db.pay_order_with_balance(order.id, user.id, order.amount_cents)
     assert err is None and paid is not None
     assert paid.trade_no == f"BAL{order.id}"  # 占位 trade_no 已写入
-    # 用户随后在早已打开的 EPay 收银台完成付款：回调必须被拒，订单与余额不受影响
+    # 旧版本已打开的 EPay 收银台完成付款：记录并补偿，绝不丢弃真实收款
     params = {
         "pid": "1000",
         "name": "p",
@@ -314,11 +314,14 @@ async def test_epay_callback_rejected_after_balance_payment(*, http_client, db, 
     }
     params["sign"] = _create_sign(params, "audit-secret")
     response = await http_client.post("/payment/callback", data=params)
-    assert response.status == 422
+    assert response.status == 200
+    repeated = await http_client.post("/payment/callback", data=params)
+    assert repeated.status == 200
     order_after = await db.get_order(order.id)
     assert order_after is not None and order_after.trade_no == f"BAL{order.id}"
     user_after = await db.get_user(user.id)
-    assert user_after is not None and user_after.balance_cents == 1000_00 - order.amount_cents
+    assert user_after is not None and user_after.balance_cents == 1000_00
+    assert len([t for t in await db.list_balance_transactions(user.id) if t.kind == "payment_credit"]) == 1
 
 
 async def test_topup_callback_rejects_whitespace_trade_no(*, http_client, db, user, epay):
@@ -384,8 +387,8 @@ async def test_cmd_adjust_replies_and_notifies_user(db, user, bot):
     )
     await cmd_adjust(msg, db, bot)
     texts = [m.text or "" for m in bot.session.sent]
-    assert any("已调账 +5.50 元" in t for t in texts)  # 管理员确认
-    assert any("余额调整 +5.50 元" in t and "测试调账" in t for t in texts)  # 用户私信
+    assert any("已调账 +5.50 CNY" in t for t in texts)  # 管理员确认
+    assert any("余额调整 +5.50 CNY" in t and "测试调账" in t for t in texts)  # 用户私信
     user_after = await db.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 550
 
@@ -448,7 +451,7 @@ async def test_cmd_refund_paid_order_notifies_buyer(db, user, bot):
     order_after = await db.get_order(order.id)
     assert order_after is not None and order_after.status == OrderStatus.REFUNDED
     texts = [m.text or "" for m in bot.session.sent]
-    assert any("已退款 1.00 元" in t for t in texts)  # 管理员确认
+    assert any("已退款 1.00 CNY" in t for t in texts)  # 管理员确认
     assert any("已退回余额" in t and f"#{order.id}" in t for t in texts)  # 买家私信
     await cmd_refund(msg, db, bot)
     assert "无法退款" in (bot.session.sent[-1].text or "")

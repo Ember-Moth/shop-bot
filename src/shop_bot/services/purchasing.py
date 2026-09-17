@@ -303,7 +303,11 @@ class CommbitzPurchaser:
             # 提交后立即轮询一次（eSIM 通常即时出货）；仍 pending/KYC 待审则留给下次恢复。
             # awaiting_kyc 且尚无上游单（账户级 KYC 待证件）时不轮询，等重新创建。
             await self._poll(db, order, purchase)
-        # submission_unknown / rejected / fulfilled / awaiting_dispatch：不自动处理
+        if purchase.state in (PurchaseState.REFUND_PENDING, PurchaseState.REJECTED):
+            await db.reject_and_refund(
+                order.id, purchase.id, purchase.state, purchase.last_error or "upstream rejected"
+            )
+        # submission_unknown / fulfilled / awaiting_dispatch：不自动处理
         return await db.get_order(order_id)
 
     async def _submit(self, db: Database, order: Order, purchase: Purchase) -> None:
@@ -347,12 +351,9 @@ class CommbitzPurchaser:
                 )
             elif exc.definite_rejection:
                 logger.warning("purchase rejected by upstream", extra={"order_id": order.id})
-                rejected = await db.transition_purchase(
-                    purchase.id, PurchaseState.REJECTED, from_state=PurchaseState.SUBMITTING, last_error=str(exc)
+                await db.reject_and_refund(
+                    order.id, purchase.id, PurchaseState.SUBMITTING, "upstream rejected before creation"
                 )
-                if rejected is not None:
-                    # 建单前被明确拒绝：货不会发也未扣上游成本，自动退款到余额并关单
-                    await db.refund_order_to_balance(order.id, "upstream rejected before creation")
             else:
                 logger.warning("purchase submission unknown", extra={"order_id": order.id, "error": type(exc).__name__})
                 await db.transition_purchase(
@@ -416,16 +417,9 @@ class CommbitzPurchaser:
         purchase = await db.get_purchase_by_order(order.id) or purchase
         status = classify_status(details.get("status"))
         if status == "failure":
-            rejected = await db.transition_purchase(
-                purchase.id,
-                PurchaseState.REJECTED,
-                from_state=purchase.state,
-                last_error=f"upstream status: {details.get('status')}",
+            await db.reject_and_refund(
+                order.id, purchase.id, purchase.state, f"upstream failed: {details.get('status')}"
             )
-            if rejected is not None:
-                # 上游明确宣告失败：货不会发，自动退款到余额并关单；
-                # 平台侧成本与上游对账另算（阶段 D），与买家无关
-                await db.refund_order_to_balance(order.id, f"upstream failed: {details.get('status')}")
             return
         if status != "success":
             return  # pending：等待下次轮询
@@ -497,6 +491,20 @@ class CommbitzPurchaser:
           转回 ready，下次提交创建请求时随单携带 kycDocuments。
         规则 7：上传失败不改状态，可重试；"已审核过"视为通过继续推进。
         """
+        async with db.order_operation(order_id):
+            order = await db.get_order(order_id)
+            if order is None or order.status != OrderStatus.PAID:
+                return False, "订单已关闭或不可履约，不能提交证件"
+            return await self._submit_kyc_locked(db, order_id, documents=documents, files=files)
+
+    async def _submit_kyc_locked(
+        self,
+        db: Database,
+        order_id: int,
+        *,
+        documents: dict[str, str] | None = None,
+        files: list[tuple[str, str, bytes]] | None = None,
+    ) -> tuple[bool, str]:
         purchase = await db.get_purchase_by_order(order_id)
         if purchase is None:
             return False, "该订单没有采购记录"
@@ -577,6 +585,10 @@ class CommbitzPurchaser:
         重新创建会造成重复扣款，且丢失原单关联（审计 P1-3）。
         现行规则下 rejected 会立即自动退款关单；本命令仅兼容自动退款前的历史数据。
         """
+        async with db.order_operation(order_id):
+            return await self._retry_rejected_locked(db, order_id)
+
+    async def _retry_rejected_locked(self, db: Database, order_id: int) -> tuple[bool, str]:
         purchase = await db.get_purchase_by_order(order_id)
         if purchase is None:
             return False, "该订单没有采购记录"

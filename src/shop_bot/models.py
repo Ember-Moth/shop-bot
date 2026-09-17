@@ -26,6 +26,8 @@ class PurchaseState(StrEnum):
     AWAITING_DISPATCH = "awaiting_dispatch"  # 实体 SIM 已受理，物流未确认；不自动记为已发货
     FULFILLED = "fulfilled"  # 货品已确认并持久化
     REJECTED = "rejected"  # 上游明确拒绝；订单自动退款到买家余额并关闭（终态）
+    REFUND_PENDING = "refund_pending"  # 已确认应退款；中断后继续同币种退款
+    REFUNDED = "refunded"  # 退款已落账，所有采购操作停止
 
 
 @dataclass(slots=True)
@@ -34,7 +36,7 @@ class Product:
     name: str
     description: str
     price_cents: int
-    currency: str
+    currency: str = "USD"
     active: bool = True
     sku: str | None = None  # 上游 SKU（Commbitz 目录同步写入；手工商品为 None）
     upstream_plan_id: str | None = None  # 上游套餐 _id，用于交付时映射回上游请求
@@ -67,6 +69,7 @@ class Order:
     input_sku: str | None = None  # 下单时锁定的上游 SKU（防止商品后续变更影响采购）
     input_request_type: str | None = None  # 下单时锁定的业务类型
     input_plan_id: str | None = None  # 下单时锁定的上游套餐 ID（交付/绑定核验依据）
+    payment_method: str | None = None  # epay / balance；生成收银台链接前锁定渠道
 
     @property
     def amount_text(self) -> str:
@@ -79,7 +82,7 @@ class User:
     telegram_id: int
     username: str | None
     created_at: datetime
-    balance_cents: int = 0  # 钱包余额（分）；一律为非负整数
+    balance_cents: int = 0  # 旧接口的 CNY 余额镜像；收付使用按币种的 wallet_balances
 
 
 class TopupState(StrEnum):
@@ -113,6 +116,7 @@ class Topup:
     trade_no: str | None  # 支付网关交易号（到账时写入）
     created_at: datetime
     updated_at: datetime
+    currency: str = "CNY"
 
 
 @dataclass(slots=True)
@@ -123,8 +127,9 @@ class BalanceTransaction:
     user_id: int
     amount_cents: int
     balance_after: int
-    kind: str  # topup / purchase / adjust
+    kind: str  # topup / purchase / adjust / refund / payment_credit
     order_id: int | None
     topup_id: int | None
     note: str | None
     created_at: datetime
+    currency: str = "CNY"

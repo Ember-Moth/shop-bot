@@ -60,7 +60,7 @@ def _parse_extra(product: Product, quantity: int, text: str) -> tuple[str | None
         parts = text.split()
         target = parts[0]
         if target.lower().startswith(ICCID_PREFIX):
-            iccid = target[len(ICCID_PREFIX):]
+            iccid = target[len(ICCID_PREFIX) :]
             if not iccid.isdecimal() or len(iccid) < 18:
                 return None, None, None, "ICCID 应为 18 位以上数字，请重新回复。"
         else:
@@ -165,9 +165,7 @@ async def msg_extra(message: Message, state: FSMContext, db: Database) -> None:
 
 
 @router.callback_query(F.data == keyboards.CB_CONFIRM_ORDER)
-async def cb_confirm(
-    callback: CallbackQuery, state: FSMContext, db: Database, epay: EPayClient | None
-) -> None:
+async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, epay: EPayClient | None) -> None:
     data = await state.get_data()
     await state.clear()
     product_id = data.get("product_id")
@@ -183,56 +181,75 @@ async def cb_confirm(
     if user is None:
         await callback.answer("请先发 /start 再下单", show_alert=True)
         return
-    if epay is not None and product.currency != "CNY":
-        await callback.answer("当前商品不支持在线支付，请联系管理员", show_alert=True)
-        return
     order = await orders.create_order(
-        db, user.id, product, quantity,
-        iccid=data.get("iccid"), msisdn=data.get("msisdn"), days=data.get("days"),
+        db,
+        user.id,
+        product,
+        quantity,
+        iccid=data.get("iccid"),
+        msisdn=data.get("msisdn"),
+        days=data.get("days"),
     )
     msg = callback.message
     if msg is None or isinstance(msg, InaccessibleMessage):
         await callback.answer()
         return
 
-    settings = get_settings()
-    allow_balance = user.balance_cents >= order.amount_cents and order.currency == "CNY"
+    balance = await db.get_balance(user.id, order.currency)
+    allow_balance = balance >= order.amount_cents and order.amount_cents > 0
+    allow_online = epay is not None and order.currency == epay.currency
+    hint = "请选择支付方式。选择在线支付后，本订单只能通过该收银台付款。"
+    if not allow_balance and not allow_online:
+        hint = f"暂未开通 {order.currency} 在线收款，且同币种余额不足，请联系管理员。"
+    await msg.edit_text(
+        f"✅ 下单成功！\n\n订单号：`{order.id}`\n金额：{order.amount_text}\n\n{hint}",
+        parse_mode="Markdown",
+        reply_markup=keyboards.order_created(order.id, allow_balance=allow_balance, allow_online=allow_online),
+    )
+    await callback.answer()
 
-    if epay is not None:
-        # 生成 EPay 支付链接，Web App 按钮直接打开收银台
-        notify_url = f"{settings.webhook.url.rstrip('/')}{settings.payment.callback_path}"
-        bot = callback.bot
-        assert bot is not None  # aiogram 保证非空
-        me = await bot.get_me()
-        return_url = f"https://t.me/{me.username}"
-        pay_url = epay.create_pay_url(
-            EPayOrder(
-                name=product.name,
-                order_no=str(order.id),
-                amount=order.amount_cents / 100,
-                notify_url=notify_url,
-                return_url=return_url,
-            )
+
+@router.callback_query(F.data.startswith(keyboards.CB_EPAY_PAY))
+async def cb_pay_online(callback: CallbackQuery, db: Database, epay: EPayClient | None) -> None:
+    raw = (callback.data or "").removeprefix(keyboards.CB_EPAY_PAY)
+    if not raw.isascii() or not raw.isdecimal() or len(raw) > 18 or epay is None:
+        await callback.answer("在线支付暂不可用", show_alert=True)
+        return
+    msg = callback.message
+    if msg is None or isinstance(msg, InaccessibleMessage):
+        await callback.answer()
+        return
+    user = await db.get_user_by_telegram_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("请先发 /start 再操作", show_alert=True)
+        return
+    order = await db.reserve_epay(int(raw), user.id, epay.currency)
+    if order is None:
+        await callback.answer("订单状态或币种不支持此收款渠道", show_alert=True)
+        return
+    settings = get_settings()
+    bot = callback.bot
+    assert bot is not None
+    me = await bot.get_me()
+    pay_url = epay.create_pay_url(
+        EPayOrder(
+            name=f"订单 #{order.id}",
+            order_no=str(order.id),
+            amount=order.amount_cents / 100,
+            currency=order.currency,
+            notify_url=f"{settings.webhook.url.rstrip('/')}{settings.payment.callback_path}",
+            return_url=f"https://t.me/{me.username}",
         )
-        await msg.edit_text(
-            f"✅ 下单成功！\n\n订单号：`{order.id}`\n金额：{order.amount_text}\n\n"
-            "点击下方按钮在 Telegram 内完成支付：",
-            parse_mode="Markdown",
-            reply_markup=keyboards.order_created(order.id, pay_url, allow_balance=allow_balance),
-        )
-    else:
-        await msg.edit_text(
-            f"✅ 下单成功！\n\n订单号：`{order.id}`\n金额：{order.amount_text}\n\n"
-            "付款完成后我们会立即为你发货。",
-            parse_mode="Markdown",
-        )
+    )
+    await msg.edit_text(
+        f"订单 #{order.id} · {order.amount_text}\n已选择在线支付，请打开收银台完成付款。",
+        reply_markup=keyboards.order_created(order.id, pay_url),
+    )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith(keyboards.CB_BALANCE_PAY))
-async def cb_pay_with_balance(
-    callback: CallbackQuery, db: Database, purchaser: Purchaser, bot: Bot
-) -> None:
+async def cb_pay_with_balance(callback: CallbackQuery, db: Database, purchaser: Purchaser, bot: Bot) -> None:
     """余额支付：扣款与订单转 paid 同一事务，随后走统一履约链路。"""
     data = callback.data or ""
     if not data.removeprefix(keyboards.CB_BALANCE_PAY).isdecimal():
@@ -256,8 +273,11 @@ async def cb_pay_with_balance(
     # pay_order_with_balance 本身是原子的；fulfill 内部会自行持有订单锁，
     # 这里不能先持有——否则 fulfill 重入同一把非重入锁会死锁。
     paid, err = await db.pay_order_with_balance(order_id, user.id, order.amount_cents)
+    if err == "online payment selected":
+        await callback.answer("此订单已选择在线支付，请使用原收银台完成付款", show_alert=True)
+        return
     if err == "insufficient":
-        await callback.answer("余额不足，请选择在线支付或先充值", show_alert=True)
+        await callback.answer(f"{order.currency} 余额不足，请选择在线支付或先充值同币种余额", show_alert=True)
         return
     if err is not None or paid is None:
         await callback.answer("支付失败，请稍后再试", show_alert=True)

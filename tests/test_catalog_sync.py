@@ -40,7 +40,7 @@ async def test_sync_creates_inactive_products(db):
     assert row is not None
     assert row["active"] == 0
     assert row["price_cents"] == 0
-    assert row["currency"] == "CNY"
+    assert row["currency"] == "USD"
     assert row["upstream_plan_id"] == "id-US-1"
     assert row["request_type"] == "esim"  # simCategory 推导业务类型
     assert row["name"] == "US 1GB"
