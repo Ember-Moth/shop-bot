@@ -118,7 +118,7 @@ async def test_live_startup_has_no_demo_products_and_supervises_workers(
             assert {"start", "query", "usage", "kyc"} <= set(user_commands)
             assert "products" not in user_commands
             admin_commands = [c.command for c in admin_menu.commands]
-            assert "products" in admin_commands and "status" in admin_commands
+            assert {"products", "price", "rename", "status"} <= set(admin_commands)
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

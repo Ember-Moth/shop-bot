@@ -86,6 +86,27 @@ def _valid_product_id(value: str) -> bool:
     return value.isascii() and value.isdecimal() and 0 < len(value) <= 18 and int(value) > 0
 
 
+@router.message(Command("rename"))
+async def cmd_rename(message: Message, db: Database) -> None:
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) != 3 or not _valid_product_id(parts[1]):
+        await message.answer("用法：/rename <商品ID> <新名称>，例如 /rename 1 美国1GB·7天")
+        return
+    try:
+        product = await db.configure_product(
+            int(parts[1]),
+            name=parts[2],
+            actor_id=message.from_user.id if message.from_user else None,
+        )
+    except ValueError as exc:
+        await message.answer(f"❌ {exc}")
+        return
+    if product is None:
+        await message.answer("商品不存在")
+        return
+    await message.answer(f"✅ 商品 #{product.id} 已更名为：{product.name}；目录同步不会覆盖人工名称")
+
+
 async def _set_published(message: Message, db: Database, active: bool) -> None:
     parts = (message.text or "").split()
     if len(parts) != 2 or not _valid_product_id(parts[1]):

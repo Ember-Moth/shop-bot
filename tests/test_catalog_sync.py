@@ -46,17 +46,17 @@ async def test_sync_creates_inactive_products(db):
     assert row["name"] == "US 1GB"
 
 
-async def test_resync_updates_without_touching_price(db):
+async def test_resync_preserves_manual_name_and_price(db):
     await sync_catalog(db, FakeCommbitz([_plan("US-1", "old name")]))
     async with db.transaction() as conn:
         await conn.execute("UPDATE products SET price_cents = 49900, active = 1 WHERE sku = 'US-1'")
     result = await sync_catalog(db, FakeCommbitz([_plan("US-1", "new name")]))
     assert (result.created, result.updated) == (0, 1)
     row = await db._one("SELECT * FROM products WHERE sku = 'US-1'")
-    # 本店定价和上架状态保留，只更新名称
+    # 本店定价、上架状态与名称保留（名称可能经 /rename 人工命名）；同步只更新套餐映射
     assert row["price_cents"] == 49900
     assert row["active"] == 1
-    assert row["name"] == "new name"
+    assert row["name"] == "old name"
 
 
 async def test_sync_skips_missing_sku(db):

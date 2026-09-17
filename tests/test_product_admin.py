@@ -45,6 +45,30 @@ async def test_admin_price_publish_unpublish_and_audit(db, bot, monkeypatch):
     )
     assert not (await db.get_product(1)).active
     assert (await db.get_product(1)).price_cents == 1995
+    assert (await db.get_product(1)).name == "test"  # 名称不被目录同步覆盖
+
+
+async def test_admin_rename_and_audit(db, bot):
+    await db.upsert_product_from_upstream(
+        sku="S", name="old", description="", upstream_plan_id="P", request_type="esim"
+    )
+    msg = menu_message_of(bot)
+    await admin.cmd_rename(msg.model_copy(update={"text": "/rename 1 美国1GB·7天"}), db)
+    assert (await db.get_product(1)).name == "美国1GB·7天"
+    events = await db._all("SELECT * FROM product_events")
+    assert len(events) == 1
+    assert json.loads(events[0]["before_json"])["name"] == "old"
+    assert json.loads(events[0]["after_json"])["name"] == "美国1GB·7天"
+    # 目录同步不覆盖人工名称
+    await db.upsert_product_from_upstream(
+        sku="S", name="upstream name", description="", upstream_plan_id="P", request_type="esim"
+    )
+    assert (await db.get_product(1)).name == "美国1GB·7天"
+    # 用法错误与非法名称
+    await admin.cmd_rename(msg.model_copy(update={"text": "/rename 1"}), db)
+    assert any("用法" in (m.text or "") for m in bot.session.sent)
+    with pytest.raises(ValueError, match="名称"):
+        await db.configure_product(1, name="   ")
 
 
 async def test_live_publish_requires_mapping(db, product):

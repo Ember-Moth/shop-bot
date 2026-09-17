@@ -74,7 +74,7 @@
 
 ### 商品管理
 - [x] 商品 SKU / 上游套餐 ID 字段及旧库迁移（`products.sku` / `products.upstream_plan_id`）
-- [x] 管理员 `/price` 定价、`/publish` 上架、`/unpublish` 下架；原子审计、买家调价后重新确认、创建订单事务复核
+- [x] 管理员 `/price` 定价、`/rename` 改名、`/publish` 上架、`/unpublish` 下架；原子审计、买家调价后重新确认、创建订单事务复核；目录同步不覆盖人工名称
 - [ ] 为真实销售 SKU 完成业务验收并设置实际售价、启用上架
 - [x] 管理员 `/products` 查看商品、`/currency <商品ID> <币种>` 设置币种（新商品默认 USD，已有订单保持快照）
 - [ ] 可选：管理员命令 `/add_product` / `/del_product` 动态管理商品

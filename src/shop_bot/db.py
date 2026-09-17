@@ -413,12 +413,13 @@ class Database:
                     (name, description, sku, upstream_plan_id, request_type),
                 )
                 return True
+            # 名称/描述只在新建时写入：人工改名（/rename）不被目录同步覆盖；
             # request_type 保留人工配置（COALESCE）：管理员指定的业务类型不被目录同步覆盖
             await conn.execute(
-                """UPDATE products SET name = ?, description = ?, upstream_plan_id = ?,
+                """UPDATE products SET upstream_plan_id = ?,
                 request_type = COALESCE(request_type, ?)
                 WHERE id = ?""",
-                (name, description, upstream_plan_id, request_type, row["id"]),
+                (upstream_plan_id, request_type, row["id"]),
             )
             return False
 
@@ -704,6 +705,7 @@ class Database:
         actor_id: int | None = None,
         price_cents: int | None = None,
         currency: str | None = None,
+        name: str | None = None,
         active: bool | None = None,
         require_upstream: bool = False,
     ) -> Product | None:
@@ -711,13 +713,18 @@ class Database:
             raise ValueError("价格需大于零且不超过 9999999.99")
         if currency is not None:
             currency = normalize_currency(currency)
+        if name is not None:
+            name = name.strip()
+            if not 0 < len(name) <= 100:
+                raise ValueError("名称需为 1–100 个字符")
         async with self.transaction() as conn:
             async with conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)) as cur:
                 row = await cur.fetchone()
             if row is None:
                 return None
-            before = {key: row[key] for key in ("price_cents", "currency", "active")}
+            before = {key: row[key] for key in ("name", "price_cents", "currency", "active")}
             after = {
+                "name": name if name is not None else row["name"],
                 "price_cents": price_cents if price_cents is not None else row["price_cents"],
                 "currency": currency if currency is not None else row["currency"],
                 "active": int(active) if active is not None else row["active"],
@@ -731,8 +738,8 @@ class Database:
                 ):
                     raise ValueError("真实商品缺少 SKU、上游套餐或明确业务类型，暂不能上架")
             async with conn.execute(
-                "UPDATE products SET price_cents = ?, currency = ?, active = ? WHERE id = ? RETURNING *",
-                (after["price_cents"], after["currency"], after["active"], product_id),
+                "UPDATE products SET name = ?, price_cents = ?, currency = ?, active = ? WHERE id = ? RETURNING *",
+                (after["name"], after["price_cents"], after["currency"], after["active"], product_id),
             ) as cur:
                 updated = await cur.fetchone()
             if before != after:
