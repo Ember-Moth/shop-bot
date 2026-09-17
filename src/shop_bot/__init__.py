@@ -5,6 +5,7 @@ from contextlib import AsyncExitStack
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import SimpleEventIsolation
+from aiogram.types import BotCommand, BotCommandScopeChat
 from aiogram.webhook.aiohttp_server import setup_application
 from aiohttp import web as aiohttp_web
 
@@ -56,6 +57,47 @@ def build_purchaser(commbitz_client: CommbitzClient | None) -> Purchaser:
     if commbitz_client is not None:
         return CommbitzPurchaser(commbitz_client)
     return DemoPurchaser()
+
+
+async def register_bot_commands(bot: Bot, settings: Settings) -> None:
+    """注册命令菜单（输入 / 时的候选列表）。
+
+    普通用户只见用户命令；管理员按其私聊 scope 追加管理命令。注册失败不影响启动。
+    """
+    user_commands = [
+        BotCommand(command="start", description="打开主菜单"),
+        BotCommand(command="query", description="查询订单状态 / 补收货品"),
+        BotCommand(command="usage", description="查询已交付 eSIM 用量"),
+    ]
+    if settings.features.kyc:
+        user_commands.append(BotCommand(command="kyc", description="补交订单证件"))
+    admin_commands = [
+        BotCommand(command="products", description="商品列表（含下架）"),
+        BotCommand(command="price", description="定价"),
+        BotCommand(command="publish", description="上架"),
+        BotCommand(command="unpublish", description="下架"),
+        BotCommand(command="currency", description="设置计价币种"),
+        BotCommand(command="orders", description="查看订单"),
+        BotCommand(command="paid", description="确认收款并履约"),
+        BotCommand(command="cancel", description="取消待支付订单"),
+        BotCommand(command="refund", description="人工退款并关单"),
+        BotCommand(command="dispatch", description="实体卡确认发货"),
+        BotCommand(command="purchases", description="人工核对采购"),
+        BotCommand(command="bind", description="绑定上游订单"),
+        BotCommand(command="retry", description="重试被拒采购"),
+        BotCommand(command="adjust", description="钱包调账"),
+        BotCommand(command="status", description="运行状态"),
+        BotCommand(command="ackalert", description="确认告警"),
+    ]
+    try:
+        await bot.set_my_commands(user_commands)
+        for admin_id in settings.admin_ids:
+            await bot.set_my_commands(
+                [*user_commands, *admin_commands],
+                scope=BotCommandScopeChat(chat_id=admin_id),
+            )
+    except Exception as exc:
+        logger.warning("command menu registration failed", extra={"error": type(exc).__name__})
 
 
 def build_dispatcher(
@@ -152,6 +194,7 @@ async def amain() -> None:
         await runner.setup()
         await aiohttp_web.TCPSite(runner, settings.webhook.host, settings.webhook.port).start()
         webhook_url = f"{settings.webhook.url.rstrip('/')}{settings.webhook.path}"
+        await register_bot_commands(bot, settings)
         await bot.set_webhook(webhook_url, secret_token=settings.webhook.secret_token)
         resources.push_async_callback(bot.delete_webhook)
         runtime.webhook_ready = True

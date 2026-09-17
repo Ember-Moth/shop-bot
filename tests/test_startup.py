@@ -109,6 +109,15 @@ async def test_live_startup_has_no_demo_products_and_supervises_workers(
             async with ClientSession() as client:
                 async with client.get(f"http://127.0.0.1:{settings.webhook.port}/readyz") as response:
                     assert response.status == 200
+            # 命令菜单：默认 scope 只含用户命令，管理员私聊 scope 追加管理命令
+            menus = [m for m in bot.session.sent if m.__api_method__ == "setMyCommands"]
+            default = next(m for m in menus if m.scope is None)
+            admin_menu = next(m for m in menus if getattr(m.scope, "chat_id", None) == 42)
+            user_commands = [c.command for c in default.commands]
+            assert {"start", "query", "usage", "kyc"} <= set(user_commands)
+            assert "products" not in user_commands
+            admin_commands = [c.command for c in admin_menu.commands]
+            assert "products" in admin_commands and "status" in admin_commands
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
