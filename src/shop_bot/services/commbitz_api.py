@@ -244,7 +244,11 @@ class CommbitzClient:
     async def get_order_details(self, request_id: str) -> dict[str, Any]:
         """查询单据详情。业务数据在 data.data，不要递归剥离所有 data 层。"""
         body = await self._request("GET", f"/v1/details/{request_id}")
-        return dict(body["data"]["data"])
+        inner = dict(body["data"]["data"])
+        # 上游建单响应里 eSIM 是单数对象 "esim"，详情应是数组 "esims"；归一为数组供交付解析
+        if "esims" not in inner and isinstance(inner.get("esim"), dict):
+            inner["esims"] = [inner["esim"]]
+        return inner
 
     async def create_request(
         self,
@@ -281,12 +285,14 @@ class CommbitzClient:
             payload["notes"] = notes
         body = await self._request("POST", "/v1/request", json=payload)
         inner = dict(body["data"]["data"])
+        # 上游实际返回的单号字段是 id（文档写作 _id，不一致）；统一归一为 _id 供下游使用
+        if "_id" not in inner and inner.get("id"):
+            inner["_id"] = inner["id"]
         # 无 _id 时带上外层 message（如 "Plan not found with SKU: ..."），便于人工核对定位原因
         if "_id" not in inner:
             outer_message = body.get("data", {}).get("message")
             if outer_message:
                 inner["_upstreamMessage"] = str(outer_message)
-            # 诊断：记录脱敏后的完整响应结构（键名/层级，不含证件/货品等敏感值），
             # 用于定位上游返回的 _id 是否被改名或换了层级
             inner["_upstreamKeys"] = _shape(body)
         return inner

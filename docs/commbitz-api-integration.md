@@ -680,6 +680,7 @@ HTTP `201`：
 重要字段：
 
 - 保存 `data.data._id`，后续使用该值调用 `GET /v1/details/:id`。
+- **实测差异（live 2026-09）**：建单响应的实际单号字段是 `data.data.id`（非 `_id`），且 eSIM 为单数对象 `esim`（处理中各字段为 null），出货后才在详情接口以数组 `esims` 返回。代码已做归一：`id`→`_id`、`esim`→`esims`。
 - 不要把业务编号 `orderId` 或 `brandActivationRequestId` 当作详情接口要求的 `_id`。
 - INR 账户的 `kycStatus`：没有证件时为 `pending`，已有证件时为 `submitted`。
 - `status` 示例保留原文大小写：这里为 `Success`，其他接口示例还有 `pending`、`approved`。
