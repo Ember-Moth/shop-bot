@@ -266,6 +266,29 @@ async def test_create_response_with_id_field_is_accepted(*, db, esim_order, comm
     assert order is not None and order.status == OrderStatus.DELIVERED
 
 
+async def test_details_single_esim_object_is_normalized_and_pending_waits(
+    *, db, esim_order, commbitz_purchaser, httpx_mock
+):
+    """详情接口返回单数 esim 对象：归一为数组；字段为 null（未出货）时不交付，出货后才交付。"""
+    httpx_mock.add_response(json=_create_ok())
+    # 第一次详情：单数 esim 且字段全 null → 不交付，保持 paid
+    pending_details = _details(status="pending")
+    null_esim = {"qrCode": None, "iccid": None, "lpa": None, "msisdn": None, "coupon": None}
+    pending_details["data"]["data"]["esim"] = null_esim
+    httpx_mock.add_response(json=pending_details)
+    await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
+    order = await commbitz_purchaser.fulfill(db, esim_order.id)
+    assert order is not None and order.status == OrderStatus.PAID  # 未交付
+    # 第二次详情：单数 esim 有真实值 → 归一为数组后交付
+    ready_details = _details(status="Success")
+    real_esim = {"qrCode": "https://q/1.png", "iccid": "8901", "lpa": "LPA:1", "msisdn": "1555", "coupon": None}
+    ready_details["data"]["data"]["esim"] = real_esim
+    httpx_mock.add_response(json=ready_details)
+    order = await commbitz_purchaser.fulfill(db, esim_order.id)
+    assert order is not None and order.status == OrderStatus.DELIVERED
+    assert order.payload and "8901" in order.payload
+
+
 async def test_upstream_failure_status_auto_refunds(*, db, user, esim_order, commbitz_purchaser, httpx_mock):
     """已建单但上游明确宣告失败：货不会发，自动退款到余额并关单（平台成本与上游对账另算）。"""
     httpx_mock.add_response(json=_create_ok())

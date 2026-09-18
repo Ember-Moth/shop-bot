@@ -245,8 +245,9 @@ class CommbitzClient:
         """查询单据详情。业务数据在 data.data，不要递归剥离所有 data 层。"""
         body = await self._request("GET", f"/v1/details/{request_id}")
         inner = dict(body["data"]["data"])
-        # 上游建单响应里 eSIM 是单数对象 "esim"，详情应是数组 "esims"；归一为数组供交付解析
-        if "esims" not in inner and isinstance(inner.get("esim"), dict):
+        # 上游建单响应里 eSIM 是单数对象 "esim"，详情应是数组 "esims"；归一为数组供交付解析。
+        # 兜底条件用 not inner.get("esims")：esims 缺失或为 null/空数组时都尝试用 esim。
+        if not inner.get("esims") and isinstance(inner.get("esim"), dict):
             inner["esims"] = [inner["esim"]]
         return inner
 
