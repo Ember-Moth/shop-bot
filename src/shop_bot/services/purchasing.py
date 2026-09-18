@@ -382,13 +382,13 @@ class CommbitzPurchaser:
         if not upstream_id:
             upstream_message = created.get("_upstreamMessage")
             upstream_keys = created.get("_upstreamKeys")
+            # 键名放进消息正文：非 JSON 日志格式不渲染 extra，必须保证诊断可见
             logger.warning(
-                "purchase response missing _id",
-                extra={
-                    "order_id": order.id,
-                    "upstream_message": upstream_message,
-                    "upstream_keys": upstream_keys,
-                },
+                "purchase response missing _id (order #%s); upstream said: %s; response shape: %s",
+                order.id,
+                upstream_message,
+                upstream_keys,
+                extra={"order_id": order.id, "upstream_message": upstream_message, "upstream_keys": upstream_keys},
             )
             detail = f"response missing _id: {upstream_message}" if upstream_message else "response missing _id"
             await db.transition_purchase(
