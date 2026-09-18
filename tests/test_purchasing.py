@@ -426,26 +426,26 @@ def test_split_payload_chunks_keeps_blocks_intact():
     assert split_payload_chunks(single) == [single]
 
 
-async def test_multi_esim_notification_sends_in_chunks(*, db, user, commbitz_purchaser, httpx_mock, bot):
+async def test_multi_esim_notification_sends_each_as_photo(*, db, user, commbitz_purchaser, httpx_mock, bot):
+    """多张 eSIM：每张一条图文消息（caption 含 ICCID/LPA），头部文本一条，caption 不超上限。"""
     product = Product(1, "US bulk", "", 4999, "CNY", sku="US-100", request_type="esim")
     await db.seed_products([product])
-    order = await orders.create_order(db, user.id, product, 100)
+    order = await orders.create_order(db, user.id, product, 5)
     await orders.mark_paid(db, commbitz_purchaser, order.id)
     httpx_mock.add_response(json=_create_ok())
-    _details_mock(httpx_mock, count=100)
+    _details_mock(httpx_mock, count=5)
     order = await commbitz_purchaser.fulfill(db, order.id)
     assert order is not None and order.payload
-    # 分块逻辑按消息长度切分；移除二维码 URL 后 100 条变短，用 300 条强制分多条
-    order2 = await orders.create_order(db, user.id, product, 300)
-    await orders.mark_paid(db, commbitz_purchaser, order2.id)
-    httpx_mock.add_response(json=_create_ok("up-2"))
-    _details_mock(httpx_mock, count=300)
-    order2 = await commbitz_purchaser.fulfill(db, order2.id)
-    assert order2 is not None and order2.payload
-    assert await notify_owner(db, bot, order2.id)
-    goods_messages = [m for m in bot.session.sent if "ICCID" in (getattr(m, "text", "") or "")]
-    assert len(goods_messages) > 1  # 分条发送
-    assert all(len(getattr(m, "text", "")) <= 4096 for m in bot.session.sent)
+    assert await notify_owner(db, bot, order.id)
+    photo_msgs = [m for m in bot.session.sent if m.__api_method__ == "sendPhoto"]
+    assert len(photo_msgs) == 5  # 每张 eSIM 一条图文
+    for i, m in enumerate(photo_msgs):
+        assert f"eSIM {i + 1}/5" in (m.caption or "")
+        assert "ICCID:" in (m.caption or "") and "LPA:" in (m.caption or "")
+        assert len(m.caption or "") <= 1024
+    # 头部文本一条
+    headers = [m for m in bot.session.sent if "已发货" in (getattr(m, "text", "") or "")]
+    assert len(headers) == 1
 
 
 # ---- 审计修复回归（d2bbca7/21b4bdb/1950679 审计报告）----

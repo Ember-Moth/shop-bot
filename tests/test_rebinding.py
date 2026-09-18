@@ -99,10 +99,12 @@ async def frozen_orders(tmp_path):
 
 
 def goods_messages(bot, buyer_id):
+    # eSIM 的 LPA 现随二维码图片 caption 发送（不再是独立文本）；返回 text 或 caption 字符串
     return [
-        getattr(m, "text", "")
+        (getattr(m, "text", "") or "") + (getattr(m, "caption", "") or "")
         for m in bot.session.sent
-        if m.chat_id == buyer_id and "LPA:" in (getattr(m, "text", "") or "")
+        if m.chat_id == buyer_id
+        and ("LPA:" in (getattr(m, "text", "") or "") or "LPA:" in (getattr(m, "caption", "") or ""))
     ]
 
 

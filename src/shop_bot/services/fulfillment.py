@@ -58,9 +58,9 @@ async def notify_owner(
         header = f"🎉 你的订单 #{order.id} 已发货！"
         try:
             # 收件人只从持久化订单取，不能使用命令所在群聊或查询者身份。
-            # 文本和每张二维码各存一个进度；失败只重试未完成步骤，不重新采购。
+            # eSIM 订单：头部文本 1 条 + 每张 eSIM 一条图文（二维码图 + ICCID/LPA 进 caption）。
+            # 非 eSIM（兑换券/激活等）：头部 + 文本货品分条。每步各存进度，断点续发不重购。
             chunks = split_payload_chunks(order.payload) if order.payload else []
-            texts = [header, *chunks]
             esims = (
                 delivery_esims(order.delivery_esims, order.payload, order.quantity)
                 if (
@@ -71,6 +71,8 @@ async def notify_owner(
                 )
                 else []
             )
+            # 步骤序列：eSIM 时 texts 只含头部；非 eSIM 时 texts 含头部+货品分块
+            texts = [header] if esims else [header, *chunks]
             cursor = 0 if resend else order.notification_cursor
             total = len(texts) + len(esims)
             if not 0 <= cursor <= total:
@@ -85,11 +87,16 @@ async def notify_owner(
                     index = step - len(texts)
                     esim = esims[index]
                     png = await asyncio.to_thread(qr_png, esim.lpa)
+                    caption = (
+                        f"eSIM {index + 1}/{len(esims)}\n\n"
+                        f"ICCID: {esim.iccid[:80]}\n"
+                        f"LPA: {esim.lpa}\n\n"
+                        "扫码或按 LPA 安装码安装"
+                    )
                     await bot.send_photo(
                         owner.telegram_id,
                         BufferedInputFile(png, filename=f"esim-{order.id}-{index + 1}.png"),
-                        caption=f"订单 #{order.id} · eSIM {index + 1}/{len(esims)}\nICCID: {esim.iccid[:80]}\n"
-                        "安装二维码；LPA 安装码见上方消息。",
+                        caption=caption[:1024],
                         parse_mode=None,
                         request_timeout=20,
                     )

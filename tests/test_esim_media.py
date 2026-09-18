@@ -67,7 +67,7 @@ async def test_photo_contains_local_png_and_only_goes_to_owner(db, bot):
         assert f"eSIM {index + 1}/2" in photo.caption and "ICCID:" in photo.caption
         assert photo.parse_mode is None and len(photo.caption) <= 1024
     saved = await db.get_order(order_id)
-    assert not saved.notification_pending and saved.notification_cursor == 4
+    assert not saved.notification_pending and saved.notification_cursor == 3  # 头部 1 + 2 张图
     await recover_once(db, purchaser, bot)
     assert len(photos(bot)) == 2
 
@@ -91,7 +91,7 @@ async def test_photo_failure_resumes_after_restart_without_resending_first(tmp_p
         order_id, purchaser, gateway = await delivered_order(db, count=2)
         assert not await notify_owner(db, bot, order_id)
         saved = await db.get_order(order_id)
-        assert saved is not None and saved.notification_pending and saved.notification_cursor == 3
+        assert saved is not None and saved.notification_pending and saved.notification_cursor == 2  # 头部 + 第 1 张图
         assert len(photos(bot)) == 1
     finally:
         await db.close()
@@ -124,7 +124,7 @@ async def test_rate_limit_defers_photo_and_keeps_text_progress(db, bot, monkeypa
     monkeypatch.setattr(bot, "send_photo", send)
     assert not await notify_owner(db, bot, order_id)
     saved = await db.get_order(order_id)
-    assert saved.notification_cursor == 2 and saved.notification_retry_at == 1030
+    assert saved.notification_cursor == 1 and saved.notification_retry_at == 1030  # 头部已发，图被限流
     calls = len(bot.session.sent)
     assert not await notify_owner(db, bot, order_id, resend=True)
     assert len(bot.session.sent) == calls
