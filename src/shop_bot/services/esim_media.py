@@ -3,11 +3,15 @@
 import io
 import json
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import segno
 
 MAX_LPA_BYTES = 2000
+MAX_ESIMS_PER_ARCHIVE = 100
+MAX_ARCHIVE_BYTES = 48_000_000  # Telegram sendDocument 的 50 MB 上限内预留余量
 
 
 @dataclass(frozen=True)
@@ -54,4 +58,55 @@ def qr_png(lpa: str) -> bytes:
     buffer = io.BytesIO()
     # 标准 QR（非 Micro QR），保留四模块白边，避免图片压缩后不易识别。
     segno.make_qr(lpa, error="m", encoding="utf-8").save(buffer, kind="png", scale=8, border=4)
+    return buffer.getvalue()
+
+
+def esim_zip(
+    order_id: int,
+    esims: Sequence[EsimMedia],
+    start_index: int = 0,
+    progress: Callable[[], None] | None = None,
+) -> bytes:
+    """在内存中生成一个独立可解压的 ZIP；编号是订单内序号，不使用上游字符串作为路径。"""
+    if not esims or len(esims) > MAX_ESIMS_PER_ARCHIVE or start_index < 0:
+        raise ValueError("invalid esim archive batch")
+    buffer = io.BytesIO()
+
+    def write(archive: ZipFile, name: str, data: bytes | str) -> None:
+        # 固定 ZIP 元数据，让同一份货品重试/补发时生成相同文件；所有路径由本地编号构造。
+        info = ZipInfo(name)
+        info.compress_type = ZIP_DEFLATED
+        info.create_system = 3
+        info.external_attr = 0o100600 << 16
+        archive.writestr(info, data)
+        if buffer.tell() > MAX_ARCHIVE_BYTES:
+            raise ValueError("esim archive exceeds document size limit")
+
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+        write(
+            archive,
+            "README.txt",
+            f"订单 #{order_id}\n本包包含第 {start_index + 1}–{start_index + len(esims)} 张 eSIM。\n"
+            "请先解压。每个编号目录包含：\n"
+            "qrcode.png：安装二维码\ninstallation.txt：ICCID 与完整 LPA 安装资料\n"
+            "lpa.txt：仅含完整 LPA，便于复制\n"
+            "esims.json 是本包的卡片汇总清单，编号与二维码目录对应。\n",
+        )
+        records = []
+        for offset, esim in enumerate(esims):
+            index = start_index + offset + 1
+            directory = f"{index:04d}"
+            write(archive, f"{directory}/qrcode.png", qr_png(esim.lpa))
+            write(
+                archive,
+                f"{directory}/installation.txt",
+                f"订单 #{order_id} · eSIM {index}\nICCID: {esim.iccid}\nLPA: {esim.lpa}\n",
+            )
+            write(archive, f"{directory}/lpa.txt", esim.lpa)
+            records.append({"index": index, "iccid": esim.iccid, "lpa": esim.lpa, "qrcode": f"{directory}/qrcode.png"})
+            if progress is not None:
+                progress()
+        write(archive, "esims.json", json.dumps({"order_id": order_id, "esims": records}, ensure_ascii=False, indent=2))
+    if buffer.tell() > MAX_ARCHIVE_BYTES:
+        raise ValueError("esim archive exceeds document size limit")
     return buffer.getvalue()

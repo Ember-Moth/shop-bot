@@ -16,13 +16,13 @@ from ..db import Database
 from ..logging_config import get_logger
 from ..models import Order, OrderStatus, PurchaseState
 from ..telegram_text import text_units
-from .esim_media import EsimMedia, delivery_esims, qr_png
+from .esim_media import MAX_ESIMS_PER_ARCHIVE, EsimMedia, delivery_esims, esim_zip, qr_png
 from .purchasing import Purchaser, split_payload_chunks
 
 logger = get_logger(__name__)
 RECOVERY_INTERVAL = 5
 # 更改步骤顺序、数量或载荷含义时必须递增，不能复用旧方案的 cursor。
-NOTIFICATION_PLAN_VERSION = 1
+NOTIFICATION_PLAN_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -30,9 +30,26 @@ class NotificationStep:
     text: str
     photo: EsimMedia | None = None
     photo_index: int = 0
+    archive: tuple[EsimMedia, ...] = ()
+    archive_start: int = 0
 
 
 def notification_steps(order: Order, esims: list[EsimMedia]) -> list[NotificationStep]:
+    if len(esims) >= 2:
+        archive_steps = []
+        part_count = (len(esims) + MAX_ESIMS_PER_ARCHIVE - 1) // MAX_ESIMS_PER_ARCHIVE
+        for start in range(0, len(esims), MAX_ESIMS_PER_ARCHIVE):
+            batch = tuple(esims[start : start + MAX_ESIMS_PER_ARCHIVE])
+            part = f"（第 {start // MAX_ESIMS_PER_ARCHIVE + 1}/{part_count} 包）" if part_count > 1 else ""
+            archive_steps.append(
+                NotificationStep(
+                    f"🎉 订单 #{order.id} · 共 {len(esims)} 张 eSIM{part}\n"
+                    f"本包包含第 {start + 1}–{start + len(batch)} 张的二维码、ICCID 和完整 LPA。\n解压后按编号安装。",
+                    archive=batch,
+                    archive_start=start,
+                )
+            )
+        return archive_steps
     steps = [NotificationStep(f"🎉 你的订单 #{order.id} 已发货！")]
     if not esims:
         steps.extend(NotificationStep(text) for text in split_payload_chunks(order.payload or ""))
@@ -86,7 +103,7 @@ async def notify_owner(
             return False
         try:
             # 收件人只从持久化订单取，不能使用命令所在群聊或查询者身份。
-            # eSIM 订单：头部文本 1 条 + 每张 eSIM 一条图文（二维码图 + ICCID/LPA 进 caption）。
+            # 单张 eSIM 发图文，多张按 ZIP 文件交付；每个 ZIP 单独记录发送进度。
             # 非 eSIM（兑换券/激活等）：头部 + 文本货品分条。每步各存进度，断点续发不重购。
             esims = (
                 delivery_esims(order.delivery_esims, order.payload, order.quantity)
@@ -107,11 +124,36 @@ async def notify_owner(
             if not 0 <= cursor <= total:
                 logger.warning("invalid notification progress", extra={"order_id": order.id})
                 return False
+            loop = asyncio.get_running_loop()
+
+            def archive_progress() -> None:
+                if runtime is not None:
+                    loop.call_soon_threadsafe(runtime.beat, "recovery")
+
             for step in range(cursor, total):
                 if runtime is not None:
                     runtime.beat("recovery")
                 item = steps[step]
-                if item.photo is None:
+                if item.archive:
+                    data = await asyncio.to_thread(
+                        esim_zip, order.id, item.archive, item.archive_start, archive_progress
+                    )
+                    first_index = item.archive_start + 1
+                    last_index = item.archive_start + len(item.archive)
+                    filename = (
+                        f"esims-{order.id}.zip"
+                        if total == 1
+                        else (f"esims-{order.id}-{first_index:04d}-{last_index:04d}.zip")
+                    )
+                    await bot.send_document(
+                        owner.telegram_id,
+                        BufferedInputFile(data, filename=filename),
+                        caption=item.text,
+                        parse_mode=None,
+                        request_timeout=120,
+                    )
+                    del data
+                elif item.photo is None:
                     await bot.send_message(owner.telegram_id, item.text, parse_mode=None)
                 else:
                     png = await asyncio.to_thread(qr_png, item.photo.lpa)

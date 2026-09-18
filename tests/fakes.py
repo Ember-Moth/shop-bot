@@ -1,6 +1,6 @@
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import EditMessageText, SendMessage, SendPhoto
+from aiogram.methods import EditMessageText, SendDocument, SendMessage, SendPhoto
 from aiogram.types import Message, User
 
 
@@ -10,6 +10,7 @@ class FakeSession(BaseSession):
         self.sent = []
         self.fail_send = False
         self.fail_photo = False
+        self.fail_document = False
         self.fail_commands_for = set()  # 模拟 Telegram 拒绝为这些 chat scope 注册菜单
 
     async def close(self):
@@ -43,6 +44,19 @@ class FakeSession(BaseSession):
                     "chat": {"id": int(method.chat_id), "type": "private"},
                     "caption": method.caption,
                     "photo": [{"file_id": "photo", "file_unique_id": "photo-id", "width": 512, "height": 512}],
+                }
+            )
+        if method.__api_method__ == "sendDocument":
+            if self.fail_send or self.fail_document:
+                raise RuntimeError("simulated Telegram document unavailable")
+            assert isinstance(method, SendDocument)
+            return Message.model_validate(
+                {
+                    "message_id": 101,
+                    "date": 0,
+                    "chat": {"id": int(method.chat_id), "type": "private"},
+                    "caption": method.caption,
+                    "document": {"file_id": "document", "file_unique_id": "document-id", "file_name": "esims.zip"},
                 }
             )
         if method.__api_method__ == "setMyCommands":

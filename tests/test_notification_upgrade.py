@@ -38,9 +38,11 @@ async def test_unversioned_pending_notification_replays_safely_after_upgrade(tmp
         assert saved.notification_plan_version == NOTIFICATION_PLAN_VERSION
         assert saved.payload == original_payload and saved.delivery_esims == original_media
         assert saved.status == OrderStatus.DELIVERED and saved.trade_no == "paid"
-        assert len(photos(bot)) == quantity and gateway.create_calls == 1
+        media = [m for m in bot.session.sent if m.__api_method__ in ("sendPhoto", "sendDocument")]
+        assert len(media) == 1 and gateway.create_calls == 1
+        assert media[0].__api_method__ == ("sendPhoto" if quantity == 1 else "sendDocument")
         await recover_once(db, purchaser, bot)
-        assert len(photos(bot)) == quantity
+        assert len([m for m in bot.session.sent if m.__api_method__ in ("sendPhoto", "sendDocument")]) == 1
     finally:
         await db.close()
 

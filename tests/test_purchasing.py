@@ -426,8 +426,8 @@ def test_split_payload_chunks_keeps_blocks_intact():
     assert split_payload_chunks(single) == [single]
 
 
-async def test_multi_esim_notification_sends_each_as_photo(*, db, user, commbitz_purchaser, httpx_mock, bot):
-    """多张 eSIM：每张一条图文消息（caption 含 ICCID/LPA），头部文本一条，caption 不超上限。"""
+async def test_multi_esim_notification_sends_one_archive(*, db, user, commbitz_purchaser, httpx_mock, bot):
+    """多张 eSIM：一份 ZIP，正文不再逐张发送 LPA 或图片。"""
     product = Product(1, "US bulk", "", 4999, "CNY", sku="US-100", request_type="esim")
     await db.seed_products([product])
     order = await orders.create_order(db, user.id, product, 5)
@@ -437,15 +437,10 @@ async def test_multi_esim_notification_sends_each_as_photo(*, db, user, commbitz
     order = await commbitz_purchaser.fulfill(db, order.id)
     assert order is not None and order.payload
     assert await notify_owner(db, bot, order.id)
-    photo_msgs = [m for m in bot.session.sent if m.__api_method__ == "sendPhoto"]
-    assert len(photo_msgs) == 5  # 每张 eSIM 一条图文
-    for i, m in enumerate(photo_msgs):
-        assert f"eSIM {i + 1}/5" in (m.caption or "")
-        assert "ICCID:" in (m.caption or "") and "LPA:" in (m.caption or "")
-        assert len(m.caption or "") <= 1024
-    # 头部文本一条
-    headers = [m for m in bot.session.sent if "已发货" in (getattr(m, "text", "") or "")]
-    assert len(headers) == 1
+    assert len(bot.session.sent) == 1
+    document = bot.session.sent[0]
+    assert document.__api_method__ == "sendDocument" and "共 5 张" in document.caption
+    assert document.document.filename.endswith(".zip")
 
 
 # ---- 审计修复回归（d2bbca7/21b4bdb/1950679 审计报告）----

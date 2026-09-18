@@ -54,52 +54,54 @@ def photos(bot):
 
 
 async def test_photo_contains_local_png_and_only_goes_to_owner(db, bot):
-    order_id, purchaser, _gateway = await delivered_order(db, count=2)
+    order_id, purchaser, _gateway = await delivered_order(db, count=1)
     saved = await db.get_order(order_id)
     assert json.loads(saved.delivery_esims)[0]["lpa"] == esim_details()["esims"][0]["lpa"]
     assert await notify_owner(db, bot, order_id)
     sent = photos(bot)
-    assert len(sent) == 2 and all(photo.chat_id == 42 for photo in sent)
+    assert len(sent) == 1 and all(photo.chat_id == 42 for photo in sent)
     for index, photo in enumerate(sent):
         assert isinstance(photo.photo, BufferedInputFile)
         assert photo.photo.data.startswith(b"\x89PNG\r\n\x1a\n")
-        assert photo.photo.data == qr_png(esim_details(count=2)["esims"][index]["lpa"])
-        assert f"eSIM {index + 1}/2" in photo.caption and "ICCID:" in photo.caption
+        assert photo.photo.data == qr_png(esim_details(count=1)["esims"][index]["lpa"])
+        assert f"eSIM {index + 1}/1" in photo.caption and "ICCID:" in photo.caption
         assert photo.parse_mode is None and len(photo.caption) <= 1024
     saved = await db.get_order(order_id)
-    assert not saved.notification_pending and saved.notification_cursor == 3  # 头部 1 + 2 张图
+    assert not saved.notification_pending and saved.notification_cursor == 2  # 头部 1 + 1 张图
     await recover_once(db, purchaser, bot)
-    assert len(photos(bot)) == 2
+    assert len(photos(bot)) == 1
 
 
-async def test_photo_failure_resumes_after_restart_without_resending_first(tmp_path, bot, monkeypatch):
+async def test_photo_failure_resumes_after_restart_without_resending_header(tmp_path, bot, monkeypatch):
     path = str(tmp_path / "restart.db")
     db = Database(path)
     await db.connect()
     original_send = bot.send_photo
-    fail_second = True
+    fail_first = True
 
     async def send(chat_id, photo, **kwargs):
-        nonlocal fail_second
-        if photo.filename.endswith("-2.png") and fail_second:
-            fail_second = False
+        nonlocal fail_first
+        if photo.filename.endswith("-1.png") and fail_first:
+            fail_first = False
             raise RuntimeError("simulated image failure")
         return await original_send(chat_id, photo, **kwargs)
 
     monkeypatch.setattr(bot, "send_photo", send)
     try:
-        order_id, purchaser, gateway = await delivered_order(db, count=2)
+        order_id, purchaser, gateway = await delivered_order(db, count=1)
         assert not await notify_owner(db, bot, order_id)
         saved = await db.get_order(order_id)
-        assert saved is not None and saved.notification_pending and saved.notification_cursor == 2  # 头部 + 第 1 张图
-        assert len(photos(bot)) == 1
+        assert (
+            saved is not None and saved.notification_pending and saved.notification_cursor == 1
+        )  # 头部已发送，图片尚未发送
+        assert len(photos(bot)) == 0
     finally:
         await db.close()
     restored = Database(path)
     await restored.connect()
     try:
         await recover_once(restored, purchaser, bot)
-        assert [photo.photo.filename for photo in photos(bot)] == [f"esim-{order_id}-1.png", f"esim-{order_id}-2.png"]
+        assert [photo.photo.filename for photo in photos(bot)] == [f"esim-{order_id}-1.png"]
         saved = await restored.get_order(order_id)
         assert saved is not None and not saved.notification_pending and saved.notified_at
         assert gateway.create_calls == 1
