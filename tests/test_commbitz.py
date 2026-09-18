@@ -3,6 +3,7 @@
 import asyncio
 import time
 
+import httpx
 import pytest
 
 from shop_bot.services.commbitz_api import (
@@ -163,3 +164,25 @@ def test_parse_plan():
     assert plan.currency == "USD"
     assert plan.retail_price == 6.0
     assert plan.override_price == 5.0
+
+
+async def test_concurrent_401_responses_share_one_refresh(client, httpx_mock):
+    client._tokens = Tokens(access_token="stale", refresh_token="ref-old", expires_at=time.monotonic() + 3600)
+    arrivals = 0
+    all_arrived = asyncio.Event()
+
+    async def countries(request):
+        nonlocal arrivals
+        if request.headers["Authorization"] == "Bearer stale":
+            arrivals += 1
+            if arrivals == 5:
+                all_arrived.set()
+            await asyncio.wait_for(all_arrived.wait(), 1)
+            return httpx.Response(401, json={"message": "expired"})
+        return httpx.Response(200, json=COUNTRIES_OK)
+
+    httpx_mock.add_callback(countries, url=f"{UAT}/v1/countries", is_reusable=True)
+    httpx_mock.add_response(url=f"{UAT}/v1/refresh-token", json=REFRESH_RESPONSE)
+    results = await asyncio.gather(*(client.get_countries() for _ in range(5)))
+    assert all(result == [{"iso": "US"}] for result in results)
+    assert len([r for r in httpx_mock.get_requests() if r.url.path.endswith("refresh-token")]) == 1

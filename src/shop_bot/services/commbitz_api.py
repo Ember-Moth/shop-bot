@@ -159,9 +159,11 @@ class CommbitzClient:
             assert self._tokens is not None
             return self._tokens.access_token
 
-    async def _force_refresh(self) -> str:
+    async def _force_refresh(self, failed_token: str) -> str:
         """服务端 401 后强制换新令牌。"""
         async with self._token_lock:
+            if self._tokens is not None and self._tokens.access_token != failed_token:
+                return self._tokens.access_token
             await self._authenticate()
             assert self._tokens is not None
             return self._tokens.access_token
@@ -204,7 +206,7 @@ class CommbitzClient:
         if resp.status_code == 401:
             # 令牌在服务端提前失效：强制刷新后重试一次；再失败由 _unwrap 抛错。
             # 401 发生在业务处理之前，这里重试不构成重复提交。
-            headers = {"Authorization": f"Bearer {await self._force_refresh()}"}
+            headers = {"Authorization": f"Bearer {await self._force_refresh(token)}"}
             resp = await self._http.request(method, path, params=params, json=json, headers=headers)
         return self._unwrap(resp)
 

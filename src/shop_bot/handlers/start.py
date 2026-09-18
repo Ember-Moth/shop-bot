@@ -23,10 +23,9 @@ from ..keyboards import (
     main_menu_reply,
 )
 from ..logging_config import get_logger
-from ..models import OrderStatus
+from ..models import OrderStatus, PurchaseState
 from ..services import orders
 from ..services.epay import EPayClient, EPayError
-from ..services.fulfillment import notify_owner, notify_refund
 from ..services.orders import OrderError
 from ..services.purchasing import Purchaser
 from .balance import render_balance, start_topup
@@ -256,26 +255,18 @@ async def cmd_query(message: Message, db: Database, epay: EPayClient | None, pur
             logger.warning("payment query or validation failed", extra={"order_id": order.id})
             await message.answer("支付信息暂时无法确认，请稍后再试或联系管理员")
             return
-        trade_no = order.trade_no
+    if order.status == OrderStatus.DELIVERED:
+        await db.queue_redelivery(order.id)
+        await message.answer(f"订单 #{order.id} 已发货，系统会将货品私信发送给买家")
+    elif order.status == OrderStatus.PAID:
+        purchase = await db.get_purchase_by_order(order.id)
+        detail = "正在履约，请稍等"
+        if purchase is not None and purchase.state == PurchaseState.AWAITING_DISPATCH:
+            detail = "实体 SIM 已受理，等待人工发货"
+        elif purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN:
+            detail = "采购信息正在人工核对，请联系管理员"
+        await message.answer(f"订单 #{order.id} 已支付，{detail}")
+    elif order.status == OrderStatus.REFUNDED:
+        await message.answer(f"订单 #{order.id} 已退款到余额")
     else:
-        trade_no = order.trade_no
-    try:
-        order = await orders.mark_paid(db, purchaser, order.id, trade_no=trade_no)
-        # 查询即触发一次履约推进（提交一次/查询一次），不阻塞在等待状态
-        order = await purchaser.fulfill(db, order.id)
-    except OrderError:
-        await message.answer(f"订单 #{order.id} 暂时无法发货，请联系管理员")
-        return
-    assert order is not None
-    if order.status == OrderStatus.REFUNDED:
-        await notify_refund(db, bot, order.id)
-        await message.answer(f"订单 #{order.id} 无法交付，已退款到余额")
-        return
-    if order.status != OrderStatus.DELIVERED:
-        await message.answer(f"订单 #{order.id} 已支付，正在履约（状态：{order.status}），请稍等")
-        return
-    notified = await notify_owner(db, bot, order.id, resend=True)
-    if notified:
-        await message.answer(f"订单 #{order.id} 的货品已私信发送给买家")
-    else:
-        await message.answer(f"订单 #{order.id} 的货品已保存，私信发送暂时失败，系统会重试")
+        await message.answer(f"订单 #{order.id} 当前状态：{order.status}，请查看余额或联系管理员")

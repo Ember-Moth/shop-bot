@@ -30,16 +30,13 @@ async def confirm_epay_payment(
 ) -> Order:
     """核单后持久化每笔外部收款；多收的钱按原币种入钱包，不重复采购。"""
     epay.validate_payment(order, payment, allow_additional=True)
-    async with db.order_operation(order.id):
-        try:
-            confirmed, disposition = await db.record_epay_payment(order.id, payment.trade_no)
-        except ValueError as exc:
-            raise OrderError(str(exc), order) from None
-        if confirmed.status == OrderStatus.PAID:
-            await purchaser.ensure_purchase(db, confirmed)
-        if disposition == "wallet_credit":
-            logger.warning("additional payment credited to wallet", extra={"order_id": order.id})
-        return confirmed
+    try:
+        confirmed, disposition = await db.record_epay_payment(order.id, payment.trade_no)
+    except ValueError as exc:
+        raise OrderError(str(exc), order) from None
+    if disposition == "wallet_credit":
+        logger.warning("additional payment credited to wallet", extra={"order_id": order.id})
+    return confirmed
 
 
 async def create_order(
@@ -88,29 +85,14 @@ async def mark_paid(
 
     - pending_payment → paid：确认收款，保留付款事实。
     - delivery_failed（旧数据）仅在 retry_failed=True 时回退重试。
-    - trade_no 一致性由 db.transition_order 校验（一交易一订单）。
+    - trade_no 一致性由 db.confirm_order_payment 校验（一交易一订单）。
     """
-    async with db.order_operation(order_id):
-        order = await db.get_order(order_id)
-        if order is None:
-            raise OrderError(f"order {order_id} not found")
-        if order.status == OrderStatus.CANCELLED:
-            raise OrderError(f"order {order_id} is cancelled", order)
-        status = OrderStatus.PAID if order.status == OrderStatus.PENDING_PAYMENT else order.status
-        try:
-            confirmed = await db.transition_order(order_id, status, from_status=order.status, trade_no=trade_no)
-        except ValueError as exc:
-            raise OrderError(str(exc), order) from None
-        if confirmed is None:
-            raise OrderError("order state changed", order)
-        if confirmed.status == OrderStatus.DELIVERY_FAILED and retry_failed:
-            retried = await db.transition_order(order_id, OrderStatus.PAID, from_status=OrderStatus.DELIVERY_FAILED)
-            if retried is None:
-                raise OrderError("order state changed", confirmed)
-            confirmed = retried
-        await purchaser.ensure_purchase(db, confirmed)
-        logger.info("payment confirmed", extra={"order_id": order_id})
-        return confirmed
+    try:
+        confirmed = await db.confirm_order_payment(order_id, trade_no, retry_failed=retry_failed)
+    except ValueError as exc:
+        raise OrderError(str(exc)) from None
+    logger.info("payment confirmed", extra={"order_id": order_id})
+    return confirmed
 
 
 async def cancel_order(db: Database, order_id: int) -> Order:

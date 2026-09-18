@@ -160,7 +160,7 @@ async def test_legacy_refunded_order_cannot_enter_or_submit_kyc(db, bot, state):
     assert (await db.get_purchase_by_order(order.id)).state == state
 
 
-async def test_refund_notification_is_recoverable(db, bot):
+async def test_refund_notification_is_recoverable(db, bot, queue_clock):
     user, order = await new_order(db)
     purchaser = CommbitzPurchaser(RejectedGateway())
     await orders.mark_paid(db, purchaser, order.id, trade_no="PAID")
@@ -168,6 +168,7 @@ async def test_refund_notification_is_recoverable(db, bot):
     await recover_once(db, purchaser, bot)
     assert (await db.get_order(order.id)).notification_pending
     bot.session.fail_send = False
+    queue_clock()
     await recover_once(db, purchaser, bot)
     assert not (await db.get_order(order.id)).notification_pending
     assert await db.get_balance(user.id, "USD") == 10000

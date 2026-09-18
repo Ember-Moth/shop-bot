@@ -83,18 +83,6 @@ async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -
     if credited is None:
         return web.Response(text="fail", status=422)
 
-    buyer = await db.get_user(topup.user_id)
-    bot = request.app["bot"]
-    if buyer is not None and bot is not None:
-        balance = await db.get_balance(buyer.id, topup.currency)
-        try:
-            text = (
-                f"💰 充值到账 {topup.amount_cents / 100:.2f} {topup.currency}\n"
-                f"当前余额：{balance / 100:.2f} {topup.currency}"
-            )
-            await bot.send_message(buyer.telegram_id, text)
-        except Exception as exc:
-            logger.warning("topup notification failed", extra={"order_id": topup_id, "error": type(exc).__name__})
     logger.info("topup credited", extra={"order_id": topup_id, "upstream_ref": payment.trade_no})
     return web.Response(text="success")
 

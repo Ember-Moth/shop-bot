@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
@@ -23,6 +24,7 @@ from .models import (
     User,
 )
 from .money import REQUEST_TYPES, normalize_currency
+from .work_queue import WorkItem, migrate_work_queue
 
 logger = get_logger(__name__)
 
@@ -195,6 +197,7 @@ class Database:
             await self._conn.executescript(SCHEMA)
             async with self.transaction() as conn:
                 await self._migrate(conn)
+                await migrate_work_queue(conn)
         except BaseException:
             await self.close()
             raise
@@ -849,6 +852,12 @@ class Database:
                 (f"-{stale_seconds} seconds",),
                 "付款后履约/退款长时间未完成",
             ),
+            "wallet_notifications": (
+                """SELECT entity_id AS id, COUNT(*) OVER() AS total FROM work_items
+                WHERE kind = 'wallet' AND created_at <= datetime('now', ?) ORDER BY id LIMIT 5""",
+                (f"-{notification_seconds} seconds",),
+                "钱包流水通知持续未送达",
+            ),
             "pending_notifications": (
                 """SELECT id, COUNT(*) OVER() AS total FROM orders
                 WHERE notification_pending = 1 AND status IN ('delivered', 'refunded')
@@ -1053,6 +1062,44 @@ class Database:
                 updated = await cur.fetchone()
         assert updated is not None
         return _row_to_order(updated), disposition
+
+    async def confirm_order_payment(
+        self,
+        order_id: int,
+        trade_no: str | None,
+        *,
+        retry_failed: bool = False,
+    ) -> Order:
+        """管理员确认：短事务核对当前状态，触发器原子保存采购及调度意图。"""
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                raise ValueError(f"order {order_id} not found")
+            if row["status"] == "cancelled":
+                raise ValueError(f"order {order_id} is cancelled")
+            if trade_no is not None:
+                if row["trade_no"] and row["trade_no"] != trade_no:
+                    raise ValueError("payment transaction does not match order")
+                await self._check_receipt(conn, trade_no, order_id=order_id)
+            status = row["status"]
+            if status == "pending_payment" or (status == "delivery_failed" and retry_failed):
+                status = "paid"
+            if status == row["status"] and (trade_no is None or trade_no == row["trade_no"]):
+                return _row_to_order(row)
+            async with conn.execute(
+                """UPDATE orders SET status = ?, trade_no = COALESCE(?, trade_no),
+                updated_at = datetime('now') WHERE id = ? RETURNING *""",
+                (status, trade_no, order_id),
+            ) as cur:
+                updated = await cur.fetchone()
+            if status != row["status"]:
+                await conn.execute(
+                    "INSERT INTO order_events (order_id, from_status, to_status, note) VALUES (?, ?, ?, ?)",
+                    (order_id, row["status"], status, "manual payment confirmation"),
+                )
+        assert updated is not None
+        return _row_to_order(updated)
 
     async def create_topup(self, user_id: int, amount_cents: int, currency: str = "CNY") -> Topup:
         currency = normalize_currency(currency)
@@ -1322,27 +1369,55 @@ class Database:
         return [_row_to_order(r) for r in rows]
 
     async def list_recovery_orders(self) -> list[Order]:
-        """恢复候选：待履约的 paid 订单、未通知的已交付订单、以及
-        已交付但采购未落终态的历史残留（审计 P2：中断后状态必须可收敛）。
+        """兼容管理/测试入口；运行时调度只领取有限数量的 ID。"""
+        rows = await self._all("""
+            SELECT * FROM orders WHERE id IN (
+                SELECT entity_id FROM work_items WHERE kind IN ('purchase', 'delivery')
+            ) ORDER BY id
+        """)
+        return [_row_to_order(row) for row in rows]
 
-        用 UNION 拆三支：OR 会让 SQLite 放弃索引全表扫，拆开后每支各自走 status 索引。
-        """
-        rows = await self._all(
-            """SELECT * FROM (
-                SELECT * FROM orders WHERE status = 'paid'
-                UNION
-                SELECT * FROM orders WHERE status IN ('delivered', 'refunded') AND notification_pending = 1
-                UNION
-                SELECT * FROM orders WHERE status = 'delivered' AND EXISTS (
-                    SELECT 1 FROM purchases WHERE purchases.order_id = orders.id
-                    AND purchases.state NOT IN ('rejected', 'submission_unknown')
-                    AND (purchases.state != 'fulfilled'
-                        OR (purchases.upstream_request_id IS NOT NULL
-                            AND purchases.upstream_request_id IS NOT orders.upstream_ref))
+    async def claim_work(self, kind: str) -> WorkItem | None:
+        async with self.connection() as conn:
+            async with conn.execute(
+                """UPDATE work_items SET claimed = 1 WHERE id = (
+                    SELECT id FROM work_items WHERE kind = ? AND claimed = 0 AND due_at <= ?
+                    ORDER BY due_at, id LIMIT 1
+                ) RETURNING id, kind, entity_id, attempts, revision""",
+                (kind, time.time()),
+            ) as cur:
+                row = await cur.fetchone()
+        return WorkItem(**dict(row)) if row else None
+
+    async def finish_work(self, item: WorkItem, *, done: bool = False, delay: float = 5) -> None:
+        """版本条件避免抹掉处理期间新产生的重绑/补发任务。"""
+        async with self.transaction() as conn:
+            if done:
+                await conn.execute("DELETE FROM work_items WHERE id = ? AND revision = ?", (item.id, item.revision))
+            else:
+                await conn.execute(
+                    """UPDATE work_items SET due_at = MAX(due_at, ?), attempts = attempts + 1
+                    WHERE id = ? AND revision = ?""",
+                    (time.time() + delay, item.id, item.revision),
                 )
-            ) ORDER BY id"""
+            await conn.execute("UPDATE work_items SET claimed = 0 WHERE id = ?", (item.id,))
+
+    async def get_wallet_notification(self, transaction_id: int) -> dict[str, Any] | None:
+        row = await self._one(
+            """SELECT t.*, u.telegram_id FROM balance_transactions t
+            JOIN users u ON u.id = t.user_id WHERE t.id = ?""",
+            (transaction_id,),
         )
-        return [_row_to_order(r) for r in rows]
+        return dict(row) if row else None
+
+    async def queue_redelivery(self, order_id: int) -> None:
+        # 已在发送时保留 cursor；已完成时归零。短事务不等待网络持有的订单锁。
+        async with self.transaction() as conn:
+            await conn.execute(
+                """UPDATE orders SET notification_pending = 1, notification_cursor = 0
+                WHERE id = ? AND status = 'delivered' AND notification_pending = 0""",
+                (order_id,),
+            )
 
     async def mark_notified(self, order_id: int) -> None:
         async with self.transaction() as conn:

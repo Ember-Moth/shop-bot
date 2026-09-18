@@ -142,6 +142,8 @@ async def test_manual_query_resends_images_to_buyer_not_admin_chat(db, bot, monk
     order = await db.get_order(order_id)
     monkeypatch.setattr("shop_bot.handlers.start.get_settings", lambda: SimpleNamespace(admin_ids=[700]))
     await cmd_query(query_message(bot, order, user_id=700, chat_id=-100), db, None, purchaser, bot)
+    assert bot.session.sent[-1].chat_id == -100
+    await recover_once(db, purchaser, bot)
     assert len(photos(bot)) == 2 and all(photo.chat_id == 42 for photo in photos(bot))
     assert photos(bot)[0].photo.data == photos(bot)[1].photo.data
     assert gateway.create_calls == 1
@@ -216,6 +218,8 @@ async def test_balance_payment_does_not_claim_photo_sent_when_upload_failed(db, 
     purchaser = CommbitzPurchaser(FakeCommbitzGateway(details=esim_details()))
     bot.session.fail_photo = True
     await cb_pay_with_balance(_balance_callback(bot, order.id), db, purchaser, bot)
-    assert "尚未完成" in bot.session.sent[-1].text
+    assert "货品会自动私信发送" in bot.session.sent[-1].text
+    assert not photos(bot)
+    await recover_once(db, purchaser, bot)
     assert (await db.get_order(order.id)).notification_pending
     assert await db.get_balance(user.id, "USD") == 1

@@ -238,11 +238,11 @@ async def test_cb_pay_with_balance_success(db, user, purchaser, bot):
 
     await cb_pay_with_balance(_balance_callback(bot, order.id), db, purchaser, bot)
 
-    # DemoPurchaser 立即履约 → 直接 delivered
+    # 收款入口只入账并建立采购任务；后台履约
     order = await db.get_order(order.id)
-    assert order is not None and order.status.value == "delivered"
+    assert order is not None and order.status.value == "paid"
     purchase = await db.get_purchase_by_order(order.id)
-    assert purchase is not None and purchase.state.value == "fulfilled"
+    assert purchase is not None and purchase.state.value == "ready"
     user_after = await db.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 1000_00 - order.amount_cents
     # 恢复循环完成履约并私信
@@ -394,7 +394,7 @@ async def test_adjust_balance_rejects_overdraft_and_unknown_user(db, user):
     assert await db.list_balance_transactions(user.id) == []
 
 
-async def test_cmd_adjust_replies_and_notifies_user(db, user, bot):
+async def test_cmd_adjust_replies_and_notifies_user(db, user, bot, purchaser):
     """/adjust 回复管理员确认，并私信用户余额变动（含备注）。"""
     msg = Message.model_validate(
         {
@@ -407,6 +407,7 @@ async def test_cmd_adjust_replies_and_notifies_user(db, user, bot):
         context={"bot": bot},
     )
     await cmd_adjust(msg, db, bot)
+    await recover_once(db, purchaser, bot)
     texts = [m.text or "" for m in bot.session.sent]
     assert any("已调账 +5.50 CNY" in t for t in texts)  # 管理员确认
     assert any("余额调整 +5.50 CNY" in t and "测试调账" in t for t in texts)  # 用户私信
@@ -457,7 +458,7 @@ async def test_balance_paid_order_refund_cycle(db, user):
     assert [t.kind for t in txs] == ["refund", "purchase", "topup"]
 
 
-async def test_cmd_refund_paid_order_notifies_buyer(db, user, bot):
+async def test_cmd_refund_paid_order_notifies_buyer(db, user, bot, purchaser):
     """人工退款：/refund 关单、回复管理员并私信买家；已退款订单再次拒绝。"""
     product = Product(1, "p", "", 100, "CNY")
     await db.seed_products([product])
@@ -474,6 +475,7 @@ async def test_cmd_refund_paid_order_notifies_buyer(db, user, bot):
         context={"bot": bot},
     )
     await cmd_refund(msg, db, bot)
+    await recover_once(db, purchaser, bot)
     order_after = await db.get_order(order.id)
     assert order_after is not None and order_after.status == OrderStatus.REFUNDED
     texts = [m.text or "" for m in bot.session.sent]

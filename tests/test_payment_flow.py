@@ -162,10 +162,12 @@ async def test_query_only_sends_goods_to_owner(
     monkeypatch.setattr("shop_bot.handlers.start.get_settings", lambda: SimpleNamespace(admin_ids=[700]))
     httpx_mock.add_response(json=query_result(pending))
     await cmd_query(query_message(bot, pending, user_id, chat_id), db, epay, purchaser, bot)
+    reply = bot.session.sent[-1]
+    await recover_once(db, purchaser, bot)
     goods = [m for m in bot.session.sent if "stub goods" in m.text]
     assert len(goods) == 1 and goods[0].chat_id == 42
-    assert bot.session.sent[-1].chat_id == chat_id
-    assert "stub goods" not in bot.session.sent[-1].text
+    assert reply.chat_id == chat_id
+    assert "stub goods" not in reply.text
 
 
 async def test_query_denies_other_buyers(*, db, pending, epay, purchaser, bot):
@@ -187,7 +189,7 @@ async def test_payment_error_does_not_leak_key_in_reply_or_logs(
 
 
 async def test_notification_failure_recovers_without_purchasing_again(
-    *, http_client, db, pending, purchaser, bot, epay
+    *, http_client, db, pending, purchaser, bot, epay, queue_clock
 ):
     bot.session.fail_send = True
     response = await http_client.post("/payment/callback", data=callback_params(pending))
@@ -196,6 +198,7 @@ async def test_notification_failure_recovers_without_purchasing_again(
     persisted = await db.get_order(pending.id)
     assert persisted is not None and persisted.payload and persisted.notified_at is None
     bot.session.fail_send = False
+    queue_clock()
     await recover_once(db, purchaser, bot)
     final = await db.get_order(pending.id)
     assert final is not None and final.notified_at
@@ -203,6 +206,7 @@ async def test_notification_failure_recovers_without_purchasing_again(
     assert purchase is not None and purchase.state == PurchaseState.FULFILLED
     # 已通知的订单仍可通过 /query 明确请求补发，只发送同一份货品。
     await cmd_query(query_message(bot, pending), db, epay, purchaser, bot)
+    await recover_once(db, purchaser, bot)
     assert final.payload is not None
     assert sum(final.payload in m.text for m in bot.session.sent) == 2
 
@@ -255,6 +259,7 @@ async def test_admin_can_resume_paid_or_failed_without_pending_reset(*, db, pend
         context={"bot": bot},
     )
     await cmd_paid(message, db, purchaser, bot)
+    await recover_once(db, purchaser, bot)
     final = await db.get_order(pending.id)
     assert final is not None and final.status == OrderStatus.DELIVERED and final.trade_no == "T1"
     async with db.connection() as conn:

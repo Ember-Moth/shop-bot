@@ -158,7 +158,7 @@ async def test_rebind_invalidates_old_delivery_and_rechecks_both_buyers(frozen_o
 
 
 @pytest.mark.parametrize("mode", ["pending", "missing_goods", "kyc", "query_error"])
-async def test_rebound_order_waits_without_sending_old_goods(frozen_orders, bot, mode):
+async def test_rebound_order_waits_without_sending_old_goods(frozen_orders, bot, mode, queue_clock):
     db, (_, order_id), _ = frozen_orders
     gateway = Gateway()
     purchaser = CommbitzPurchaser(gateway)
@@ -178,6 +178,7 @@ async def test_rebound_order_waits_without_sending_old_goods(frozen_orders, bot,
     assert not await notify_owner(db, bot, order_id, resend=True)
     assert bot.session.sent == [] and gateway.create_calls == 0
     gateway.responses[NEW_REF] = details(NEW_REF, "NEW-VERIFIED")
+    queue_clock()
     await recover_once(db, purchaser, bot)
     assert "NEW-VERIFIED" in goods_messages(bot, 43)[0]
     assert gateway.create_calls == 0
@@ -204,6 +205,7 @@ async def test_manual_entry_only_sends_new_goods_to_owner(frozen_orders, bot, co
         await cmd_query(message, db, None, purchaser, bot)
     else:
         await cmd_paid(message, db, purchaser, bot)
+    await recover_once(db, purchaser, bot)
     assert len(goods_messages(bot, 43)) == 1 and "NEW-VERIFIED" in goods_messages(bot, 43)[0]
     assert not goods_messages(bot, 700)
     assert all(STALE_GOODS not in (getattr(m, "text", "") or "") for m in bot.session.sent)

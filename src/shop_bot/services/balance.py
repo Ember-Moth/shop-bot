@@ -9,9 +9,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal, InvalidOperation
 
-from ..db import Database
 from ..logging_config import get_logger
-from ..models import Topup
 
 logger = get_logger(__name__)
 
@@ -50,12 +48,3 @@ def parse_topup_amount(text: str) -> int | None:
 
 def format_cents(cents: int) -> str:
     return f"{cents / 100:.2f}"
-
-
-async def create_topup(db: Database, user_id: int, amount_cents: int) -> Topup:
-    topup = await db.create_topup(user_id, amount_cents)
-    logger.info(
-        "topup created",
-        extra={"order_id": topup.id, "user_id": user_id, "error": f"{amount_cents}"},
-    )
-    return topup

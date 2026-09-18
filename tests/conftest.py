@@ -1,3 +1,6 @@
+import time
+from types import SimpleNamespace
+
 import pytest
 from aiogram import Bot
 
@@ -45,3 +48,15 @@ async def bot():
     instance = Bot("123456:FAKE_TOKEN_FOR_OFFLINE_TEST", session=FakeSession())
     yield instance
     await instance.session.close()
+
+
+@pytest.fixture
+def queue_clock(monkeypatch):
+    """推进任务到期时间，不修改持久化任务或真实等待。"""
+    now = [time.time()]
+    monkeypatch.setattr("shop_bot.db.time", SimpleNamespace(time=lambda: now[0]))
+
+    def advance(seconds=600):
+        now[0] += seconds
+
+    return advance

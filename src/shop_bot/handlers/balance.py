@@ -12,12 +12,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from .. import keyboards
-from ..config import get_settings
 from ..db import Database
 from ..logging_config import get_logger
 from ..models import User
 from ..services.balance import format_cents, parse_topup_amount
-from ..services.epay import EPayClient, EPayOrder
+from ..services.epay import EPayClient
+from ..services.invoices import payment_url
 
 router = Router()
 logger = get_logger(__name__)
@@ -54,19 +54,10 @@ async def _create_topup_invoice(
 ) -> tuple[str, InlineKeyboardMarkup]:
     """创建充值单并生成 EPay 收银台链接，返回账单文本与支付按钮。"""
     topup = await db.create_topup(user.id, amount_cents, epay.currency)
-    settings = get_settings()
     bot = message.bot
     assert bot is not None
-    me = await bot.get_me()
-    pay_url = epay.create_pay_url(
-        EPayOrder(
-            name="余额充值",
-            order_no=f"T{topup.id}",
-            amount=amount_cents / 100,
-            currency=topup.currency,
-            notify_url=f"{settings.webhook.url.rstrip('/')}{settings.payment.callback_path}",
-            return_url=f"https://t.me/{me.username}",
-        )
+    pay_url = await payment_url(
+        bot, epay, name="余额充值", order_no=f"T{topup.id}", amount_cents=amount_cents, currency=topup.currency
     )
     text = (
         f"💰 充值单 `{topup.id}` 已创建\n金额：{format_cents(amount_cents)} {topup.currency}\n\n"

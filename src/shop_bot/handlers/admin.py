@@ -9,7 +9,6 @@ from ..models import OrderStatus, PurchaseState
 from ..money import SUPPORTED_CURRENCIES, normalize_currency, parse_price
 from ..services import orders
 from ..services.balance import format_cents, parse_signed_amount
-from ..services.fulfillment import notify_owner, notify_refund
 from ..services.operations import Operations
 from ..services.orders import OrderError
 from ..services.purchasing import CommbitzPurchaser, Purchaser, split_payload_chunks
@@ -232,7 +231,7 @@ async def cmd_orders(message: Message, db: Database) -> None:
 
 @router.message(Command("paid"))
 async def cmd_paid(message: Message, db: Database, purchaser: Purchaser, bot: Bot) -> None:
-    """手动确认付款并立即推进一次履约；通知失败留给恢复循环重试。
+    """手动确认付款并保存采购任务；后台推进履约及通知。
 
     实体卡订单受理成功后停在 awaiting_dispatch，发货确认走独立的 /dispatch（审计 P2：
     确认付款不等于确认发货）。
@@ -243,26 +242,16 @@ async def cmd_paid(message: Message, db: Database, purchaser: Purchaser, bot: Bo
         return
     try:
         order = await orders.mark_paid(db, purchaser, order_id, retry_failed=True)
-        order = await purchaser.fulfill(db, order.id)
     except OrderError as exc:
         await message.answer(f"❌ {exc}")
         return
-    assert order is not None
-    if order.status == OrderStatus.REFUNDED:
-        await notify_refund(db, bot, order.id)
+    if order.status == OrderStatus.DELIVERED:
+        await db.queue_redelivery(order.id)
+        await message.answer(f"✅ 订单 #{order.id} 已发货，补发任务已保存")
+    elif order.status == OrderStatus.REFUNDED:
         await message.answer(f"订单 #{order.id} 已退款到 {order.currency} 余额并关闭")
-        return
-    if order.status != OrderStatus.DELIVERED:
-        hint = ""
-        if isinstance(purchaser, CommbitzPurchaser):
-            purchase = await db.get_purchase_by_order(order.id)
-            if purchase is not None and purchase.state == PurchaseState.AWAITING_DISPATCH:
-                hint = "；实体卡已受理，确认发货请用 /dispatch <订单号>"
-        await message.answer(f"⏳ 订单 #{order.id} 已确认付款，履约状态：{order.status}{hint}")
-        return
-    notified = await notify_owner(db, bot, order.id, resend=True)
-    detail = "货品已私信发送给买家" if notified else "货品已保存，私信发送失败，系统会重试"
-    await message.answer(f"✅ 订单 #{order.id} 已发货；{detail}")
+    else:
+        await message.answer(f"⏳ 订单 #{order.id} 已确认付款，系统会自动履约；实体卡实际发出后请用 /dispatch")
 
 
 @router.message(Command("dispatch"))
@@ -281,14 +270,16 @@ async def cmd_dispatch(message: Message, db: Database, purchaser: Purchaser, bot
         return
     order = await db.get_order(order_id)
     if order is not None:
-        await notify_owner(db, bot, order.id, resend=True)
+        await db.queue_redelivery(order.id)
     await message.answer(f"✅ {detail}")
 
 
 @router.message(Command("purchases"))
 async def cmd_purchases(message: Message, db: Database) -> None:
-    """人工核对入口：列出需要人工处理的采购任务（结果不明/被拒绝）。"""
-    manual = await db.list_purchases_by_states((PurchaseState.SUBMISSION_UNKNOWN, PurchaseState.REJECTED))
+    """人工核对入口：列出需要人工处理的采购任务（结果不明/被拒绝/实体卡待发货）。"""
+    manual = await db.list_purchases_by_states(
+        (PurchaseState.SUBMISSION_UNKNOWN, PurchaseState.REJECTED, PurchaseState.AWAITING_DISPATCH)
+    )
     if not manual:
         await message.answer("没有需要人工处理的采购任务。")
         return
@@ -365,7 +356,6 @@ async def cmd_refund(message: Message, db: Database, bot: Bot) -> None:
             "正在上游处理的订单请先核对/取消上游业务。"
         )
         return
-    await notify_refund(db, bot, order_id)
     await message.answer(f"✅ 订单 #{order_id} 已退款 {order.amount_text} 到买家同币种余额并关闭")
 
 
@@ -404,18 +394,6 @@ async def cmd_adjust(message: Message, db: Database, bot: Bot) -> None:
         f"✅ 已调账 {delta_cents / 100:+.2f} {currency}，用户 #{user_id} "
         f"当前余额 {format_cents(new_balance)} {currency}"
     )
-    user = await db.get_user(user_id)
-    if user is not None:
-        try:
-            await bot.send_message(
-                user.telegram_id,
-                f"💳 余额调整 {delta_cents / 100:+.2f} {currency}"
-                + (f"（{note}）" if note else "")
-                + f"\n当前余额：{format_cents(new_balance)} {currency}",
-            )
-        except Exception as exc:
-            # 私信失败不影响已落库的调账事实
-            logger.warning("adjust notification failed", extra={"user_id": user_id, "error": type(exc).__name__})
 
 
 def _parse_order_id(message: Message) -> int | None:

@@ -4,13 +4,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InaccessibleMessage, Message
 
 from .. import keyboards
-from ..config import get_settings
 from ..db import Database
 from ..keyboards import escape_markdown
 from ..models import OrderStatus, Product
 from ..services import orders
-from ..services.epay import EPayClient, EPayOrder
-from ..services.fulfillment import notify_owner, notify_refund
+from ..services.epay import EPayClient
+from ..services.invoices import payment_url
 from ..services.purchasing import Purchaser
 
 router = Router()
@@ -259,19 +258,15 @@ async def cb_pay_online(callback: CallbackQuery, db: Database, epay: EPayClient 
     if order is None:
         await callback.answer("订单状态或币种不支持此收款渠道", show_alert=True)
         return
-    settings = get_settings()
     bot = callback.bot
     assert bot is not None
-    me = await bot.get_me()
-    pay_url = epay.create_pay_url(
-        EPayOrder(
-            name=f"订单 #{order.id}",
-            order_no=str(order.id),
-            amount=order.amount_cents / 100,
-            currency=order.currency,
-            notify_url=f"{settings.webhook.url.rstrip('/')}{settings.payment.callback_path}",
-            return_url=f"https://t.me/{me.username}",
-        )
+    pay_url = await payment_url(
+        bot,
+        epay,
+        name=f"订单 #{order.id}",
+        order_no=str(order.id),
+        amount_cents=order.amount_cents,
+        currency=order.currency,
     )
     await msg.edit_text(
         f"订单 #{order.id} · {order.amount_text}\n已选择在线支付，请打开收银台完成付款。",
@@ -299,16 +294,13 @@ async def cb_pay_with_balance(callback: CallbackQuery, db: Database, purchaser: 
     if user is None:
         await callback.answer("请先发 /start 再操作", show_alert=True)
         return
-    async with db.order_operation(order_id):
-        order = await db.get_order(order_id)
-        if order is None or order.user_id != user.id:
-            await callback.answer("订单不存在", show_alert=True)
-            return
-        if order.status != OrderStatus.PENDING_PAYMENT:
-            await callback.answer("订单当前状态不可支付", show_alert=True)
-            return
-    # pay_order_with_balance 本身是原子的；fulfill 内部会自行持有订单锁，
-    # 这里不能先持有——否则 fulfill 重入同一把非重入锁会死锁。
+    order = await db.get_order(order_id)
+    if order is None or order.user_id != user.id:
+        await callback.answer("订单不存在", show_alert=True)
+        return
+    if order.status != OrderStatus.PENDING_PAYMENT:
+        await callback.answer("订单当前状态不可支付", show_alert=True)
+        return
     paid, err = await db.pay_order_with_balance(order_id, user.id, order.amount_cents)
     if err == "online payment selected":
         await callback.answer("此订单已选择在线支付，请使用原收银台完成付款", show_alert=True)
@@ -319,20 +311,7 @@ async def cb_pay_with_balance(callback: CallbackQuery, db: Database, purchaser: 
     if err is not None or paid is None:
         await callback.answer("支付失败，请稍后再试", show_alert=True)
         return
-    await purchaser.ensure_purchase(db, paid)
-    final = await purchaser.fulfill(db, order_id)
-    if final is not None and final.status == OrderStatus.REFUNDED:
-        await notify_refund(db, bot, order_id)
-        await callback.answer("❌ 订单无法交付，已退款到余额", show_alert=True)
-        return
-    if final is None or final.status != OrderStatus.DELIVERED:
-        await callback.answer("✅ 已用余额支付，系统正在履约", show_alert=True)
-        return
-    notified = await notify_owner(db, bot, order_id)
-    await callback.answer(
-        "✅ 支付成功，货品已私信发送" if notified else "✅ 已支付，交付资料已保存；私信发送尚未完成，系统会继续重试",
-        show_alert=True,
-    )
+    await callback.answer("✅ 已用余额支付，货品会自动私信发送", show_alert=True)
 
 
 @router.callback_query(F.data == keyboards.CB_CANCEL_ORDER)

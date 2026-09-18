@@ -135,9 +135,11 @@ async def test_manual_query_sends_archive_to_buyer_not_admin_chat(db, bot, monke
     order = await db.get_order(order_id)
     monkeypatch.setattr("shop_bot.handlers.start.get_settings", lambda: SimpleNamespace(admin_ids=[700]))
     await cmd_query(query_message(bot, order, user_id=700, chat_id=-100), db, None, purchaser, bot)
+    reply = bot.session.sent[-1]
+    await recover_once(db, purchaser, bot)
     assert len(documents(bot)) == 2 and all(doc.chat_id == 42 for doc in documents(bot))
     assert document_bytes(documents(bot)[0]) == document_bytes(documents(bot)[1])
-    assert bot.session.sent[-1].chat_id == -100 and gateway.create_calls == 1
+    assert reply.chat_id == -100 and gateway.create_calls == 1
 
 
 @pytest.mark.parametrize("old_cursor", [1, 2, 3])

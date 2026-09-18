@@ -17,6 +17,7 @@ MONITORED_KEYS = (
     "manual_purchases",
     "stalled_orders",
     "pending_notifications",
+    "wallet_notifications",
     "database",
     "recovery",
     "worker_recovery",

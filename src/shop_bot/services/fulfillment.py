@@ -16,7 +16,9 @@ from ..db import Database
 from ..logging_config import get_logger
 from ..models import Order, OrderStatus, PurchaseState
 from ..telegram_text import text_units
+from ..work_queue import WorkItem
 from .esim_media import MAX_ESIMS_PER_ARCHIVE, EsimMedia, delivery_esims, esim_zip, qr_png
+from .notification_transport import NotificationThrottle
 from .purchasing import Purchaser, split_payload_chunks
 
 logger = get_logger(__name__)
@@ -74,6 +76,7 @@ async def notify_owner(
     *,
     resend: bool = False,
     runtime: RuntimeState | None = None,
+    throttle: NotificationThrottle | None = None,
 ) -> bool:
     async with db.order_operation(order_id):
         order = await db.get_order(order_id)
@@ -145,6 +148,8 @@ async def notify_owner(
                         if total == 1
                         else (f"esims-{order.id}-{first_index:04d}-{last_index:04d}.zip")
                     )
+                    if throttle is not None:
+                        await throttle.wait(owner.telegram_id)
                     await bot.send_document(
                         owner.telegram_id,
                         BufferedInputFile(data, filename=filename),
@@ -154,9 +159,13 @@ async def notify_owner(
                     )
                     del data
                 elif item.photo is None:
-                    await bot.send_message(owner.telegram_id, item.text, parse_mode=None)
+                    if throttle is not None:
+                        await throttle.wait(owner.telegram_id)
+                    await bot.send_message(owner.telegram_id, item.text, parse_mode=None, request_timeout=20)
                 else:
                     png = await asyncio.to_thread(qr_png, item.photo.lpa)
+                    if throttle is not None:
+                        await throttle.wait(owner.telegram_id)
                     await bot.send_photo(
                         owner.telegram_id,
                         BufferedInputFile(png, filename=f"esim-{order.id}-{item.photo_index + 1}.png"),
@@ -177,7 +186,7 @@ async def notify_owner(
         return True
 
 
-async def notify_refund(db: Database, bot: Bot, order_id: int) -> bool:
+async def notify_refund(db: Database, bot: Bot, order_id: int, *, throttle: NotificationThrottle | None = None) -> bool:
     """退款与通知分开恢复；成功发送后清除待通知标记。"""
     async with db.order_operation(order_id):
         order = await db.get_order(order_id)
@@ -185,21 +194,115 @@ async def notify_refund(db: Database, bot: Bot, order_id: int) -> bool:
             return False
         if not order.notification_pending:
             return True
+        if order.notification_retry_at and time.time() < order.notification_retry_at:
+            return False
         owner = await db.get_user(order.user_id)
         if owner is None:
             return False
         balance = await db.get_balance(order.user_id, order.currency)
         try:
+            if throttle is not None:
+                await throttle.wait(owner.telegram_id)
             await bot.send_message(
                 owner.telegram_id,
                 f"❌ 订单 #{order.id} 无法完成交付，{order.amount_text} 已退回余额\n"
                 f"当前余额：{balance / 100:.2f} {order.currency}",
+                parse_mode=None,
+                request_timeout=20,
             )
+        except TelegramRetryAfter as exc:
+            await db.defer_notification(order.id, time.time() + exc.retry_after)
+            return False
         except Exception as exc:
             logger.warning("refund notification failed", extra={"order_id": order_id, "error": type(exc).__name__})
             return False
         await db.mark_notified(order_id)
         return True
+
+
+async def notify_wallet(db: Database, bot: Bot, transaction_id: int, throttle: NotificationThrottle | None) -> bool:
+    tx = await db.get_wallet_notification(transaction_id)
+    if tx is None:
+        return True
+    amount = tx["amount_cents"] / 100
+    currency = tx["currency"]
+    if tx["kind"] == "topup":
+        heading = f"💰 充值到账 {amount:.2f} {currency}"
+    elif tx["kind"] == "adjust":
+        heading = f"💳 余额调整 {amount:+.2f} {currency}"
+        if tx["note"]:
+            heading += f"（{tx['note']}）"
+    else:
+        heading = f"💰 订单 #{tx['order_id']} 的额外/关单收款 {amount:.2f} {currency} 已存入余额"
+    if throttle is not None:
+        await throttle.wait(tx["telegram_id"])
+    await bot.send_message(
+        tx["telegram_id"],
+        f"{heading}\n入账后余额：{tx['balance_after'] / 100:.2f} {currency}",
+        parse_mode=None,
+        request_timeout=20,
+    )
+    return True
+
+
+async def process_work(
+    db: Database,
+    purchaser: Purchaser,
+    bot: Bot | None,
+    item: WorkItem,
+    runtime: RuntimeState | None = None,
+    *,
+    throttle: NotificationThrottle | None = None,
+) -> bool:
+    """业务幂等保护仍在采购/通知状态机；队列只负责执行时机和失败退避。"""
+    done = False
+    delay = min(300, RECOVERY_INTERVAL * 2 ** min(item.attempts, 6))
+    failed = False
+    try:
+        # 被取消的建单保留 submitting，下轮转人工；文件发送保留已确认的 cursor。
+        async with asyncio.timeout(300):
+            if item.kind == "purchase":
+                await purchaser.fulfill(db, item.entity_id)
+                delay = min(delay, 60)
+            elif bot is not None and item.kind == "delivery":
+                order = await db.get_order(item.entity_id)
+                if order is None:
+                    done = True
+                elif order.status == OrderStatus.REFUNDED:
+                    done = await notify_refund(db, bot, item.entity_id, throttle=throttle)
+                else:
+                    done = await notify_owner(db, bot, item.entity_id, runtime=runtime, throttle=throttle)
+                failed = not done
+            elif bot is not None and item.kind == "wallet":
+                done = await notify_wallet(db, bot, item.entity_id, throttle)
+    except TelegramRetryAfter as exc:
+        delay = max(delay, exc.retry_after)
+        failed = True
+    except asyncio.CancelledError:
+        await db.finish_work(item, delay=0)
+        raise
+    except Exception as exc:
+        failed = True
+        logger.warning("work failed", extra={"order_id": item.entity_id, "error": type(exc).__name__})
+    await db.finish_work(item, done=done, delay=delay)
+    return failed
+
+
+async def _drain_work(
+    db: Database,
+    purchaser: Purchaser,
+    bot: Bot | None,
+    kind: str,
+    runtime: RuntimeState | None,
+) -> int:
+    failures = 0
+    # 有限批量，避免持续新订单使一次恢复永不返回。
+    for _ in range(50):
+        item = await db.claim_work(kind)
+        if item is None:
+            break
+        failures += await process_work(db, purchaser, bot, item, runtime)
+    return failures
 
 
 async def recover_once(
@@ -208,39 +311,39 @@ async def recover_once(
     bot: Bot | None,
     runtime: RuntimeState | None = None,
 ) -> int:
-    """恢复扫描：fulfill 幂等推进 paid 履约并收敛 delivered 订单的采购终态，补发未送达通知。"""
-    failures = 0
-    for order in await db.list_recovery_orders():
-        if runtime is not None:
-            runtime.beat("recovery")
-        try:
-            final = await purchaser.fulfill(db, order.id)
-            if bot is None:
-                continue
-            if final is not None and final.status == OrderStatus.REFUNDED:
-                await notify_refund(db, bot, final.id)
-            else:
-                await notify_owner(db, bot, order.id, runtime=runtime)
-        except Exception as exc:
-            failures += 1
-            logger.warning("recovery failed", extra={"order_id": order.id, "error": type(exc).__name__})
-    return failures
+    """有限恢复批次，供维护和测试使用；常驻服务的三个通道完全独立。"""
+    results = await asyncio.gather(*(_drain_work(db, purchaser, bot, "purchase", runtime) for _ in range(3)))
+    if bot is not None:
+        results += await asyncio.gather(
+            *(_drain_work(db, purchaser, bot, kind, runtime) for kind in ("delivery", "delivery", "wallet"))
+        )
+    return sum(results)
+
+
+async def _work_loop(
+    db: Database,
+    purchaser: Purchaser,
+    bot: Bot,
+    kind: str,
+    throttle: NotificationThrottle,
+    *,
+    runtime: RuntimeState | None,
+) -> None:
+    while True:
+        item = await db.claim_work(kind)
+        if item is None:
+            await asyncio.sleep(1)
+            continue
+        await process_work(db, purchaser, bot, item, runtime, throttle=throttle)
 
 
 async def recovery_loop(db: Database, purchaser: Purchaser, bot: Bot, runtime: RuntimeState | None = None) -> None:
-    while True:
-        try:
+    throttle = NotificationThrottle()
+    # 固定工作协程，不为整个积压队列一次性创建 Task。异常会传到主进程监督器。
+    async with asyncio.TaskGroup() as group:
+        for kind in ("purchase", "purchase", "purchase", "delivery", "delivery", "wallet"):
+            group.create_task(_work_loop(db, purchaser, bot, kind, throttle, runtime=runtime))
+        while True:
             if runtime is not None:
                 runtime.beat("recovery")
-            failures = await recover_once(db, purchaser, bot, runtime)
-            if runtime is not None:
-                runtime.beat("recovery")
-                if failures:
-                    runtime.failures["recovery"] = f"履约恢复本轮有 {failures} 个订单处理异常，请检查订单日志"
-                else:
-                    runtime.failures.pop("recovery", None)
-        except Exception as exc:
-            if runtime is not None:
-                runtime.failures["recovery"] = "履约扫描失败，请检查数据库和服务日志"
-            logger.warning("recovery scan failed", extra={"error": type(exc).__name__})
-        await asyncio.sleep(RECOVERY_INTERVAL)
+            await asyncio.sleep(1)

@@ -10,18 +10,19 @@ shop_bot/
 ├── models.py           # Product / Order / OrderStatus（StrEnum）
 ├── db.py               # aiosqlite 连接 + DAO（users / products / orders / order_events / fsm_state）
 │                       # 含 FSMStorage：SQLite 持久化 FSM 存储，重启后对话状态恢复
+├── work_queue.py       # 持久化任务表、索引和事务内状态联动触发器
 ├── keyboards.py        # 内联键盘（目录、确认、Web App 支付按钮）
 ├── logging_config.py   # 日志系统（彩色开发格式 + JSON 生产格式，按天轮转）
 ├── handlers/
-│   ├── start.py        # /start、主菜单、我的订单、/query 查支付状态（触发一次履约推进）
+│   ├── start.py        # /start、主菜单、我的订单、/query 查支付状态（核单后入队）
 │   ├── catalog.py      # 商品目录浏览
 │   ├── order.py        # FSM 下单流程（按业务类型采集 ICCID/号码/天数 → 确认 → 支付链接）
 │   ├── kyc.py          # /kyc 私聊补交证件（multipart/JSON）、/usage eSIM 用量
-│   └── admin.py        # /orders、/paid（含实体卡确认发货）、/cancel、/purchases、/retry、/bind
+│   └── admin.py        # /orders、/paid、/dispatch（实体卡确认发货）、/cancel、/purchases、/retry、/bind
 ├── services/
 │   ├── orders.py       # 收款确认（pending → paid + 建采购任务），与履约分离
 │   ├── purchasing.py   # 采购状态机（提交一次/详情轮询/KYC 等待/未知转人工）+ Demo/Commbitz 双模式
-│   ├── fulfillment.py  # 买家私信（分条）+ 恢复循环（采购推进 + 通知补发）
+│   ├── fulfillment.py  # 图文/ZIP 私信 + 独立采购、交付、钱包通知工作协程
 │   ├── epay.py         # EPay 支付网关协议（MD5 签名、支付链接、回调验证、订单查询）
 │   ├── commbitz_api.py # Commbitz 分销 API 客户端（令牌/目录/详情/采购/KYC/用量）
 │   └── catalog_sync.py # 上游套餐同步为本地商品（SKU 映射；新商品 0 价下架待人工定价）
@@ -45,7 +46,7 @@ EPay 网关 ──GET/POST /payment/callback──> 验签核单 ──> confirm
                                               │          + purchases 建任务（ready）
                                               v
                                     立即应答 success（规则 2）
-                                              │  后台恢复循环（5s）
+                                              │  后台采购工作协程
                                               v
                           CommbitzPurchaser.fulfill()：
                             ready → submitting（留痕）→ POST /v1/request
@@ -87,12 +88,33 @@ ready → submitting → upstream_pending → fulfilled
 - Web App 直接打开 EPay 收银台（`submit.php`），用户在 Telegram 内完成支付
 - 支付成功后，EPay 网关 GET 或 POST 到 `/payment/callback`，带 MD5 签名
 - 回调只做验签、核单、确认收款并建立采购任务（ready），随即应答（规则 2）
-- 后台恢复循环（5 秒）驱动采购：提交一次先留痕，立即持久化上游 `_id`，
+- 后台任务按到期时间驱动采购：提交一次先留痕，立即持久化上游 `_id`，
   已知 ID 只查询详情；货品校验完整后与采购终态同一事务落账并私信买家
-- 用户可用 `/query <订单号>` 主动查询支付状态（兜底，同样触发一次履约推进）
+- 用户可用 `/query <订单号>` 主动查询支付状态（兜底，核单成功后保存任务）
 
 - 状态转换持有连接锁、在写事务中核验前置状态，每次转换写入 `order_events` 审计；
   交付与采购终态通过 `db.finalize_delivery()` 原子落账，中断后恢复循环幂等收敛。
+
+## 持久化任务调度
+
+`work_items` 是 SQLite 内的持久化任务表。`kind + entity_id` 唯一，分别对应采购订单、交付/退款订单、钱包流水；`due_at`、`attempts` 保存重试时间和次数。调度只领取 ID，执行时读取当前资料，避免缓存旧引用或旧货品。
+
+`work_queue.py` 的触发器与业务 SQL 处于同一个事务：
+
+1. 订单变为 `paid`，按订单 SKU/业务快照建立采购记录，再保存采购任务。只有历史快照缺失才回退读取商品。
+2. 订单/采购状态变化，同步相应的可执行任务。人工冻结、实体卡等待发货不会被反复扫描；原有 KYC 轮询条件保留。
+3. 交付/退款通知沿用订单的持久化标记、方案版本和分步游标；通知完成时删除任务。
+4. 充值、调账、额外收款的流水插入时建立钱包通知任务；通知读取原流水的币种、金额和入账后余额。
+
+固定 3 个采购、2 个交付、1 个钱包工作协程，原子领取一条任务，按每个任务 300 秒上限执行；超过时限保留采购状态或文件游标后退避恢复。每个通道可独立继续处理，采购、退款、重绑和发送仍按订单互斥。收款使用短数据库事务，不再等待该互斥锁。
+
+任务的 `revision` 防止旧执行结果删除处理期间新产生的工作；`claimed` 防止多个工作协程重复领取。这里只支持单进程，启动时清理上一进程的领取标记。被中断的 `submitting` 仍会转人工核对，绝不自动再创建上游订单。
+
+普通失败指数退避，采购轮询上限 60 秒、通知上限 300 秒；Telegram 429 的等待时间必须满足。后台通知最多约 20 次/秒，同一买家间隔至少 1 秒。正在发送的补发请求合并，已完成的通知可重新入队。
+
+历史交付/采购不一致检查只在启动迁移时执行；常驻领取使用 `idx_work_due`，不再每轮遍历全部已交付订单。升级不为历史钱包流水创建通知任务，避免群发旧通知。
+
+通知提供可恢复发送，不能保证 Telegram 恰好收到一次：远端收到后、本地确认前断电仍可能重复。采购则始终遵守提交一次、已知 ID 只查询的规则。
 
 ## 接入点
 
