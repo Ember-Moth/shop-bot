@@ -219,6 +219,10 @@ class Database:
             await conn.execute("ALTER TABLE orders ADD COLUMN notification_cursor INTEGER NOT NULL DEFAULT 0")
         if "notification_retry_at" not in columns:
             await conn.execute("ALTER TABLE orders ADD COLUMN notification_retry_at REAL")
+        if "notification_plan_version" not in columns:
+            # 旧版存在两种不同步骤排列，无法只凭 cursor 判断。保持完成标记；
+            # 待通知订单在经过采购/归属核验后，由 prepare_notification 重置未知进度。
+            await conn.execute("ALTER TABLE orders ADD COLUMN notification_plan_version INTEGER NOT NULL DEFAULT 0")
         if "payment_method" not in columns:
             await conn.execute("ALTER TABLE orders ADD COLUMN payment_method TEXT")
             # 旧待付单可能已生成可用的 EPay 链接，升级后不允许再切换到余额。
@@ -408,6 +412,22 @@ class Database:
     async def list_products(self) -> list[Product]:
         return [_row_to_product(r) for r in await self._all("SELECT * FROM products WHERE active = 1 ORDER BY id")]
 
+    async def list_products_page(self, page: int, page_size: int) -> tuple[list[Product], int, int]:
+        if page < 0 or not 1 <= page_size <= 20:
+            raise ValueError("invalid catalog page")
+        async with self.connection() as conn:
+            async with conn.execute("SELECT COUNT(*) FROM products WHERE active = 1") as cur:
+                row = await cur.fetchone()
+            assert row is not None
+            page_count = max(1, (row[0] + page_size - 1) // page_size)
+            current_page = min(page, page_count - 1)
+            async with conn.execute(
+                "SELECT * FROM products WHERE active = 1 ORDER BY id LIMIT ? OFFSET ?",
+                (page_size, current_page * page_size),
+            ) as cur:
+                products = [_row_to_product(row) for row in await cur.fetchall()]
+        return products, current_page, page_count
+
     async def get_product(self, product_id: int) -> Product | None:
         row = await self._one("SELECT * FROM products WHERE id = ?", (product_id,))
         return _row_to_product(row) if row else None
@@ -594,7 +614,8 @@ class Database:
             async with conn.execute(
                 """UPDATE orders SET status = ?, upstream_ref = ?,
                 payload = ?, delivery_esims = ?, updated_at = datetime('now'),
-                notification_pending = 1, notification_cursor = 0, notification_retry_at = NULL
+                notification_pending = 1, notification_cursor = 0, notification_retry_at = NULL,
+                notification_plan_version = 0
                 WHERE id = ? AND status = 'paid' RETURNING *""",
                 (OrderStatus.DELIVERED, upstream_ref, payload, delivery_esims, order_id),
             ) as cur:
@@ -615,7 +636,7 @@ class Database:
         """调用方持有事务：仅撤销旧交付资料，金额、支付交易号与付款事实保持不变。"""
         async with conn.execute(
             """UPDATE orders SET status = 'paid', upstream_ref = NULL, payload = NULL,
-            delivery_esims = NULL, notification_cursor = 0, notification_retry_at = NULL,
+            delivery_esims = NULL, notification_cursor = 0, notification_retry_at = NULL, notification_plan_version = 0,
             notification_pending = 0, notified_at = NULL, updated_at = datetime('now')
             WHERE id = ? RETURNING *""",
             (order["id"],),
@@ -1340,6 +1361,18 @@ class Database:
                 (order_id,),
             )
 
+    async def prepare_notification(self, order_id: int, version: int) -> Order | None:
+        """调用方持有订单锁；新方案一次性重置未完成进度，不触碰已完成通知或货品。"""
+        async with self.transaction() as conn:
+            async with conn.execute(
+                """UPDATE orders SET notification_cursor = CASE WHEN notification_plan_version = ?
+                    THEN notification_cursor ELSE 0 END, notification_plan_version = ?
+                WHERE id = ? AND status = 'delivered' AND notification_pending = 1 RETURNING *""",
+                (version, version, order_id),
+            ) as cur:
+                row = await cur.fetchone()
+        return _row_to_order(row) if row else None
+
     async def advance_notification(self, order_id: int, expected_cursor: int) -> bool:
         async with self.transaction() as conn:
             async with conn.execute(
@@ -1495,6 +1528,7 @@ def _row_to_order(row: aiosqlite.Row) -> Order:
         delivery_esims=row["delivery_esims"],
         notification_cursor=row["notification_cursor"],
         notification_retry_at=row["notification_retry_at"],
+        notification_plan_version=row["notification_plan_version"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

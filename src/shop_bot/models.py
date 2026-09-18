@@ -73,6 +73,7 @@ class Order:
     delivery_esims: str | None = None  # 已验证的 ICCID/LPA JSON，与货品一起原子落库
     notification_cursor: int = 0  # 已成功发送并记账的文本/图片步骤数
     notification_retry_at: float | None = None  # Telegram 限流后的最早重试时间
+    notification_plan_version: int = 0  # 0 为历史未标记方案，不可跨方案解释游标
 
     @property
     def amount_text(self) -> str:

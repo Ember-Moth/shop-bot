@@ -489,7 +489,7 @@ async def test_topup_callback_accepts_three_decimal_money(db, bot, purchaser):
                 "pid": "1000",
                 "out_trade_no": f"T{topup.id}",
                 "trade_no": "TRADE-3DP",
-                "money": "99.90",
+                "money": "99.900",
                 "trade_status": "TRADE_SUCCESS",
                 "currency": "USD",
             }

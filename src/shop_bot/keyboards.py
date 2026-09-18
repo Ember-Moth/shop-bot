@@ -6,6 +6,8 @@ from aiogram.types import (
     WebAppInfo,
 )
 
+from .telegram_text import truncate_text
+
 CB_PRODUCT_PREFIX = "p:"
 CB_ORDER_PREFIX = "o:"
 CB_CONFIRM_ORDER = "order:confirm"
@@ -15,6 +17,8 @@ CB_EPAY_PAY = "epay:"
 CB_TOPUP_PREFIX = "topup:"  # topup:<金额分> 预设档位
 CB_TOPUP_CUSTOM = "topup:custom"
 CB_TOPUP_CANCEL = "topup:cancel"
+CB_CATALOG_PAGE = "catalog:"
+CATALOG_PAGE_SIZE = 5
 
 TOPUP_PRESETS = (10, 20, 30, 50, 100)  # 预设充值档位（元），自定义金额走文本输入
 
@@ -66,31 +70,43 @@ def main_menu_reply(kyc_enabled: bool = True) -> ReplyKeyboardMarkup:
     )
 
 
-def catalog(products) -> InlineKeyboardMarkup:
+def catalog(products, page: int = 0, page_count: int = 1) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text=f"{p.name} — {p.price_text}", callback_data=f"{CB_PRODUCT_PREFIX}{p.id}")]
-        for p in products
+        [
+            InlineKeyboardButton(
+                text=truncate_text(f"{p.name} — {p.price_text}", 100),
+                callback_data=f"{CB_PRODUCT_PREFIX}{p.id}:{page}",
+            )
+        ]
+        for p in products[:CATALOG_PAGE_SIZE]
     ]
+    navigation = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton(text="⬅️ 上一页", callback_data=f"{CB_CATALOG_PAGE}{page - 1}"))
+    if page + 1 < page_count:
+        navigation.append(InlineKeyboardButton(text="下一页 ➡️", callback_data=f"{CB_CATALOG_PAGE}{page + 1}"))
+    if navigation:
+        rows.append(navigation)
     rows.append([InlineKeyboardButton(text="⬅️ 返回主菜单", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def catalog_text(products) -> str:
-    """目录消息正文：标题 + 分隔线 + 每款商品的名称行与描述行。"""
-    lines = ["🛍 选择eSIM套餐", "━━━━━━━━━━━━━━━━━━", ""]
-    for p in products:
-        lines.append(f"{escape_markdown(p.name)} — {p.price_text}")
+def catalog_text(products, page: int = 0, page_count: int = 1) -> str:
+    """单页最多五款，以 UTF-16 限制摘要长度，使用纯文本显示。完整描述保留在详情页。"""
+    lines = [f"🛍 选择eSIM套餐 · 第 {page + 1}/{page_count} 页", "━━━━━━━━━━━━━━━━━━", ""]
+    for p in products[:CATALOG_PAGE_SIZE]:
+        lines.append(f"{truncate_text(p.name, 100)} — {truncate_text(p.price_text, 40)}")
         if p.description:
-            lines.append(escape_markdown(p.description))
+            lines.append(truncate_text(p.description, 500))
         lines.append("")
     return "\n".join(lines).rstrip()
 
 
-def product_detail(product_id: int) -> InlineKeyboardMarkup:
+def product_detail(product_id: int, page: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🛒 下单", callback_data=f"{CB_ORDER_PREFIX}{product_id}")],
-            [InlineKeyboardButton(text="⬅️ 返回目录", callback_data="catalog")],
+            [InlineKeyboardButton(text="⬅️ 返回目录", callback_data=f"{CB_CATALOG_PAGE}{page}")],
         ]
     )
 

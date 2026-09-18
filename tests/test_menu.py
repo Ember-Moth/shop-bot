@@ -86,14 +86,14 @@ def test_inline_main_menu_two_columns():
 
 
 def test_catalog_text_lists_products_with_separator():
-    """目录正文：标题 + 分隔线 + 每款商品的名称价格行与描述行，名称/描述经转义。"""
+    """目录正文：标题/页码 + 分隔线 + 每款商品的名称价格行与描述行。"""
     products = [
         Product(1, "100 SMS & 50 Talk", "美国TMO 100条短信+50分钟通话-30天eSIM", 630, "USD"),
         Product(2, "Unlimited Plan", "", 950, "USD"),
     ]
     text = catalog_text(products)
     lines = text.splitlines()
-    assert lines[0] == "🛍 选择eSIM套餐" and lines[1] == "━━━━━━━━━━━━━━━━━━"
+    assert lines[0] == "🛍 选择eSIM套餐 · 第 1/1 页" and lines[1] == "━━━━━━━━━━━━━━━━━━"
     assert "100 SMS & 50 Talk — 6.30 USD" in text
     assert "美国TMO 100条短信+50分钟通话-30天eSIM" in text
     assert "Unlimited Plan — 9.50 USD" in text

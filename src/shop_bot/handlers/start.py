@@ -88,11 +88,15 @@ async def cb_menu(callback: CallbackQuery) -> None:
 
 
 async def _send_catalog(message: Message, db: Database) -> None:
-    products = await db.list_products()
+    products, page, page_count = await db.list_products_page(0, keyboards.CATALOG_PAGE_SIZE)
     if not products:
         await message.answer("暂时没有商品")
         return
-    await message.answer(keyboards.catalog_text(products), reply_markup=keyboards.catalog(products))
+    await message.answer(
+        keyboards.catalog_text(products, page, page_count),
+        reply_markup=keyboards.catalog(products, page, page_count),
+        parse_mode=None,
+    )
 
 
 async def _render_my_orders(message: Message, db: Database, title: str) -> None:

@@ -15,7 +15,6 @@ import hmac
 import logging
 import re
 from dataclasses import dataclass
-from decimal import Decimal
 from urllib.parse import urlencode
 
 import httpx
@@ -95,13 +94,16 @@ def _format_money(amount: float) -> str:
 def parse_money_cents(text: str) -> int | None:
     """把 EPay 回传的金额字符串解析为分；非法返回 None。
 
-    EPay 实际会回传最多 4 位小数（如 20.0000），故接受 1–4 位并用
-    quantize 四舍五入到分，避免二进制浮点导致的 *100 误差。
+    允许 20.0000 / 9.990 这样的额外尾零，分以下存在非零数字则拒绝。
+    使用整数解析，不受 Decimal 上下文精度影响，也不四舍五入。
     """
-    if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,4})?", text):
+    if len(text) > 64 or not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,4})?", text):
         return None
-    cents = (Decimal(text) * 100).quantize(Decimal("1"))
-    return int(cents)
+    whole, _, fraction = text.partition(".")
+    if any(digit != "0" for digit in fraction[2:]):
+        return None
+    cents = int(whole) * 100 + int((fraction + "00")[:2])
+    return cents if cents <= 2**63 - 1 else None  # 金额必须能存入 SQLite INTEGER
 
 
 class EPayClient:

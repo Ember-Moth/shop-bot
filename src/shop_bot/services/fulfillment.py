@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -13,12 +14,40 @@ from aiogram.types import BufferedInputFile
 
 from ..db import Database
 from ..logging_config import get_logger
-from ..models import OrderStatus, PurchaseState
-from .esim_media import delivery_esims, qr_png
+from ..models import Order, OrderStatus, PurchaseState
+from ..telegram_text import text_units
+from .esim_media import EsimMedia, delivery_esims, qr_png
 from .purchasing import Purchaser, split_payload_chunks
 
 logger = get_logger(__name__)
 RECOVERY_INTERVAL = 5
+# 更改步骤顺序、数量或载荷含义时必须递增，不能复用旧方案的 cursor。
+NOTIFICATION_PLAN_VERSION = 1
+
+
+@dataclass(frozen=True)
+class NotificationStep:
+    text: str
+    photo: EsimMedia | None = None
+    photo_index: int = 0
+
+
+def notification_steps(order: Order, esims: list[EsimMedia]) -> list[NotificationStep]:
+    steps = [NotificationStep(f"🎉 你的订单 #{order.id} 已发货！")]
+    if not esims:
+        steps.extend(NotificationStep(text) for text in split_payload_chunks(order.payload or ""))
+        return steps
+    for index, esim in enumerate(esims):
+        label = f"eSIM {index + 1}/{len(esims)}"
+        heading = f"{label}\n\nICCID: {esim.iccid[:80]}"
+        caption = f"{heading}\nLPA: {esim.lpa}\n\n扫码或按 LPA 安装码安装"
+        if text_units(caption) <= 1024:
+            steps.append(NotificationStep(caption, esim, index))
+        else:
+            steps.append(NotificationStep(f"{heading}\n\n完整 LPA 安装码见下一条消息。", esim, index))
+            # LPA 已限制为 2000 UTF-8 字节，单独发送可完整保留且不会超过消息上限。
+            steps.append(NotificationStep(f"订单 #{order.id} · {label}\n完整 LPA 安装码：\n{esim.lpa}"))
+    return steps
 
 
 async def notify_owner(
@@ -55,12 +84,10 @@ async def notify_owner(
         owner = await db.get_user(order.user_id)
         if owner is None:
             return False
-        header = f"🎉 你的订单 #{order.id} 已发货！"
         try:
             # 收件人只从持久化订单取，不能使用命令所在群聊或查询者身份。
             # eSIM 订单：头部文本 1 条 + 每张 eSIM 一条图文（二维码图 + ICCID/LPA 进 caption）。
             # 非 eSIM（兑换券/激活等）：头部 + 文本货品分条。每步各存进度，断点续发不重购。
-            chunks = split_payload_chunks(order.payload) if order.payload else []
             esims = (
                 delivery_esims(order.delivery_esims, order.payload, order.quantity)
                 if (
@@ -71,32 +98,27 @@ async def notify_owner(
                 )
                 else []
             )
-            # 步骤序列：eSIM 时 texts 只含头部；非 eSIM 时 texts 含头部+货品分块
-            texts = [header] if esims else [header, *chunks]
-            cursor = 0 if resend else order.notification_cursor
-            total = len(texts) + len(esims)
+            steps = notification_steps(order, esims)
+            prepared = await db.prepare_notification(order.id, NOTIFICATION_PLAN_VERSION)
+            if prepared is None:
+                return False
+            cursor = prepared.notification_cursor
+            total = len(steps)
             if not 0 <= cursor <= total:
                 logger.warning("invalid notification progress", extra={"order_id": order.id})
                 return False
             for step in range(cursor, total):
                 if runtime is not None:
                     runtime.beat("recovery")
-                if step < len(texts):
-                    await bot.send_message(owner.telegram_id, texts[step], parse_mode=None)
+                item = steps[step]
+                if item.photo is None:
+                    await bot.send_message(owner.telegram_id, item.text, parse_mode=None)
                 else:
-                    index = step - len(texts)
-                    esim = esims[index]
-                    png = await asyncio.to_thread(qr_png, esim.lpa)
-                    caption = (
-                        f"eSIM {index + 1}/{len(esims)}\n\n"
-                        f"ICCID: {esim.iccid[:80]}\n"
-                        f"LPA: {esim.lpa}\n\n"
-                        "扫码或按 LPA 安装码安装"
-                    )
+                    png = await asyncio.to_thread(qr_png, item.photo.lpa)
                     await bot.send_photo(
                         owner.telegram_id,
-                        BufferedInputFile(png, filename=f"esim-{order.id}-{index + 1}.png"),
-                        caption=caption[:1024],
+                        BufferedInputFile(png, filename=f"esim-{order.id}-{item.photo_index + 1}.png"),
+                        caption=item.text,
                         parse_mode=None,
                         request_timeout=20,
                     )
