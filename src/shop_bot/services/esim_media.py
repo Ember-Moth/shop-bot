@@ -27,9 +27,10 @@ def delivery_esims(serialized: str | None, payload: str | None, quantity: int) -
             raise ValueError("invalid stored esim count")
     else:
         # 兼容旧订单：只识别本项目原有格式，其他商品/模拟货品保持文本交付。
+        # 二维码 URL 行在早期版本存在、现已移除，故设为可选以兼容新旧 payload。
         records = []
         for block in (payload or "").split("\n\n"):
-            match = re.fullmatch(r"\[\d+\]\nICCID: ([^\r\n]+)\nLPA: ([^\r\n]+)\n二维码: [^\r\n]+", block)
+            match = re.fullmatch(r"\[\d+\]\nICCID: ([^\r\n]+)\nLPA: ([^\r\n]+)(?:\n二维码: [^\r\n]+)?", block)
             if match:
                 records.append({"iccid": match[1], "lpa": match[2]})
         if not records:

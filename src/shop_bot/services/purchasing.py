@@ -93,8 +93,7 @@ def _esim_block(index: int, esim: dict[str, Any]) -> str:
         lines.append(f"ICCID: {esim['iccid']}")
     if esim.get("lpa"):
         lines.append(f"LPA: {esim['lpa']}")
-    if esim.get("qrCode"):
-        lines.append(f"二维码: {esim['qrCode']}")
+    # 二维码 URL 不入文本：买家已收到本地生成的二维码图片，URL 会过期且冗余
     return "\n".join(lines)
 
 

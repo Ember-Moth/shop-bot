@@ -435,7 +435,14 @@ async def test_multi_esim_notification_sends_in_chunks(*, db, user, commbitz_pur
     _details_mock(httpx_mock, count=100)
     order = await commbitz_purchaser.fulfill(db, order.id)
     assert order is not None and order.payload
-    assert await notify_owner(db, bot, order.id)
+    # 分块逻辑按消息长度切分；移除二维码 URL 后 100 条变短，用 300 条强制分多条
+    order2 = await orders.create_order(db, user.id, product, 300)
+    await orders.mark_paid(db, commbitz_purchaser, order2.id)
+    httpx_mock.add_response(json=_create_ok("up-2"))
+    _details_mock(httpx_mock, count=300)
+    order2 = await commbitz_purchaser.fulfill(db, order2.id)
+    assert order2 is not None and order2.payload
+    assert await notify_owner(db, bot, order2.id)
     goods_messages = [m for m in bot.session.sent if "ICCID" in (getattr(m, "text", "") or "")]
     assert len(goods_messages) > 1  # 分条发送
     assert all(len(getattr(m, "text", "")) <= 4096 for m in bot.session.sent)
