@@ -6,7 +6,7 @@ from aiogram.fsm.storage.base import StorageKey
 from aiosqlite.context import Result
 
 from shop_bot.db import Database, FSMStorage
-from shop_bot.models import OrderStatus
+from shop_bot.models import OrderStatus, Product
 from shop_bot.services import orders
 from shop_bot.services.purchasing import DemoPurchaser
 
@@ -139,3 +139,28 @@ async def test_migration_keeps_complete_old_session_and_adds_order_columns(tmp_p
             assert await db.list_recovery_orders() == []
         finally:
             await db.close()
+
+
+async def test_recovery_indexes_created_and_scan_correct(tmp_path):
+    """迁移创建恢复/监控覆盖索引；UNION 恢复扫描各分支命中正确订单（语义不变）。"""
+    path = tmp_path / "idx.db"
+    db = Database(str(path))
+    await db.connect()
+    try:
+        async with db.connection() as conn:
+            async with conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'") as cur:
+                names = {r[0] for r in await cur.fetchall()}
+        assert "idx_orders_status_notify" in names
+        assert "idx_purchases_state_updated" in names
+
+        # 造两类订单：paid 待履约（应命中）、pending 待支付（不应命中）
+        user = await db.upsert_user(1, "u")
+        await db.seed_products([Product(1, "p", "", 100, "USD")])
+        o_paid = await db.create_order(user.id, 1, 1, 100, "USD")
+        await db.transition_order(o_paid.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
+        o_pending = await db.create_order(user.id, 1, 1, 100, "USD")
+        recovered_ids = {o.id for o in await db.list_recovery_orders()}
+        assert o_paid.id in recovered_ids
+        assert o_pending.id not in recovered_ids
+    finally:
+        await db.close()

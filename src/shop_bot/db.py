@@ -278,6 +278,14 @@ class Database:
             ) WHERE status = 'delivered' AND payload IS NULL
         """)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_trade_no ON orders(trade_no)")
+        # 恢复扫描（list_recovery_orders）与运维监控按 status 过滤 paid/delivered 订单；
+        # 覆盖索引含 notification_pending/updated_at，避免回表与对 delivered 历史的全扫
+        await conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_orders_status_notify
+            ON orders(status, notification_pending, updated_at, id)"""
+        )
+        # 运维监控按 state 过滤 purchases 并按 updated_at 判断停滞
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_purchases_state_updated ON purchases(state, updated_at)")
         async with conn.execute("PRAGMA table_info(purchases)") as cur:
             purchase_columns = {row["name"] for row in await cur.fetchall()}
         if "kyc_documents" not in purchase_columns:
@@ -1294,17 +1302,24 @@ class Database:
 
     async def list_recovery_orders(self) -> list[Order]:
         """恢复候选：待履约的 paid 订单、未通知的已交付订单、以及
-        已交付但采购未落终态的历史残留（审计 P2：中断后状态必须可收敛）。"""
+        已交付但采购未落终态的历史残留（审计 P2：中断后状态必须可收敛）。
+
+        用 UNION 拆三支：OR 会让 SQLite 放弃索引全表扫，拆开后每支各自走 status 索引。
+        """
         rows = await self._all(
-            """SELECT * FROM orders WHERE status = 'paid'
-            OR (status IN ('delivered', 'refunded') AND notification_pending = 1)
-            OR (status = 'delivered' AND EXISTS (
-                SELECT 1 FROM purchases WHERE purchases.order_id = orders.id
-                AND purchases.state NOT IN ('rejected', 'submission_unknown')
-                AND (purchases.state != 'fulfilled'
-                    OR (purchases.upstream_request_id IS NOT NULL
-                        AND purchases.upstream_request_id IS NOT orders.upstream_ref))
-            )) ORDER BY id"""
+            """SELECT * FROM (
+                SELECT * FROM orders WHERE status = 'paid'
+                UNION
+                SELECT * FROM orders WHERE status IN ('delivered', 'refunded') AND notification_pending = 1
+                UNION
+                SELECT * FROM orders WHERE status = 'delivered' AND EXISTS (
+                    SELECT 1 FROM purchases WHERE purchases.order_id = orders.id
+                    AND purchases.state NOT IN ('rejected', 'submission_unknown')
+                    AND (purchases.state != 'fulfilled'
+                        OR (purchases.upstream_request_id IS NOT NULL
+                            AND purchases.upstream_request_id IS NOT orders.upstream_ref))
+                )
+            ) ORDER BY id"""
         )
         return [_row_to_order(r) for r in rows]
 
