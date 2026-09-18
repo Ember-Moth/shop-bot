@@ -229,6 +229,26 @@ async def test_missing_id_records_upstream_message(*, db, esim_order, commbitz_p
     assert "Plan not found with SKU" in (purchase.last_error or "")
 
 
+async def test_missing_id_logs_response_shape(*, db, esim_order, commbitz_purchaser, httpx_mock, caplog):
+    """缺 _id 时日志记录脱敏后的响应结构（键名/类型），用于定位上游字段改名/挪层。"""
+    body = _create_ok()
+    inner = body["data"]["data"]
+    inner.pop("_id")
+    inner["requestId"] = "abc"  # 假设上游把单号叫 requestId
+    inner["esims"] = [{"iccid": "8901", "lpa": "LPA:SECRET"}]  # 敏感值不应进日志
+    httpx_mock.add_response(json=body)
+    with caplog.at_level(logging.WARNING, logger="shop_bot.services.purchasing"):
+        await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
+        await commbitz_purchaser.fulfill(db, esim_order.id)
+    record = next(r for r in caplog.records if "missing _id" in r.getMessage())
+    keys = record.upstream_keys
+    # 结构含改名的 requestId 与嵌套层级
+    assert keys["data"]["data"]["requestId"] == "str"
+    assert keys["data"]["data"]["esims"] == [{"iccid": "str", "lpa": "str"}]
+    # 敏感值不落日志
+    assert "LPA:SECRET" not in caplog.text and "8901" not in caplog.text
+
+
 async def test_upstream_failure_status_auto_refunds(*, db, user, esim_order, commbitz_purchaser, httpx_mock):
     """已建单但上游明确宣告失败：货不会发，自动退款到余额并关单（平台成本与上游对账另算）。"""
     httpx_mock.add_response(json=_create_ok())

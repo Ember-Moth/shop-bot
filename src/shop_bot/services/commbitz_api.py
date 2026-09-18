@@ -74,6 +74,20 @@ class Plan:
     override_price: float | None = None
 
 
+def _shape(value: Any, depth: int = 0) -> Any:
+    """递归提取响应结构（键名与类型），值一律替换为类型占位，不携带任何真实数据。
+
+    用于「缺 _id」诊断：只看字段名和嵌套层级，判断上游把单号字段改名/挪层。
+    """
+    if depth > 6:
+        return "…"
+    if isinstance(value, dict):
+        return {str(k): _shape(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_shape(value[0], depth + 1)] if value else []
+    return type(value).__name__
+
+
 def parse_plan(raw: dict[str, Any]) -> Plan:
     """从 /v1/plans 列表项解析套餐。报价字段优先级未定义，全部保留由人工定价。"""
     if "_id" not in raw:
@@ -272,6 +286,9 @@ class CommbitzClient:
             outer_message = body.get("data", {}).get("message")
             if outer_message:
                 inner["_upstreamMessage"] = str(outer_message)
+            # 诊断：记录脱敏后的完整响应结构（键名/层级，不含证件/货品等敏感值），
+            # 用于定位上游返回的 _id 是否被改名或换了层级
+            inner["_upstreamKeys"] = _shape(body)
         return inner
 
     async def submit_kyc_documents_json(self, request_id: str, documents: dict[str, str]) -> dict[str, Any]:

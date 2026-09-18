@@ -381,9 +381,14 @@ class CommbitzPurchaser:
         upstream_id = created.get("_id")
         if not upstream_id:
             upstream_message = created.get("_upstreamMessage")
+            upstream_keys = created.get("_upstreamKeys")
             logger.warning(
                 "purchase response missing _id",
-                extra={"order_id": order.id, "upstream_message": upstream_message},
+                extra={
+                    "order_id": order.id,
+                    "upstream_message": upstream_message,
+                    "upstream_keys": upstream_keys,
+                },
             )
             detail = f"response missing _id: {upstream_message}" if upstream_message else "response missing _id"
             await db.transition_purchase(

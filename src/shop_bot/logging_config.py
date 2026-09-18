@@ -27,7 +27,7 @@ class JSONFormatter(logging.Formatter):
             "msg": record.getMessage(),
         }
         # 业务上下文字段（通过 extra 传入）
-        for key in ("order_id", "user_id", "product_id", "upstream_ref", "error"):
+        for key in ("order_id", "user_id", "product_id", "upstream_ref", "error", "upstream_message", "upstream_keys"):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
         if record.exc_info:
