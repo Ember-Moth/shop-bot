@@ -149,8 +149,13 @@ async def test_whois_searches_by_telegram_id_username_and_display_name(db, bot):
     await db.upsert_user(222, "bob", None)
     msg = menu_message_of(bot)
     # (查询词, 期望命中的 TG ID 子串, 是否应命中)
-    for query, hit, found in (("111", "TG 111", True), ("alice", "@alice", True),
-                              ("丽丝", "爱丽丝", True), ("bob", "TG 222", True), ("nobody", "", False)):
+    for query, hit, found in (
+        ("111", "TG 111", True),
+        ("alice", "@alice", True),
+        ("丽丝", "爱丽丝", True),
+        ("bob", "TG 222", True),
+        ("nobody", "", False),
+    ):
         await admin.cmd_whois(msg.model_copy(update={"text": f"/whois {query}"}), db)
         text = bot.session.sent[-1].text or ""
         if found:

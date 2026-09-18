@@ -266,7 +266,13 @@ class CommbitzClient:
         if notes:
             payload["notes"] = notes
         body = await self._request("POST", "/v1/request", json=payload)
-        return dict(body["data"]["data"])
+        inner = dict(body["data"]["data"])
+        # 无 _id 时带上外层 message（如 "Plan not found with SKU: ..."），便于人工核对定位原因
+        if "_id" not in inner:
+            outer_message = body.get("data", {}).get("message")
+            if outer_message:
+                inner["_upstreamMessage"] = str(outer_message)
+        return inner
 
     async def submit_kyc_documents_json(self, request_id: str, documents: dict[str, str]) -> dict[str, Any]:
         """为已有订单补交 KYC 证件（JSON 模式，证件为已上传的 HTTPS URL）。

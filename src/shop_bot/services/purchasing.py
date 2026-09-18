@@ -380,12 +380,17 @@ class CommbitzPurchaser:
             return
         upstream_id = created.get("_id")
         if not upstream_id:
-            logger.warning("purchase response missing _id", extra={"order_id": order.id})
+            upstream_message = created.get("_upstreamMessage")
+            logger.warning(
+                "purchase response missing _id",
+                extra={"order_id": order.id, "upstream_message": upstream_message},
+            )
+            detail = f"response missing _id: {upstream_message}" if upstream_message else "response missing _id"
             await db.transition_purchase(
                 purchase.id,
                 PurchaseState.SUBMISSION_UNKNOWN,
                 from_state=PurchaseState.SUBMITTING,
-                last_error="response missing _id",
+                last_error=detail,
             )
             return
         # 立即持久化上游 ID（规则 4）；INR/强制 KYC 订单 kycStatus=pending 时先等证件

@@ -358,9 +358,7 @@ class Database:
         async with self.connection() as conn, conn.execute(sql, params) as cur:
             return list(await cur.fetchall())
 
-    async def upsert_user(
-        self, telegram_id: int, username: str | None, display_name: str | None = None
-    ) -> User:
+    async def upsert_user(self, telegram_id: int, username: str | None, display_name: str | None = None) -> User:
         async with self.transaction() as conn:
             async with conn.execute(
                 """INSERT INTO users (telegram_id, username, display_name) VALUES (?, ?, ?)
@@ -391,9 +389,7 @@ class Database:
         )
         return [_row_to_user(r) for r in rows]
 
-    async def refresh_user_profile(
-        self, telegram_id: int, username: str | None, display_name: str | None
-    ) -> None:
+    async def refresh_user_profile(self, telegram_id: int, username: str | None, display_name: str | None) -> None:
         """已注册用户的资料刷新（改名/改昵称）；未注册则忽略（由 /start 建档）。"""
         async with self.transaction() as conn:
             await conn.execute(

@@ -216,6 +216,19 @@ async def test_missing_id_in_success_response_becomes_unknown(*, db, esim_order,
     assert purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN
 
 
+async def test_missing_id_records_upstream_message(*, db, esim_order, commbitz_purchaser, httpx_mock):
+    """上游成功状态但缺 _id 且带 message（如 Plan not found）时，last_error 记录该消息便于核对。"""
+    body = _create_ok()
+    body["data"]["data"].pop("_id")
+    body["data"]["message"] = "Plan not found with SKU: eSim-PB-US-US-50M-30"
+    httpx_mock.add_response(json=body)
+    await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
+    await commbitz_purchaser.fulfill(db, esim_order.id)
+    purchase = await db.get_purchase_by_order(esim_order.id)
+    assert purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN
+    assert "Plan not found with SKU" in (purchase.last_error or "")
+
+
 async def test_upstream_failure_status_auto_refunds(*, db, user, esim_order, commbitz_purchaser, httpx_mock):
     """已建单但上游明确宣告失败：货不会发，自动退款到余额并关单（平台成本与上游对账另算）。"""
     httpx_mock.add_response(json=_create_ok())

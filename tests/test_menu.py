@@ -166,9 +166,7 @@ async def test_cmd_start_records_username_and_display_name(db, bot):
     user = await db.get_user_by_telegram_id(42)
     assert user.username is None and user.display_name == "Tester"
     renamed = menu_message(bot, "/start").model_copy(
-        update={
-            "from_user": User(id=42, is_bot=False, first_name="伟", last_name="张", username="zhangwei")
-        }
+        update={"from_user": User(id=42, is_bot=False, first_name="伟", last_name="张", username="zhangwei")}
     )
     await start.cmd_start(renamed, db, context)
     user = await db.get_user_by_telegram_id(42)
