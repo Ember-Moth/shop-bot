@@ -18,7 +18,7 @@ from ..db import Database
 from ..logging_config import get_logger
 from ..models import Order, OrderStatus, Purchase, PurchaseState
 from .commbitz_api import CommbitzError
-from .esim_media import MAX_LPA_BYTES, serialize_esims
+from .esim_media import MAX_LPA_BYTES, normalize_msisdn, serialize_esims
 
 logger = get_logger(__name__)
 
@@ -91,6 +91,8 @@ def _esim_block(index: int, esim: dict[str, Any]) -> str:
     lines = [f"[{index}]"]
     if esim.get("iccid"):
         lines.append(f"ICCID: {esim['iccid']}")
+    if msisdn := normalize_msisdn(esim.get("msisdn")):
+        lines.append(f"MSISDN: {msisdn}")
     if esim.get("lpa"):
         lines.append(f"LPA: {esim['lpa']}")
     # 二维码 URL 不入文本：买家已收到本地生成的二维码图片，URL 会过期且冗余

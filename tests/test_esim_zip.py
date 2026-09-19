@@ -152,7 +152,7 @@ async def test_version_one_photo_progress_does_not_skip_archive(db, bot, old_cur
         )
     assert await notify_owner(db, bot, order_id)
     saved = await db.get_order(order_id)
-    assert saved.notification_plan_version == 2 and saved.notification_cursor == 1
+    assert saved.notification_plan_version == NOTIFICATION_PLAN_VERSION and saved.notification_cursor == 1
     assert len(documents(bot)) == 1 and gateway.create_calls == 1
 
 

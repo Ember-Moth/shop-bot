@@ -25,7 +25,7 @@ from .purchasing import Purchaser, split_payload_chunks
 logger = get_logger(__name__)
 RECOVERY_INTERVAL = 5
 # 更改步骤顺序、数量或载荷含义时必须递增，不能复用旧方案的 cursor。
-NOTIFICATION_PLAN_VERSION = 2
+NOTIFICATION_PLAN_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,8 @@ def notification_steps(order: Order, esims: list[EsimMedia]) -> list[Notificatio
             archive_steps.append(
                 NotificationStep(
                     f"🎉 订单 #{order.id} · 共 {len(esims)} 张 eSIM{part}\n"
-                    f"本包包含第 {start + 1}–{start + len(batch)} 张的二维码、ICCID 和完整 LPA。\n解压后按编号安装。",
+                    f"本包包含第 {start + 1}–{start + len(batch)} 张的二维码、号码、ICCID 和完整 LPA。\n"
+                    "解压后按编号安装。",
                     archive=batch,
                     archive_start=start,
                 )
@@ -59,7 +60,7 @@ def notification_steps(order: Order, esims: list[EsimMedia]) -> list[Notificatio
         return steps
     for index, esim in enumerate(esims):
         label = f"eSIM {index + 1}/{len(esims)}"
-        heading = f"{label}\n\nICCID: {esim.iccid[:80]}"
+        heading = f"{label}\n\n号码: {esim.number_text}\nICCID: {esim.iccid[:80]}"
         caption = f"{heading}\nLPA: {esim.lpa}\n\n扫码或按 LPA 安装码安装"
         if text_units(caption) <= 1024:
             steps.append(NotificationStep(caption, esim, index))

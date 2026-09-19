@@ -189,9 +189,9 @@ EPay 网关 GET 或 POST 到 `/payment/callback`，form-urlencoded，带 MD5 签
 
 ## eSIM 图片与压缩包通知
 
-`finalize_delivery` 同时保存文本货品和白名单字段组成的 ICCID/LPA JSON（`delivery_esims`），通知层只读取这份已核验的数据。二维码使用标准 QR，由 LPA 原文在内存中生成 PNG，作为 Telegram 图片上传；不下载二维码 URL，不把安装码写入日志或临时文件。
+`finalize_delivery` 同时保存文本货品和白名单字段组成的 ICCID/LPA/MSISDN JSON（`delivery_esims`），通知层只读取这份已核验的数据。二维码使用标准 QR，由 LPA 原文在内存中生成 PNG，作为 Telegram 图片上传；不下载二维码 URL，不把安装码写入日志或临时文件。
 
-单张订单发送订单提示和二维码与 ICCID/LPA 图文；图片说明放不下完整 LPA 时，另发完整文本。两张及以上发送 ZIP：每包最多 100 张，包内保存编号对应的 PNG、完整安装资料、纯 LPA 文本及 JSON 清单。多张订单不再逐张发送图文，也不额外发送独立头部消息。按 UTF-16 单位保守计数，不截断安装码。`notification_cursor` 保存成功步骤，`notification_plan_version` 标记步骤方案。失败后只续发尚未确认步骤；Telegram `retry_after` 写入 `notification_retry_at`，等待时间跨重启保留。全部发送完成才清除 `notification_pending`。Telegram 已发送但游标尚未写入时中断，仍可能重复最后一步，这是通知至少一次送达的边界，不会重新采购。
+单张订单发送订单提示和二维码与号码、ICCID/LPA 图文；图片说明放不下完整 LPA 时，另发完整文本。两张及以上发送 ZIP：每包最多 100 张，包内保存编号对应的 PNG、完整安装资料、纯 LPA 文本及 JSON 清单。多张订单不再逐张发送图文，也不额外发送独立头部消息。按 UTF-16 单位保守计数，不截断安装码。`notification_cursor` 保存成功步骤，`notification_plan_version` 标记步骤方案。失败后只续发尚未确认步骤；Telegram `retry_after` 写入 `notification_retry_at`，等待时间跨重启保留。全部发送完成才清除 `notification_pending`。Telegram 已发送但游标尚未写入时中断，仍可能重复最后一步，这是通知至少一次送达的边界，不会重新采购。
 
 主动补发重置游标；重绑清除旧图片 JSON、游标和等待时间。冻结采购、KYC 未放行、引用冲突仍不能发送图片。旧版标准文本格式可解析出 LPA 生成图片；已成功通知的历史订单不自动重发。
 
@@ -207,8 +207,11 @@ EPay 网关 GET 或 POST 到 `/payment/callback`，form-urlencoded，带 MD5 签
 
 金额以字符串分段和整数运算精确解析，接受 1–4 位小数中的额外尾零，拒绝非零的分以下部分、非法格式及超过 SQLite 整数范围的金额。商品回调、充值回调和主动查询共用该规则；拒绝时不写支付凭据、余额或采购任务。
 
-### ZIP 方案（版本 2）
+### ZIP 方案（当前版本 3）
 
 从逐张图文方案切换到 ZIP 后，发送方案版本提升为 2。旧版未完成通知会清零旧游标，使用已验证的原交付资料生成 ZIP；已完成的通知不自动重发，主动 `/query` 补发多张订单时使用 ZIP。每个分包单独推进 `notification_cursor`，后一包失败不会重发已经确认的前一包。
 
 压缩和二维码生成在后台线程中执行，每张完成后报告进度；一次只构建和上传一个最多 100 张的分包。文件与路径元数据可重复生成，路径固定为订单内序号；不写入临时文件，不下载远端二维码，不记录安装码。上传失败、Telegram 限流或文件超出安全大小限制时保持待通知状态，由恢复循环跟进；不会重新创建采购。
+
+
+版本 3 将可选的 `msisdn` 持久化并加入单张图文、ZIP 安装说明和清单。旧 JSON 缺少字段与新响应空值分别展示“历史订单未保存号码”和“上游未提供号码”。文本兼容解析支持可选 `MSISDN:` 行。新增号码可能改变图片说明是否需要拆分 LPA，因此升级方案版本，旧待通知游标重置；已完成通知不重发。
