@@ -899,7 +899,9 @@ class Database:
             """SELECT a.* FROM operator_alerts a LEFT JOIN alert_deliveries d
             ON d.alert_key = a.key AND d.admin_id = ?
             WHERE (a.active = 1 OR d.revision IS NOT NULL)
-            AND (d.revision IS NULL OR a.revision > d.revision OR (a.active = 1 AND d.last_sent <= ?))
+            AND (d.revision IS NULL OR a.revision > d.revision OR (
+                a.active = 1 AND a.key != 'stalled_orders' AND d.last_sent <= ?
+            ))
             ORDER BY COALESCE(d.last_sent, 0), a.key LIMIT 10""",
             (admin_id, now - cooldown),
         )

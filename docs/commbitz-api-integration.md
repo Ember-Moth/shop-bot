@@ -1317,3 +1317,15 @@ PATCH /distributor-api/v1/plans/{planId}/customer-price
 已有信息足以实现并测试转售 Bot 的正常流程：本店收款确认、上游采购请求、按 `_id` 查询交付结果、持久化货品、向买家私信，以及各类业务的输入和 KYC 处理。
 
 采购结果不明必须有人工核对入口；真实自动售卖启用前，仍需完成受控采购、扣款对账、交付和异常恢复验收。具体模块、状态和分阶段交付方案见 [转售 Bot 开发方案](reseller-bot-development.md)。
+
+
+### 16.7 2026-09-19：缺货、取消和退款的公开定义复核
+
+重新读取 Live/UAT 的 `swagger-ui-init.js`，两边均为 22 个路径、22 个操作。Live 现在也包含 `PATCH /v1/plans/{planId}/customer-price`；第 16 节前面的环境差异保留为当时核对记录。
+
+- 已有 `GET /v1/details/{id}` 查询上游订单/请求详情。
+- `POST /v1/request` 说明 eSIM/实体卡会自动检查库存并交给供应商处理，响应可能包含 `fulfillmentMethod`（inventory/vendor）与 `fulfillmentStatus`，但未列出后者完整枚举和退款含义。当前适配器主要判断 `status`，需结合实际详情核对，不能仅凭本地 `upstream_pending` 确认缺货。
+- 公开操作列表仍未提供取消订单、退款或冲正接口。
+- 文档没有给出可据以自动关单的完整缺货终态协议；不能将长时间 `pending` 或本地停滞告警解释为“未扣款”或“不会发货”。
+- 已创建但长期等待的订单，需要上游确认实际履约/取消和资金状态；本店钱包退款与上游退款是两个独立操作。
+- 管理员通知属于本店策略：`stalled_orders` 仅在首次出现、摘要变化和恢复时通知；不以重复私信替代上游订单核对。

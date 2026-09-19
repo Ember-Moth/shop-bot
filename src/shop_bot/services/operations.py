@@ -91,10 +91,14 @@ class Operations:
             self.runtime.beat("monitor")
             for alert in await self.db.pending_alerts(admin_id, time.time(), self.settings.alert_cooldown_seconds):
                 heading = "⚠️ 运维告警" if alert["active"] else "✅ 告警恢复"
+                hint = "/status 查看运行状态"
+                if alert["key"] == "stalled_orders" and alert["active"]:
+                    hint = "请核对上游订单；该提醒不代表采购已失败。\n相同待办不重复提醒，/orders paid 查看订单。"
                 try:
                     await self.bot.send_message(
                         admin_id,
-                        f"{heading} [{alert['key']}]\n{alert['summary']}\n/status 查看运行状态",
+                        f"{heading} [{alert['key']}]\n{alert['summary']}\n{hint}",
+                        parse_mode=None,
                         request_timeout=5,
                     )
                 except Exception as exc:

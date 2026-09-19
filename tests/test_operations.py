@@ -171,3 +171,55 @@ async def test_delivery_failure_does_not_mark_alert_as_sent(db, operations, bot)
     bot.session.fail_send = False
     await asyncio.gather(operations.deliver_alerts(), operations.deliver_alerts())
     assert len(await db._all("SELECT * FROM alert_deliveries")) == 2
+
+
+async def test_stalled_alert_only_notifies_on_change_and_recovery(db, operations, bot):
+    await db.set_alert("stalled_orders", "付款后履约/退款长时间未完成：1 单（#13）")
+    await operations.deliver_alerts()
+    assert len(bot.session.sent) == 2
+    assert all("相同待办不重复提醒" in message.text for message in bot.session.sent)
+    assert all(message.parse_mode is None for message in bot.session.sent)
+    async with db.transaction() as conn:
+        await conn.execute("UPDATE alert_deliveries SET last_sent = 0")
+    restarted = Operations(
+        db,
+        bot,
+        [700, 701],
+        operations.settings,
+        runtime=operations.runtime,
+        backups=operations.backups,
+    )
+    # 跨冷却周期与服务实例重建，未变的待办也不重发。
+    await restarted.deliver_alerts()
+    assert len(bot.session.sent) == 2
+    await db.set_alert("stalled_orders", "付款后履约/退款长时间未完成：2 单（#13, #14）")
+    await restarted.deliver_alerts()
+    assert len(bot.session.sent) == 4
+    await db.set_alert("stalled_orders", None)
+    await restarted.deliver_alerts()
+    assert len(bot.session.sent) == 6
+    assert all("告警恢复" in message.text for message in bot.session.sent[-2:])
+    await restarted.deliver_alerts()
+    assert len(bot.session.sent) == 6
+    await db.set_alert("stalled_orders", "付款后履约/退款长时间未完成：1 单（#15）")
+    await restarted.deliver_alerts()
+    assert len(bot.session.sent) == 8
+
+
+async def test_stalled_alert_failure_retries_and_system_alert_keeps_reminding(db, operations, bot):
+    await db.set_alert("stalled_orders", "订单 #13 待核对")
+    bot.session.fail_send = True
+    await operations.deliver_alerts()
+    assert await db._all("SELECT * FROM alert_deliveries") == []
+    bot.session.sent.clear()
+    bot.session.fail_send = False
+    await operations.deliver_alerts()
+    assert len(bot.session.sent) == 2
+    await db.set_alert("backup", "备份失败")
+    await operations.deliver_alerts()
+    assert len(bot.session.sent) == 4
+    async with db.transaction() as conn:
+        await conn.execute("UPDATE alert_deliveries SET last_sent = 0")
+    await operations.deliver_alerts()
+    assert len(bot.session.sent) == 6
+    assert all("备份失败" in message.text for message in bot.session.sent[-2:])
