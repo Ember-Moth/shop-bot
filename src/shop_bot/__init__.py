@@ -97,6 +97,11 @@ async def amain() -> None:
         db = Database(settings.database_path)
         await db.connect()
         resources.push_async_callback(db.close)
+        routes = settings.business_notifications.resolve_routes(settings.admin_ids)
+        for event, recipients in routes.items():
+            if not recipients:
+                logger.warning("business notification event %s has no recipients; configure its route", event)
+        await db.configure_business_notifications(routes)
         if not settings.upstream.provider and not await db.list_all_products():
             await db.seed_products(DEMO_PRODUCTS)
 

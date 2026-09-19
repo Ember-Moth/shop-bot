@@ -17,6 +17,7 @@ from ..logging_config import get_logger
 from ..models import Order, OrderStatus, PurchaseState
 from ..telegram_text import text_units
 from ..work_queue import WorkItem
+from .business_notifications import notify_business
 from .esim_media import MAX_ESIMS_PER_ARCHIVE, EsimMedia, delivery_esims, esim_zip, qr_png
 from .notification_transport import NotificationThrottle
 from .purchasing import Purchaser, split_payload_chunks
@@ -273,6 +274,8 @@ async def process_work(
                 else:
                     done = await notify_owner(db, bot, item.entity_id, runtime=runtime, throttle=throttle)
                 failed = not done
+            elif bot is not None and item.kind == "business":
+                done = await notify_business(db, bot, item.entity_id, throttle)
             elif bot is not None and item.kind == "wallet":
                 done = await notify_wallet(db, bot, item.entity_id, throttle)
     except TelegramRetryAfter as exc:
@@ -315,7 +318,7 @@ async def recover_once(
     results = await asyncio.gather(*(_drain_work(db, purchaser, bot, "purchase", runtime) for _ in range(3)))
     if bot is not None:
         results += await asyncio.gather(
-            *(_drain_work(db, purchaser, bot, kind, runtime) for kind in ("delivery", "delivery", "wallet"))
+            *(_drain_work(db, purchaser, bot, kind, runtime) for kind in ("delivery", "delivery", "wallet", "business"))
         )
     return sum(results)
 
@@ -341,7 +344,7 @@ async def recovery_loop(db: Database, purchaser: Purchaser, bot: Bot, runtime: R
     throttle = NotificationThrottle()
     # 固定工作协程，不为整个积压队列一次性创建 Task。异常会传到主进程监督器。
     async with asyncio.TaskGroup() as group:
-        for kind in ("purchase", "purchase", "purchase", "delivery", "delivery", "wallet"):
+        for kind in ("purchase", "purchase", "purchase", "delivery", "delivery", "wallet", "business"):
             group.create_task(_work_loop(db, purchaser, bot, kind, throttle, runtime=runtime))
         while True:
             if runtime is not None:

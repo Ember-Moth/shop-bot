@@ -11,6 +11,7 @@ from weakref import WeakValueDictionary
 import aiosqlite
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
 
+from .business_notifications import migrate_business_notifications
 from .logging_config import get_logger
 from .models import (
     BalanceTransaction,
@@ -198,6 +199,7 @@ class Database:
             async with self.transaction() as conn:
                 await self._migrate(conn)
                 await migrate_work_queue(conn)
+                await migrate_business_notifications(conn)
         except BaseException:
             await self.close()
             raise
@@ -852,6 +854,12 @@ class Database:
                 (f"-{stale_seconds} seconds",),
                 "付款后履约/退款长时间未完成",
             ),
+            "business_notifications": (
+                """SELECT entity_id AS id, COUNT(*) OVER() AS total FROM work_items
+                WHERE kind = 'business' AND created_at <= datetime('now', ?) ORDER BY id LIMIT 5""",
+                (f"-{notification_seconds} seconds",),
+                "业务广播持续未送达（通知任务编号）",
+            ),
             "wallet_notifications": (
                 """SELECT entity_id AS id, COUNT(*) OVER() AS total FROM work_items
                 WHERE kind = 'wallet' AND created_at <= datetime('now', ?) ORDER BY id LIMIT 5""",
@@ -1403,6 +1411,35 @@ class Database:
                     (time.time() + delay, item.id, item.revision),
                 )
             await conn.execute("UPDATE work_items SET claimed = 0 WHERE id = ?", (item.id,))
+
+    async def configure_business_notifications(self, routes: dict[str, list[int]]) -> None:
+        """启动时应用路由；撤销的收件人停止收到积压消息，重新启用不回放旧事件。"""
+        async with self.transaction() as conn:
+            await conn.execute("DELETE FROM business_routes")
+            await conn.executemany(
+                "INSERT INTO business_routes (event, chat_id) VALUES (?, ?)",
+                [(event, chat_id) for event, chat_ids in routes.items() for chat_id in dict.fromkeys(chat_ids)],
+            )
+            await conn.execute("""UPDATE business_deliveries SET state = 'skipped'
+                WHERE state = 'pending' AND NOT EXISTS (
+                    SELECT 1 FROM business_routes r
+                    WHERE r.event = business_deliveries.event AND r.chat_id = business_deliveries.chat_id
+                )""")
+            await conn.execute("""DELETE FROM work_items WHERE kind = 'business' AND EXISTS (
+                SELECT 1 FROM business_deliveries d WHERE d.id = work_items.entity_id AND d.state != 'pending'
+            )""")
+
+    async def get_business_delivery(self, delivery_id: int) -> dict[str, Any] | None:
+        row = await self._one("SELECT * FROM business_deliveries WHERE id = ?", (delivery_id,))
+        return dict(row) if row else None
+
+    async def mark_business_sent(self, delivery_id: int) -> None:
+        async with self.transaction() as conn:
+            await conn.execute(
+                """UPDATE business_deliveries SET state = 'sent', sent_at = datetime('now')
+                WHERE id = ? AND state = 'pending'""",
+                (delivery_id,),
+            )
 
     async def get_wallet_notification(self, transaction_id: int) -> dict[str, Any] | None:
         row = await self._one(

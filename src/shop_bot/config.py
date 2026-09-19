@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, StrictInt, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from .money import normalize_currency
@@ -67,6 +67,44 @@ class FeaturesSettings(BaseSettings):
     kyc: bool = True  # 是否向买家开放 KYC 证件补交入口（按钮/命令）
 
 
+BusinessEvent = Literal["order_paid", "topup_paid"]
+
+
+def default_business_events() -> list[BusinessEvent]:
+    return ["order_paid", "topup_paid"]
+
+
+class BusinessNotificationRoute(BaseModel):
+    enabled: bool = True
+    notify_admins: bool = False
+    chat_ids: list[StrictInt] = Field(default_factory=list)
+
+    @field_validator("chat_ids")
+    @classmethod
+    def validate_chat_ids(cls, values: list[int]) -> list[int]:
+        if any(value == 0 for value in values):
+            raise ValueError("notification chat ID must not be zero")
+        return list(dict.fromkeys(values))
+
+
+class BusinessNotificationsSettings(BusinessNotificationRoute):
+    notify_admins: bool = True
+    events: list[BusinessEvent] = Field(default_factory=default_business_events)
+    routes: dict[BusinessEvent, BusinessNotificationRoute] = Field(default_factory=dict)
+
+    def resolve_routes(self, admin_ids: list[int]) -> dict[str, list[int]]:
+        """事件配置完整覆盖公共目标，避免意外把私聊通知广播到公共频道。"""
+        if not self.enabled:
+            return {}
+        result: dict[str, list[int]] = {}
+        for event in self.events:
+            route = self.routes.get(event, self)
+            if route.enabled:
+                targets = [*(admin_ids if route.notify_admins else []), *route.chat_ids]
+                result[event] = list(dict.fromkeys(targets))
+        return result
+
+
 class LoggingSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SHOP_BOT_LOGGING_")
 
@@ -110,6 +148,7 @@ class Settings(BaseSettings):
     features: FeaturesSettings = Field(default_factory=FeaturesSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     operations: OperationsSettings = Field(default_factory=OperationsSettings)
+    business_notifications: BusinessNotificationsSettings = Field(default_factory=BusinessNotificationsSettings)
     backup: BackupSettings = Field(default_factory=BackupSettings)
 
     @classmethod

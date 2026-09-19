@@ -26,10 +26,17 @@ epay:                        # EPay（易支付）网关配置
 features:                    # 功能开关
   kyc: true                  # 是否向买家开放 KYC 证件补交（按钮与 /kyc 命令）
 
+business_notifications:
+  enabled: true
+  notify_admins: true        # 私信所有 admin_ids；与下面频道/群组同时发送
+  chat_ids: []               # 填入频道/群组数字 ID，例如 [-1001234567890]
+  events: [order_paid, topup_paid] # 仅订单付款、充值到账；不广播未付款单
+  routes: {}                # 按事件覆盖目标，示例见 docs/operations.md
+
 operations:
   alerts_enabled: true       # 运维告警私信 admin_ids；管理员需先与 Bot 发起私聊
   check_interval_seconds: 30
-  alert_cooldown_seconds: 1800 # 相同未恢复问题每 30 分钟提醒；新变化/恢复立即通知
+  alert_cooldown_seconds: 1800 # 其他未恢复问题每 30 分钟提醒；订单停滞仅在变化/恢复时通知
   stale_order_seconds: 900   # 履约/退款停滞 15 分钟触发告警，正常等证件/物流不计入
   notification_stale_seconds: 300
   worker_stale_seconds: 180
