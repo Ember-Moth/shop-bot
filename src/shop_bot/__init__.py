@@ -17,6 +17,7 @@ from .models import Product
 from .services.backup import BackupManager
 from .services.catalog_sync import sync_catalog
 from .services.commbitz_api import CommbitzClient, CommbitzError, base_url_for
+from .services.daily_report import daily_report_loop
 from .services.epay import EPayClient, EPayConfig
 from .services.fulfillment import recovery_loop
 from .services.operations import Operations, RuntimeState
@@ -168,6 +169,8 @@ async def amain() -> None:
         runtime.tasks["monitor"] = asyncio.create_task(operations.run())
         if settings.backup.enabled:
             runtime.tasks["backup"] = asyncio.create_task(backups.run())
+        if settings.operations.daily_report and settings.admin_ids:
+            runtime.tasks["report"] = asyncio.create_task(daily_report_loop(db, bot, settings, runtime))
         for name, task in runtime.tasks.items():
             runtime.beat(name)
             resources.push_async_callback(_stop_task, task)

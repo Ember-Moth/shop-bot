@@ -123,6 +123,7 @@ class OperationsSettings(BaseSettings):
     notification_stale_seconds: int = Field(default=300, ge=1)
     worker_stale_seconds: float = Field(default=180, ge=1)
     health_timeout_seconds: float = Field(default=2, gt=0, le=30)
+    daily_report: bool = True  # 每日 0 点（服务器本地时区）私信管理员昨日流水
 
 
 class BackupSettings(BaseSettings):

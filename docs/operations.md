@@ -35,6 +35,12 @@ curl --fail --max-time 5 https://bot.example.com/readyz
 
 部署时将 `/readyz` 接入服务器之外的可用性监控。进程未启动、主机断网或 Telegram 自身不可用时，进程内告警无法保证送达。
 
+## 每日流水报表
+
+`operations.daily_report: true`（默认开启）时，每天 0 点（服务器本地时区）向 `admin_ids` 私信昨日流水汇总：订单按创建日统计各状态数量、EPay 外部实收（商品款/充值分列）、钱包各类变动净额（充值/消费/退款/调账/补偿）、当前钱包总余额。多币种分列，互不换算。
+
+送达成功才登记 `daily_report_log`，进程重启后不会重复发送同一天的报表；若 0 点时发送失败（如 Telegram 不可用），按 15/30/60 分钟间隔重试，重启后也会补发未送达的那天。窗口按服务器本地时区计算「昨天」并换算为 UTC 与库内时间比较；跨时区部署需确认服务器时区（`timedatectl`）。
+
 ## 管理员告警
 
 `operations.alerts_enabled: true` 时，发送到 `admin_ids` 中每位管理员的私聊；收件人必须先与 Bot 发起会话。没有收件人时启动日志会提示，`/status` 显示收件人数。

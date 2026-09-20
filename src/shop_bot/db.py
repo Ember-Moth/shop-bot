@@ -107,6 +107,11 @@ CREATE TABLE IF NOT EXISTS operator_alerts (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS daily_report_log (
+    report_date TEXT PRIMARY KEY,  -- 报表覆盖的本地日期（YYYY-MM-DD），防止同日重复发送
+    sent_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS alert_deliveries (
     alert_key TEXT NOT NULL,
     admin_id INTEGER NOT NULL,
@@ -881,6 +886,46 @@ class Database:
                 ids = ", ".join(f"#{r['id']}" for r in rows)
                 issues[key] = f"{summary}：{rows[0]['total']} 单（{ids}）"
         return issues
+
+    async def daily_summary(self, start_utc: str, end_utc: str) -> dict[str, Any]:
+        """按 [start_utc, end_utc) 窗口汇总昨日流水；created_at 均为 UTC 存储。"""
+        orders_rows = await self._all(
+            """SELECT status, COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS cents, currency
+            FROM orders WHERE created_at >= ? AND created_at < ? GROUP BY status, currency""",
+            (start_utc, end_utc),
+        )
+        receipts_rows = await self._all(
+            """SELECT currency,
+                COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS cents,
+                SUM(CASE WHEN order_id IS NOT NULL THEN 1 ELSE 0 END) AS order_n,
+                COALESCE(SUM(CASE WHEN order_id IS NOT NULL THEN amount_cents ELSE 0 END), 0) AS order_cents
+            FROM payment_receipts WHERE created_at >= ? AND created_at < ? GROUP BY currency""",
+            (start_utc, end_utc),
+        )
+        tx_rows = await self._all(
+            """SELECT kind, currency, COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS cents
+            FROM balance_transactions WHERE created_at >= ? AND created_at < ? GROUP BY kind, currency""",
+            (start_utc, end_utc),
+        )
+        wallet_rows = await self._all(
+            "SELECT currency, COALESCE(SUM(balance_cents), 0) AS cents FROM wallet_balances GROUP BY currency"
+        )
+        return {
+            "orders": [dict(r) for r in orders_rows],
+            "receipts": [dict(r) for r in receipts_rows],
+            "transactions": [dict(r) for r in tx_rows],
+            "wallet_total": [dict(r) for r in wallet_rows],
+        }
+
+    async def report_sent(self, report_date: str) -> bool:
+        row = await self._one("SELECT 1 FROM daily_report_log WHERE report_date = ?", (report_date,))
+        return row is not None
+
+    async def mark_report_sent(self, report_date: str) -> bool:
+        """登记某日报表已送达；当天已登记过（重启重入）返回 False。"""
+        async with self.transaction() as conn:
+            cur = await conn.execute("INSERT OR IGNORE INTO daily_report_log (report_date) VALUES (?)", (report_date,))
+            return cur.rowcount > 0
 
     async def set_alert(self, key: str, summary: str | None) -> None:
         async with self.transaction() as conn:

@@ -41,6 +41,7 @@ operations:
   notification_stale_seconds: 300
   worker_stale_seconds: 180
   health_timeout_seconds: 2
+  daily_report: true         # 每日 0 点（服务器本地时区）私信管理员昨日流水
 
 backup:
   enabled: true              # 启动时备份一次，之后按周期执行；失败一分钟后重试
