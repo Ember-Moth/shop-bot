@@ -17,7 +17,8 @@ async def test_different_orders_and_fsm_writes_can_run_concurrently(db, user, pr
     results, _ = await asyncio.gather(
         asyncio.gather(*(orders.mark_paid(db, DemoPurchaser(), o.id) for o in created)),
         asyncio.gather(
-            storage.set_state(StorageKey(bot_id=1, chat_id=42, user_id=42), "quantity"), db.upsert_user(43, "other")
+            storage.set_state(StorageKey(bot_id=1, chat_id=42, user_id=42), "quantity"),
+            db.users.upsert_user(43, "other"),
         ),
     )
     assert all(o.status == OrderStatus.PAID for o in results)
@@ -32,8 +33,8 @@ async def test_event_failure_rolls_back_status_and_goods(db, user, product):
         await conn.execute("""CREATE TRIGGER reject_event BEFORE INSERT ON order_events
             BEGIN SELECT RAISE(ABORT, 'simulated disk failure'); END""")
     with pytest.raises(sqlite3.IntegrityError, match="simulated disk failure"):
-        await db.transition_order(order.id, OrderStatus.DELIVERED, payload="secret goods")
-    unchanged = await db.get_order(order.id)
+        await db.orders.transition_order(order.id, OrderStatus.DELIVERED, payload="secret goods")
+    unchanged = await db.orders.get_order(order.id)
     assert unchanged.status == OrderStatus.PENDING_PAYMENT
     assert unchanged.payload is None
 
@@ -52,8 +53,8 @@ async def test_cancelled_transaction_rolls_back_and_unlocks(db, user):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert (await db.get_user(user.id)).username == user.username
-    assert (await db.upsert_user(43, "new")).username == "new"
+    assert (await db.users.get_user(user.id)).username == user.username
+    assert (await db.users.upsert_user(43, "new")).username == "new"
 
 
 async def test_other_writer_cannot_commit_half_transition(tmp_path, monkeypatch):
@@ -61,8 +62,8 @@ async def test_other_writer_cannot_commit_half_transition(tmp_path, monkeypatch)
     db = Database(str(path))
     await db.connect()
     try:
-        user = await db.upsert_user(42, "original")
-        order = await db.create_order(user.id, 1, 1, 999, "CNY")
+        user = await db.users.upsert_user(42, "original")
+        order = await db.orders.create_order(user.id, 1, 1, 999, "CNY")
         entered, release = asyncio.Event(), asyncio.Event()
         async with db.connection() as conn:
             original_execute = conn.execute
@@ -79,9 +80,9 @@ async def test_other_writer_cannot_commit_half_transition(tmp_path, monkeypatch)
             return original_execute(sql, *args, **kwargs)
 
         monkeypatch.setattr(conn, "execute", execute)
-        transition = asyncio.create_task(db.transition_order(order.id, OrderStatus.PAID))
+        transition = asyncio.create_task(db.orders.transition_order(order.id, OrderStatus.PAID))
         await asyncio.wait_for(entered.wait(), timeout=2)
-        writer = asyncio.create_task(db.upsert_user(43, "other"))
+        writer = asyncio.create_task(db.users.upsert_user(43, "other"))
         try:
             await asyncio.sleep(0)
             assert not writer.done()
@@ -133,10 +134,10 @@ async def test_migration_keeps_complete_old_session_and_adds_order_columns(tmp_p
                 async with conn.execute("SELECT COUNT(*) FROM fsm_state") as cur:
                     row = await cur.fetchone()
                     assert row is not None and row[0] == 1
-            order = await db.get_order(1)
+            order = await db.orders.get_order(1)
             assert order is not None
             assert order.trade_no is None and order.payload is None and order.notified_at is None
-            assert await db.list_recovery_orders() == []
+            assert await db.work.list_recovery_orders() == []
         finally:
             await db.close()
 
@@ -154,12 +155,12 @@ async def test_recovery_indexes_created_and_scan_correct(tmp_path):
         assert "idx_purchases_state_updated" in names
 
         # 造两类订单：paid 待履约（应命中）、pending 待支付（不应命中）
-        user = await db.upsert_user(1, "u")
-        await db.seed_products([Product(1, "p", "", 100, "USD")])
-        o_paid = await db.create_order(user.id, 1, 1, 100, "USD")
-        await db.transition_order(o_paid.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
-        o_pending = await db.create_order(user.id, 1, 1, 100, "USD")
-        recovered_ids = {o.id for o in await db.list_recovery_orders()}
+        user = await db.users.upsert_user(1, "u")
+        await db.products.seed_products([Product(1, "p", "", 100, "USD")])
+        o_paid = await db.orders.create_order(user.id, 1, 1, 100, "USD")
+        await db.orders.transition_order(o_paid.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
+        o_pending = await db.orders.create_order(user.id, 1, 1, 100, "USD")
+        recovered_ids = {o.id for o in await db.work.list_recovery_orders()}
         assert o_paid.id in recovered_ids
         assert o_pending.id not in recovered_ids
     finally:

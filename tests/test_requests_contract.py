@@ -26,7 +26,7 @@ async def purchaser():
 
 async def _seed_order(db, user_id, sku, request_type, **order_kwargs):
     product = Product(1, "p", "", 999, "CNY", sku=sku, request_type=request_type)
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     return await orders.create_order(db, user_id, product, 1, **order_kwargs)
 
 
@@ -100,16 +100,16 @@ async def test_physical_sim_stays_awaiting_dispatch_until_admin_confirms(*, db, 
     )
     order = await purchaser.fulfill(db, order.id)
     assert order is not None and order.status == OrderStatus.PAID  # 受理成功 ≠ 已发货
-    purchase = await db.get_purchase_by_order(order.id)
+    purchase = await db.purchases.get_purchase_by_order(order.id)
     assert purchase is not None and purchase.state == PurchaseState.AWAITING_DISPATCH
     # 管理员确认发货 → delivered + 通知买家
     ok, detail = await purchaser.confirm_dispatch(db, order.id)
     assert ok, detail
-    final = await db.get_order(order.id)
+    final = await db.orders.get_order(order.id)
     assert final is not None and final.status == OrderStatus.DELIVERED
     assert final.payload is not None and "实体" in final.payload
     assert await notify_owner(db, bot, order.id)
-    purchase = await db.get_purchase_by_order(order.id)
+    purchase = await db.purchases.get_purchase_by_order(order.id)
     assert purchase is not None and purchase.state == PurchaseState.FULFILLED
     # 重复确认被拒绝
     ok, _detail = await purchaser.confirm_dispatch(db, order.id)
@@ -155,7 +155,7 @@ async def test_kyc_pending_requires_documents_then_releases(*, db, user, purchas
     )
     order = await purchaser.fulfill(db, order.id)
     assert order is not None and order.status == OrderStatus.PAID
-    purchase = await db.get_purchase_by_order(order.id)
+    purchase = await db.purchases.get_purchase_by_order(order.id)
     assert purchase is not None and purchase.state == PurchaseState.AWAITING_KYC
 
     # 买家补交证件（JSON URL 模式）
@@ -167,7 +167,7 @@ async def test_kyc_pending_requires_documents_then_releases(*, db, user, purchas
     )
     ok, detail = await purchaser.submit_kyc(db, order.id, documents={"passportFront": "https://cdn.example/pf.jpg"})
     assert ok, detail
-    purchase = await db.get_purchase_by_order(order.id)
+    purchase = await db.purchases.get_purchase_by_order(order.id)
     assert purchase is not None and purchase.state == PurchaseState.KYC_SUBMITTED
 
     # 轮询：已提交但未审核（即使上游返回 eSIM 安装信息也不交付，开发方案 7.2）
@@ -243,7 +243,7 @@ async def test_kyc_submit_already_verified_recovers(*, db, user, purchaser, http
     )
     ok, _detail = await purchaser.submit_kyc(db, order.id, documents={"passportFront": "https://x/1.jpg"})
     assert ok
-    purchase = await db.get_purchase_by_order(order.id)
+    purchase = await db.purchases.get_purchase_by_order(order.id)
     assert purchase is not None and purchase.state == PurchaseState.KYC_SUBMITTED
 
 
@@ -276,7 +276,7 @@ async def test_kyc_multipart_upload_contract(*, purchaser, httpx_mock):
 async def test_usage_query_and_formatting(*, db, user, purchaser, httpx_mock):
     order = await _seed_order(db, user.id, "US-1", "esim")
     await orders.mark_paid(db, purchaser, order.id)
-    await db.transition_order(order.id, OrderStatus.DELIVERED, upstream_ref="up-1", payload="goods")
+    await db.orders.transition_order(order.id, OrderStatus.DELIVERED, upstream_ref="up-1", payload="goods")
     httpx_mock.add_response(
         json={
             "statusCode": 200,
@@ -335,7 +335,7 @@ async def test_recovery_loop_drives_kyc_orders(*, db, user, purchaser, httpx_moc
         }
     )
     await recover_once(db, purchaser, bot)
-    final = await db.get_order(order.id)
+    final = await db.orders.get_order(order.id)
     assert final is not None and final.status == OrderStatus.DELIVERED
     assert await notify_owner(db, bot, order.id)
 
@@ -353,7 +353,7 @@ async def test_legacy_orders_table_gains_input_columns(tmp_path):
     db = Database(path)
     await db.connect()
     try:
-        order = await db.create_order(1, 1, 1, 999, "CNY", iccid="89", msisdn="+8613800138000", days=7)
+        order = await db.orders.create_order(1, 1, 1, 999, "CNY", iccid="89", msisdn="+8613800138000", days=7)
         assert order.input_iccid == "89"
         assert order.input_msisdn == "+8613800138000"
         assert order.input_days == 7

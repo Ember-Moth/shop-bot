@@ -12,11 +12,10 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import BufferedInputFile
 
-from ..db import Database
+from ..db import Database, WorkItem
 from ..logging_config import get_logger
 from ..models import Order, OrderStatus, PurchaseState
 from ..telegram_text import text_units
-from ..work_queue import WorkItem
 from .business_notifications import notify_business
 from .esim_media import MAX_ESIMS_PER_ARCHIVE, EsimMedia, delivery_esims, esim_zip, qr_png
 from .notification_transport import NotificationThrottle
@@ -81,12 +80,12 @@ async def notify_owner(
     throttle: NotificationThrottle | None = None,
 ) -> bool:
     async with db.order_operation(order_id):
-        order = await db.get_order(order_id)
+        order = await db.orders.get_order(order_id)
         if order is None or order.status != OrderStatus.DELIVERED:
             return False
         # 自动通知和手动补发均只使用当前采购已经核验、落库的货品。
         # 重绑后的 upstream_pending、冻结记录和旧引用的 payload 都不能发送。
-        purchase = await db.get_purchase_by_order(order_id)
+        purchase = await db.purchases.get_purchase_by_order(order_id)
         if purchase is not None:
             expected_ref = purchase.upstream_request_id or f"STUB-{order_id:06d}"
             if purchase.state != PurchaseState.FULFILLED or order.upstream_ref != expected_ref:
@@ -94,7 +93,9 @@ async def notify_owner(
                     "delivery notification blocked: unverified purchase or reference", extra={"order_id": order_id}
                 )
                 return False
-            if purchase.upstream_request_id and await db.get_purchase_conflict(order_id, purchase.upstream_request_id):
+            if purchase.upstream_request_id and await db.purchases.get_purchase_conflict(
+                order_id, purchase.upstream_request_id
+            ):
                 logger.warning("delivery notification blocked: shared upstream reference", extra={"order_id": order_id})
                 return False
         if not order.notification_pending and not resend:
@@ -102,8 +103,8 @@ async def notify_owner(
         if order.notification_retry_at and time.time() < order.notification_retry_at:
             return False
         if resend:
-            await db.request_notification(order.id)
-        owner = await db.get_user(order.user_id)
+            await db.deliveries.request_notification(order.id)
+        owner = await db.users.get_user(order.user_id)
         if owner is None:
             return False
         try:
@@ -121,7 +122,7 @@ async def notify_owner(
                 else []
             )
             steps = notification_steps(order, esims)
-            prepared = await db.prepare_notification(order.id, NOTIFICATION_PLAN_VERSION)
+            prepared = await db.deliveries.prepare_notification(order.id, NOTIFICATION_PLAN_VERSION)
             if prepared is None:
                 return False
             cursor = prepared.notification_cursor
@@ -175,33 +176,33 @@ async def notify_owner(
                         parse_mode=None,
                         request_timeout=20,
                     )
-                if not await db.advance_notification(order.id, step):
+                if not await db.deliveries.advance_notification(order.id, step):
                     return False
         except TelegramRetryAfter as exc:
-            await db.defer_notification(order.id, time.time() + exc.retry_after)
+            await db.deliveries.defer_notification(order.id, time.time() + exc.retry_after)
             logger.warning("delivery notification rate limited", extra={"order_id": order.id})
             return False
         except Exception as exc:
             logger.warning("delivery notification failed", extra={"order_id": order.id, "error": type(exc).__name__})
             return False
-        await db.mark_notified(order.id)
+        await db.deliveries.mark_notified(order.id)
         return True
 
 
 async def notify_refund(db: Database, bot: Bot, order_id: int, *, throttle: NotificationThrottle | None = None) -> bool:
     """退款与通知分开恢复；成功发送后清除待通知标记。"""
     async with db.order_operation(order_id):
-        order = await db.get_order(order_id)
+        order = await db.orders.get_order(order_id)
         if order is None or order.status != OrderStatus.REFUNDED:
             return False
         if not order.notification_pending:
             return True
         if order.notification_retry_at and time.time() < order.notification_retry_at:
             return False
-        owner = await db.get_user(order.user_id)
+        owner = await db.users.get_user(order.user_id)
         if owner is None:
             return False
-        balance = await db.get_balance(order.user_id, order.currency)
+        balance = await db.wallet.get_balance(order.user_id, order.currency)
         try:
             if throttle is not None:
                 await throttle.wait(owner.telegram_id)
@@ -213,17 +214,17 @@ async def notify_refund(db: Database, bot: Bot, order_id: int, *, throttle: Noti
                 request_timeout=20,
             )
         except TelegramRetryAfter as exc:
-            await db.defer_notification(order.id, time.time() + exc.retry_after)
+            await db.deliveries.defer_notification(order.id, time.time() + exc.retry_after)
             return False
         except Exception as exc:
             logger.warning("refund notification failed", extra={"order_id": order_id, "error": type(exc).__name__})
             return False
-        await db.mark_notified(order_id)
+        await db.deliveries.mark_notified(order_id)
         return True
 
 
 async def notify_wallet(db: Database, bot: Bot, transaction_id: int, throttle: NotificationThrottle | None) -> bool:
-    tx = await db.get_wallet_notification(transaction_id)
+    tx = await db.work.get_wallet_notification(transaction_id)
     if tx is None:
         return True
     amount = tx["amount_cents"] / 100
@@ -267,7 +268,7 @@ async def process_work(
                 await purchaser.fulfill(db, item.entity_id)
                 delay = min(delay, 60)
             elif bot is not None and item.kind == "delivery":
-                order = await db.get_order(item.entity_id)
+                order = await db.orders.get_order(item.entity_id)
                 if order is None:
                     done = True
                 elif order.status == OrderStatus.REFUNDED:
@@ -283,12 +284,12 @@ async def process_work(
         delay = max(delay, exc.retry_after)
         failed = True
     except asyncio.CancelledError:
-        await db.finish_work(item, delay=0)
+        await db.work.finish_work(item, delay=0)
         raise
     except Exception as exc:
         failed = True
         logger.warning("work failed", extra={"order_id": item.entity_id, "error": type(exc).__name__})
-    await db.finish_work(item, done=done, delay=delay)
+    await db.work.finish_work(item, done=done, delay=delay)
     return failed
 
 
@@ -302,7 +303,7 @@ async def _drain_work(
     failures = 0
     # 有限批量，避免持续新订单使一次恢复永不返回。
     for _ in range(50):
-        item = await db.claim_work(kind)
+        item = await db.work.claim_work(kind)
         if item is None:
             break
         failures += await process_work(db, purchaser, bot, item, runtime)
@@ -334,7 +335,7 @@ async def _work_loop(
     runtime: RuntimeState | None,
 ) -> None:
     while True:
-        item = await db.claim_work(kind)
+        item = await db.work.claim_work(kind)
         if item is None:
             await asyncio.sleep(1)
             continue

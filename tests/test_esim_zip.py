@@ -72,7 +72,7 @@ async def test_multiple_esims_are_one_document_with_no_individual_messages(db, b
     assert document.document.filename == f"esims-{order_id}.zip"
     assert f"共 {quantity} 张" in (document.caption or "")
     assert len(manifest(document)["esims"]) == quantity
-    saved = await db.get_order(order_id)
+    saved = await db.orders.get_order(order_id)
     assert not saved.notification_pending and saved.notification_cursor == 1
     assert saved.notification_plan_version == NOTIFICATION_PLAN_VERSION
     await recover_once(db, purchaser, bot)
@@ -87,7 +87,7 @@ async def test_archive_failure_retries_after_restart_without_repurchase(tmp_path
         order_id, purchaser, gateway = await delivered_order(db, count=2)
         bot.session.fail_document = True
         assert not await notify_owner(db, bot, order_id)
-        saved = await db.get_order(order_id)
+        saved = await db.orders.get_order(order_id)
         assert saved is not None and saved.notification_pending and saved.notification_cursor == 0
         first_attempt = document_bytes(documents(bot)[0])
     finally:
@@ -98,7 +98,7 @@ async def test_archive_failure_retries_after_restart_without_repurchase(tmp_path
         bot.session.fail_document = False
         await recover_once(db, purchaser, bot)
         assert document_bytes(documents(bot)[-1]) == first_attempt
-        saved = await db.get_order(order_id)
+        saved = await db.orders.get_order(order_id)
         assert saved is not None and not saved.notification_pending and saved.notification_cursor == 1
         assert gateway.create_calls == 1
     finally:
@@ -119,7 +119,7 @@ async def test_large_order_resumes_only_unsent_zip_part(db, bot, monkeypatch):
 
     monkeypatch.setattr(bot, "send_document", send)
     assert not await notify_owner(db, bot, order_id)
-    assert len(documents(bot)) == 1 and (await db.get_order(order_id)).notification_cursor == 1
+    assert len(documents(bot)) == 1 and (await db.orders.get_order(order_id)).notification_cursor == 1
     await recover_once(db, purchaser, bot)
     assert len(documents(bot)) == 2 and not any(isinstance(m, SendPhoto) for m in bot.session.sent)
     records = [record for doc in documents(bot) for record in manifest(doc)["esims"]]
@@ -132,7 +132,7 @@ async def test_large_order_resumes_only_unsent_zip_part(db, bot, monkeypatch):
 async def test_manual_query_sends_archive_to_buyer_not_admin_chat(db, bot, monkeypatch):
     order_id, purchaser, gateway = await delivered_order(db, count=2)
     assert await notify_owner(db, bot, order_id)
-    order = await db.get_order(order_id)
+    order = await db.orders.get_order(order_id)
     monkeypatch.setattr("shop_bot.handlers.start.get_settings", lambda: SimpleNamespace(admin_ids=[700]))
     await cmd_query(query_message(bot, order, user_id=700, chat_id=-100), db, None, purchaser, bot)
     reply = bot.session.sent[-1]
@@ -151,7 +151,7 @@ async def test_version_one_photo_progress_does_not_skip_archive(db, bot, old_cur
             (old_cursor, order_id),
         )
     assert await notify_owner(db, bot, order_id)
-    saved = await db.get_order(order_id)
+    saved = await db.orders.get_order(order_id)
     assert saved.notification_plan_version == NOTIFICATION_PLAN_VERSION and saved.notification_cursor == 1
     assert len(documents(bot)) == 1 and gateway.create_calls == 1
 
@@ -176,7 +176,7 @@ async def test_archive_rate_limit_is_respected(db, bot, monkeypatch):
 
     monkeypatch.setattr(bot, "send_document", send)
     assert not await notify_owner(db, bot, order_id)
-    saved = await db.get_order(order_id)
+    saved = await db.orders.get_order(order_id)
     assert saved.notification_cursor == 0 and saved.notification_retry_at == 1030
     assert not await notify_owner(db, bot, order_id, resend=True)
     assert bot.session.sent == []
@@ -188,8 +188,8 @@ async def test_archive_rate_limit_is_respected(db, bot, monkeypatch):
 async def test_rebinding_replaces_archive_contents_and_blocks_frozen_delivery(db, bot):
     order_id, purchaser, gateway = await delivered_order(db, count=2)
     assert await notify_owner(db, bot, order_id)
-    purchase = await db.get_purchase_by_order(order_id)
-    await db.transition_purchase(purchase.id, PurchaseState.SUBMISSION_UNKNOWN)
+    purchase = await db.purchases.get_purchase_by_order(order_id)
+    await db.purchases.transition_purchase(purchase.id, PurchaseState.SUBMISSION_UNKNOWN)
     assert not await notify_owner(db, bot, order_id, resend=True)
     assert len(documents(bot)) == 1
     gateway.details = esim_details("NEW", count=2)
@@ -204,9 +204,9 @@ async def test_rebinding_replaces_archive_contents_and_blocks_frozen_delivery(db
 
 @pytest.mark.parametrize("blocked_by", ["kyc", "partial"])
 async def test_archive_waits_for_kyc_and_complete_delivery(db, bot, blocked_by):
-    user = await db.upsert_user(42, "buyer")
+    user = await db.users.upsert_user(42, "buyer")
     product = Product(1, "eSIM", "", 999, sku="SKU", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 2)
     details = esim_details(count=2)
     if blocked_by == "kyc":
@@ -217,7 +217,7 @@ async def test_archive_waits_for_kyc_and_complete_delivery(db, bot, blocked_by):
     await orders.mark_paid(db, purchaser, order.id)
     await purchaser.fulfill(db, order.id)
     assert not await notify_owner(db, bot, order.id)
-    assert (await db.get_order(order.id)).status == OrderStatus.PAID
+    assert (await db.orders.get_order(order.id)).status == OrderStatus.PAID
     assert bot.session.sent == []
 
 
@@ -227,7 +227,7 @@ async def test_oversized_archive_never_marks_notification_complete(db, bot, monk
         limits.setattr(esim_media, "MAX_ARCHIVE_BYTES", 100)
         assert not await notify_owner(db, bot, order_id)
     assert bot.session.sent == []
-    saved = await db.get_order(order_id)
+    saved = await db.orders.get_order(order_id)
     assert saved.notification_pending and saved.notification_cursor == 0 and saved.notified_at is None
     await recover_once(db, purchaser, bot)
     assert len(documents(bot)) == 1 and gateway.create_calls == 1

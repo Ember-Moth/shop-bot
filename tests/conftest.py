@@ -22,13 +22,13 @@ async def db():
 
 @pytest.fixture
 async def user(db):
-    return await db.upsert_user(telegram_id=42, username="tester")
+    return await db.users.upsert_user(telegram_id=42, username="tester")
 
 
 @pytest.fixture
 async def product(db):
-    await db.seed_products([Product(1, "demo", description="d", price_cents=999, currency="CNY")])
-    return (await db.list_products())[0]
+    await db.products.seed_products([Product(1, "demo", description="d", price_cents=999, currency="CNY")])
+    return (await db.products.list_products())[0]
 
 
 @pytest.fixture
@@ -54,7 +54,7 @@ async def bot():
 def queue_clock(monkeypatch):
     """推进任务到期时间，不修改持久化任务或真实等待。"""
     now = [time.time()]
-    monkeypatch.setattr("shop_bot.db.time", SimpleNamespace(time=lambda: now[0]))
+    monkeypatch.setattr("shop_bot.db.repositories.work.time", SimpleNamespace(time=lambda: now[0]))
 
     def advance(seconds=600):
         now[0] += seconds

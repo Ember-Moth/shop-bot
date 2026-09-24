@@ -35,7 +35,7 @@ async def cmd_whois(message: Message, db: Database) -> None:
     if len(parts) != 2 or not parts[1].strip():
         await message.answer("用法：/whois <TG ID 或用户名或昵称关键词>")
         return
-    users = await db.search_users(parts[1].strip().lstrip("@"))
+    users = await db.users.search_users(parts[1].strip().lstrip("@"))
     if not users:
         await message.answer("没有匹配的用户")
         return
@@ -44,7 +44,7 @@ async def cmd_whois(message: Message, db: Database) -> None:
 
 @router.message(Command("products"))
 async def cmd_products(message: Message, db: Database) -> None:
-    products = await db.list_all_products()
+    products = await db.products.list_all_products()
     text = "\n\n".join(
         f"#{p.id} · {p.name} · {p.price_text} · {'上架' if p.active else '下架'} · SKU {p.sku or '无'}"
         for p in products
@@ -60,7 +60,7 @@ async def cmd_currency(message: Message, db: Database) -> None:
         await message.answer("用法：/currency <商品ID> <币种>，例如 /currency 1 USD；商品编号见 /products")
         return
     try:
-        product = await db.set_product_currency(
+        product = await db.products.set_product_currency(
             int(parts[1]),
             parts[2],
             actor_id=message.from_user.id if message.from_user else None,
@@ -85,7 +85,7 @@ async def cmd_price(message: Message, db: Database) -> None:
         await message.answer("用法：/price <商品ID> <售价> [币种]，例如 /price 1 9.99 USD；省略币种时保留原币种")
         return
     try:
-        product = await db.configure_product(
+        product = await db.products.configure_product(
             int(parts[1]),
             price_cents=parse_price(parts[2]),
             currency=parts[3] if len(parts) == 4 else None,
@@ -111,7 +111,7 @@ async def cmd_rename(message: Message, db: Database) -> None:
         await message.answer("用法：/rename <商品ID> <新名称>，例如 /rename 1 美国1GB·7天")
         return
     try:
-        product = await db.configure_product(
+        product = await db.products.configure_product(
             int(parts[1]),
             name=parts[2],
             actor_id=message.from_user.id if message.from_user else None,
@@ -132,7 +132,7 @@ async def cmd_describe(message: Message, db: Database) -> None:
         await message.answer("用法：/describe <商品ID> <描述>，例如 /describe 1 美国TMO 100条短信+50分钟通话-30天")
         return
     try:
-        product = await db.configure_product(
+        product = await db.products.configure_product(
             int(parts[1]),
             description=parts[2],
             actor_id=message.from_user.id if message.from_user else None,
@@ -152,7 +152,7 @@ async def _set_published(message: Message, db: Database, active: bool) -> None:
         await message.answer("用法：/publish <商品ID> 上架；/unpublish <商品ID> 下架")
         return
     try:
-        product = await db.configure_product(
+        product = await db.products.configure_product(
             int(parts[1]),
             active=active,
             require_upstream=get_settings().upstream.provider == "commbitz",
@@ -202,7 +202,7 @@ async def cmd_ackalert(message: Message, db: Database, operations: Operations) -
         await message.answer("用法：/ackalert <告警标识>，例如 /ackalert telegram_handler")
         return
     operations.runtime.failures.pop(parts[1], None)
-    await db.set_alert(parts[1], None)
+    await db.operations.set_alert(parts[1], None)
     await message.answer("告警已确认；监控条件仍存在时会再次触发。")
 
 
@@ -218,10 +218,10 @@ async def cmd_orders(message: Message, db: Database) -> None:
             valid = ", ".join(s.value for s in OrderStatus)
             await message.answer(f"未知状态。可用：{valid}")
             return
-        orders_ = await db.list_orders(status)
+        orders_ = await db.orders.list_orders(status)
         title = f"状态为 {status.value} 的订单"
     else:
-        orders_ = await db.list_orders()
+        orders_ = await db.orders.list_orders()
         title = "最近订单"
     if not orders_:
         await message.answer("没有订单。")
@@ -246,7 +246,7 @@ async def cmd_paid(message: Message, db: Database, purchaser: Purchaser, bot: Bo
         await message.answer(f"❌ {exc}")
         return
     if order.status == OrderStatus.DELIVERED:
-        await db.queue_redelivery(order.id)
+        await db.deliveries.queue_redelivery(order.id)
         await message.answer(f"✅ 订单 #{order.id} 已发货，补发任务已保存")
     elif order.status == OrderStatus.REFUNDED:
         await message.answer(f"订单 #{order.id} 已退款到 {order.currency} 余额并关闭")
@@ -268,16 +268,16 @@ async def cmd_dispatch(message: Message, db: Database, purchaser: Purchaser, bot
     if not ok:
         await message.answer(f"❌ {detail}")
         return
-    order = await db.get_order(order_id)
+    order = await db.orders.get_order(order_id)
     if order is not None:
-        await db.queue_redelivery(order.id)
+        await db.deliveries.queue_redelivery(order.id)
     await message.answer(f"✅ {detail}")
 
 
 @router.message(Command("purchases"))
 async def cmd_purchases(message: Message, db: Database) -> None:
     """人工核对入口：列出需要人工处理的采购任务（结果不明/被拒绝/实体卡待发货）。"""
-    manual = await db.list_purchases_by_states(
+    manual = await db.purchases.list_purchases_by_states(
         (PurchaseState.SUBMISSION_UNKNOWN, PurchaseState.REJECTED, PurchaseState.AWAITING_DISPATCH)
     )
     if not manual:
@@ -347,9 +347,9 @@ async def cmd_refund(message: Message, db: Database, bot: Bot) -> None:
     if order_id is None:
         await message.answer("用法：/refund <订单号>")
         return
-    order, err = await db.refund_order_to_balance(order_id, "admin refund")
+    order, err = await db.payments.refund_order_to_balance(order_id, "admin refund")
     if err is not None or order is None:
-        current = await db.get_order(order_id)
+        current = await db.orders.get_order(order_id)
         status = current.status if current is not None else "不存在"
         await message.answer(
             f"❌ 无法退款：订单状态为 {status}。仅已付款且采购未提交、明确失败或已人工核对的订单可退；"
@@ -386,7 +386,7 @@ async def cmd_adjust(message: Message, db: Database, bot: Bot) -> None:
         return
     user_id = int(parts[1])
     note = " ".join(parts[value_index + 1 :]).strip()
-    new_balance = await db.adjust_balance(user_id, delta_cents, note or "admin adjust", currency)
+    new_balance = await db.wallet.adjust_balance(user_id, delta_cents, note or "admin adjust", currency)
     if new_balance is None:
         await message.answer("❌ 调账失败：用户不存在，或负向调整超出当前余额")
         return

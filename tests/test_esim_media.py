@@ -38,9 +38,9 @@ def esim_details(label="A", count=1):
 
 
 async def delivered_order(db, count=1) -> tuple[int, CommbitzPurchaser, FakeCommbitzGateway]:
-    user = await db.upsert_user(42, "buyer")
+    user = await db.users.upsert_user(42, "buyer")
     product = Product(1, "eSIM", "", 999, sku="SKU", request_type="esim", upstream_plan_id="plan")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, count)
     gateway = FakeCommbitzGateway(details=esim_details(count=count))
     purchaser = CommbitzPurchaser(gateway)
@@ -55,7 +55,7 @@ def photos(bot):
 
 async def test_photo_contains_local_png_and_only_goes_to_owner(db, bot):
     order_id, purchaser, _gateway = await delivered_order(db, count=1)
-    saved = await db.get_order(order_id)
+    saved = await db.orders.get_order(order_id)
     assert json.loads(saved.delivery_esims)[0]["lpa"] == esim_details()["esims"][0]["lpa"]
     assert await notify_owner(db, bot, order_id)
     sent = photos(bot)
@@ -66,7 +66,7 @@ async def test_photo_contains_local_png_and_only_goes_to_owner(db, bot):
         assert photo.photo.data == qr_png(esim_details(count=1)["esims"][index]["lpa"])
         assert f"eSIM {index + 1}/1" in photo.caption and "ICCID:" in photo.caption
         assert photo.parse_mode is None and len(photo.caption) <= 1024
-    saved = await db.get_order(order_id)
+    saved = await db.orders.get_order(order_id)
     assert not saved.notification_pending and saved.notification_cursor == 2  # 头部 1 + 1 张图
     await recover_once(db, purchaser, bot)
     assert len(photos(bot)) == 1
@@ -90,7 +90,7 @@ async def test_photo_failure_resumes_after_restart_without_resending_header(tmp_
     try:
         order_id, purchaser, gateway = await delivered_order(db, count=1)
         assert not await notify_owner(db, bot, order_id)
-        saved = await db.get_order(order_id)
+        saved = await db.orders.get_order(order_id)
         assert (
             saved is not None and saved.notification_pending and saved.notification_cursor == 1
         )  # 头部已发送，图片尚未发送
@@ -102,7 +102,7 @@ async def test_photo_failure_resumes_after_restart_without_resending_header(tmp_
     try:
         await recover_once(restored, purchaser, bot)
         assert [photo.photo.filename for photo in photos(bot)] == [f"esim-{order_id}-1.png"]
-        saved = await restored.get_order(order_id)
+        saved = await restored.orders.get_order(order_id)
         assert saved is not None and not saved.notification_pending and saved.notified_at
         assert gateway.create_calls == 1
     finally:
@@ -125,7 +125,7 @@ async def test_rate_limit_defers_photo_and_keeps_text_progress(db, bot, monkeypa
 
     monkeypatch.setattr(bot, "send_photo", send)
     assert not await notify_owner(db, bot, order_id)
-    saved = await db.get_order(order_id)
+    saved = await db.orders.get_order(order_id)
     assert saved.notification_cursor == 1 and saved.notification_retry_at == 1030  # 头部已发，图被限流
     calls = len(bot.session.sent)
     assert not await notify_owner(db, bot, order_id, resend=True)
@@ -133,13 +133,13 @@ async def test_rate_limit_defers_photo_and_keeps_text_progress(db, bot, monkeypa
     now[0] = 1030
     assert await notify_owner(db, bot, order_id)
     assert len(bot.session.sent) == calls + 1
-    assert (await db.get_order(order_id)).notification_retry_at is None
+    assert (await db.orders.get_order(order_id)).notification_retry_at is None
 
 
 async def test_manual_query_resends_images_to_buyer_not_admin_chat(db, bot, monkeypatch):
     order_id, purchaser, gateway = await delivered_order(db)
     assert await notify_owner(db, bot, order_id)
-    order = await db.get_order(order_id)
+    order = await db.orders.get_order(order_id)
     monkeypatch.setattr("shop_bot.handlers.start.get_settings", lambda: SimpleNamespace(admin_ids=[700]))
     await cmd_query(query_message(bot, order, user_id=700, chat_id=-100), db, None, purchaser, bot)
     assert bot.session.sent[-1].chat_id == -100
@@ -153,12 +153,12 @@ async def test_rebinding_clears_media_progress_and_sends_new_qr_only(db, bot):
     order_id, purchaser, gateway = await delivered_order(db)
     bot.session.fail_photo = True
     assert not await notify_owner(db, bot, order_id)
-    purchase = await db.get_purchase_by_order(order_id)
-    await db.transition_purchase(purchase.id, PurchaseState.SUBMISSION_UNKNOWN)
+    purchase = await db.purchases.get_purchase_by_order(order_id)
+    await db.purchases.transition_purchase(purchase.id, PurchaseState.SUBMISSION_UNKNOWN)
     gateway.details = esim_details("NEW")
     ok, _ = await purchaser.bind_unknown_purchase(db, order_id, "new-reference")
     assert ok
-    rebound = await db.get_order(order_id)
+    rebound = await db.orders.get_order(order_id)
     assert rebound.delivery_esims is None and rebound.notification_cursor == 0 and rebound.notification_retry_at is None
     previous_attempts = len(photos(bot))
     assert not await notify_owner(db, bot, order_id, resend=True)
@@ -172,24 +172,24 @@ async def test_rebinding_clears_media_progress_and_sends_new_qr_only(db, bot):
 
 async def test_legacy_text_esim_can_be_sent_as_photo(db, user, bot):
     payload = build_payload(esim_details())
-    order = await db.create_order(user.id, 1, 1, 999, "USD")
-    await db.transition_order(order.id, OrderStatus.DELIVERED, payload=payload, upstream_ref="legacy")
-    assert (await db.get_order(order.id)).delivery_esims is None
+    order = await db.orders.create_order(user.id, 1, 1, 999, "USD")
+    await db.orders.transition_order(order.id, OrderStatus.DELIVERED, payload=payload, upstream_ref="legacy")
+    assert (await db.orders.get_order(order.id)).delivery_esims is None
     assert await notify_owner(db, bot, order.id)
     assert len(photos(bot)) == 1
 
 
 async def test_kyc_blocks_photo_until_release(db, bot):
-    user = await db.upsert_user(42, "buyer")
+    user = await db.users.upsert_user(42, "buyer")
     product = Product(1, "eSIM", "", 999, sku="SKU", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
     gateway = FakeCommbitzGateway(details={**esim_details(), "isKycRequired": True, "isKycVerified": False})
     purchaser = CommbitzPurchaser(gateway)
     await orders.mark_paid(db, purchaser, order.id)
     await purchaser.fulfill(db, order.id)
     assert not await notify_owner(db, bot, order.id)
-    assert photos(bot) == [] and (await db.get_order(order.id)).delivery_esims is None
+    assert photos(bot) == [] and (await db.orders.get_order(order.id)).delivery_esims is None
     gateway.details["isKycVerified"] = True
     await purchaser.fulfill(db, order.id)
     assert await notify_owner(db, bot, order.id)
@@ -210,16 +210,16 @@ def test_non_esim_payload_does_not_produce_images():
 
 
 async def test_balance_payment_does_not_claim_photo_sent_when_upload_failed(db, bot):
-    user = await db.upsert_user(42, "buyer")
+    user = await db.users.upsert_user(42, "buyer")
     product = Product(1, "eSIM", "", 999, sku="SKU", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
-    await db.adjust_balance(user.id, 1000, "funding", "USD")
+    await db.wallet.adjust_balance(user.id, 1000, "funding", "USD")
     purchaser = CommbitzPurchaser(FakeCommbitzGateway(details=esim_details()))
     bot.session.fail_photo = True
     await cb_pay_with_balance(_balance_callback(bot, order.id), db, purchaser, bot)
     assert "货品会自动私信发送" in bot.session.sent[-1].text
     assert not photos(bot)
     await recover_once(db, purchaser, bot)
-    assert (await db.get_order(order.id)).notification_pending
-    assert await db.get_balance(user.id, "USD") == 1
+    assert (await db.orders.get_order(order.id)).notification_pending
+    assert await db.wallet.get_balance(user.id, "USD") == 1

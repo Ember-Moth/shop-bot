@@ -35,8 +35,8 @@ async def test_sync_creates_inactive_products(db):
     result = await sync_catalog(db, FakeCommbitz([_plan("US-1", "US 1GB")]))
     assert (result.total, result.created, result.updated, result.skipped) == (1, 1, 0, 0)
     # 新商品下架，对用户不可见
-    assert await db.list_products() == []
-    row = await db._one("SELECT * FROM products WHERE sku = 'US-1'")
+    assert await db.products.list_products() == []
+    row = await db.fetch_one("SELECT * FROM products WHERE sku = 'US-1'")
     assert row is not None
     assert row["active"] == 0
     assert row["price_cents"] == 0
@@ -52,7 +52,7 @@ async def test_resync_preserves_manual_name_and_price(db):
         await conn.execute("UPDATE products SET price_cents = 49900, active = 1 WHERE sku = 'US-1'")
     result = await sync_catalog(db, FakeCommbitz([_plan("US-1", "new name")]))
     assert (result.created, result.updated) == (0, 1)
-    row = await db._one("SELECT * FROM products WHERE sku = 'US-1'")
+    row = await db.fetch_one("SELECT * FROM products WHERE sku = 'US-1'")
     # 本店定价、上架状态与名称保留（名称可能经 /rename 人工命名）；同步只更新套餐映射
     assert row["price_cents"] == 49900
     assert row["active"] == 1
@@ -92,11 +92,11 @@ async def test_legacy_products_table_migrates(tmp_path):
     db = Database(path)
     await db.connect()
     try:
-        created = await db.upsert_product_from_upstream(
+        created = await db.products.upsert_product_from_upstream(
             sku="S1", name="n", description="d", upstream_plan_id="p1", request_type="esim"
         )
         assert created is True
-        row = await db._one("SELECT * FROM products WHERE sku = 'S1'")
+        row = await db.fetch_one("SELECT * FROM products WHERE sku = 'S1'")
         assert row is not None and row["upstream_plan_id"] == "p1"
     finally:
         await db.close()

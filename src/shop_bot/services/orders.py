@@ -31,7 +31,7 @@ async def confirm_epay_payment(
     """核单后持久化每笔外部收款；多收的钱按原币种入钱包，不重复采购。"""
     epay.validate_payment(order, payment, allow_additional=True)
     try:
-        confirmed, disposition = await db.record_epay_payment(order.id, payment.trade_no)
+        confirmed, disposition = await db.payments.record_epay_payment(order.id, payment.trade_no)
     except ValueError as exc:
         raise OrderError(str(exc), order) from None
     if disposition == "wallet_credit":
@@ -52,7 +52,7 @@ async def create_order(
     """创建订单：金额含按日套餐天数（上游计价公式 unitPrice × days，PDF 6.1），
     并锁定 SKU/业务类型/套餐快照，之后商品目录变更不影响本次采购与交付核验。"""
     days = days or 1
-    order = await db.create_order(
+    order = await db.orders.create_order(
         user_id=user_id,
         product_id=product.id,
         quantity=quantity,
@@ -88,7 +88,7 @@ async def mark_paid(
     - trade_no 一致性由 db.confirm_order_payment 校验（一交易一订单）。
     """
     try:
-        confirmed = await db.confirm_order_payment(order_id, trade_no, retry_failed=retry_failed)
+        confirmed = await db.payments.confirm_order_payment(order_id, trade_no, retry_failed=retry_failed)
     except ValueError as exc:
         raise OrderError(str(exc)) from None
     logger.info("payment confirmed", extra={"order_id": order_id})
@@ -96,7 +96,7 @@ async def mark_paid(
 
 
 async def cancel_order(db: Database, order_id: int) -> Order:
-    order = await db.transition_order(order_id, OrderStatus.CANCELLED, from_status=OrderStatus.PENDING_PAYMENT)
+    order = await db.orders.transition_order(order_id, OrderStatus.CANCELLED, from_status=OrderStatus.PENDING_PAYMENT)
     if order is None:
         raise OrderError(f"order {order_id} cannot be cancelled")
     logger.info("order cancelled", extra={"order_id": order_id})

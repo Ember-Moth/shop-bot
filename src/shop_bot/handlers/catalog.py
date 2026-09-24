@@ -41,7 +41,7 @@ async def cb_catalog(callback: CallbackQuery, db: Database) -> None:
     if requested_page is None:
         await callback.answer("目录页码无效", show_alert=True)
         return
-    products, page, page_count = await db.list_products_page(requested_page, CATALOG_PAGE_SIZE)
+    products, page, page_count = await db.products.list_products_page(requested_page, CATALOG_PAGE_SIZE)
     if not products:
         await _safe_edit(callback, "暂时没有商品", reply_markup=main_menu(), parse_mode=None)
         await callback.answer("暂时没有商品", show_alert=True)
@@ -66,7 +66,7 @@ async def cb_product(callback: CallbackQuery, db: Database) -> None:
     if product_id is None or page is None:
         await callback.answer("商品参数无效", show_alert=True)
         return
-    product = await db.get_product(product_id)
+    product = await db.products.get_product(product_id)
     if product is None or not product.active:
         await callback.answer("商品不存在或已下架", show_alert=True)
         return

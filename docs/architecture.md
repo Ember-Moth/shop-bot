@@ -8,9 +8,18 @@
 shop_bot/
 ├── config.py           # pydantic-settings：config.yaml + SHOP_BOT_* 环境变量
 ├── models.py           # Product / Order / OrderStatus（StrEnum）
-├── db.py               # aiosqlite 连接 + DAO（users / products / orders / order_events / fsm_state）
-│                       # 含 FSMStorage：SQLite 持久化 FSM 存储，重启后对话状态恢复
-├── work_queue.py       # 持久化任务表、索引和事务内状态联动触发器
+├── db/                 # 持久化包
+│   ├── core.py         # Database：单连接、连接锁、BEGIN IMMEDIATE 事务、订单锁、fetch_one/fetch_all；组合下列仓储
+│   ├── schema.py       # 模型层：基础 DDL 与旧库就地迁移
+│   ├── mappers.py      # 模型层：sqlite Row → models.py dataclass
+│   ├── work_queue.py   # 模型层：持久化任务表、索引和事务内状态联动触发器
+│   ├── business_notifications.py  # 模型层：付款广播路由/投递表与触发器
+│   ├── fsm.py          # FSMStorage：SQLite 持久化 FSM 存储，重启后对话状态恢复
+│   └── repositories/   # 仓储层，经 db.<仓储>.<方法> 使用；跨聚合原子操作以 conn 参数在同一事务内互调
+│       ├── users / products / orders / purchases   # 用户、商品定价审计、订单快照与状态转换、采购状态机与 /bind
+│       ├── deliveries                              # finalize_delivery 原子落账、历史收敛、撤销旧交付、通知游标
+│       ├── wallet / payments                       # 分币种余额、充值、流水；外部交易凭据、EPay/余额结算、退款
+│       └── operations / work                       # 停滞检查与告警去重、日报登记；任务领取回写、广播/钱包通知记录
 ├── keyboards.py        # 内联键盘（目录、确认、Web App 支付按钮）
 ├── logging_config.py   # 日志系统（彩色开发格式 + JSON 生产格式，按天轮转）
 ├── handlers/
@@ -93,13 +102,13 @@ ready → submitting → upstream_pending → fulfilled
 - 用户可用 `/query <订单号>` 主动查询支付状态（兜底，核单成功后保存任务）
 
 - 状态转换持有连接锁、在写事务中核验前置状态，每次转换写入 `order_events` 审计；
-  交付与采购终态通过 `db.finalize_delivery()` 原子落账，中断后恢复循环幂等收敛。
+  交付与采购终态通过 `db.deliveries.finalize_delivery()` 原子落账，中断后恢复循环幂等收敛。
 
 ## 持久化任务调度
 
 `work_items` 是 SQLite 内的持久化任务表。`kind + entity_id` 唯一，分别对应采购订单、交付/退款订单、钱包流水；`due_at`、`attempts` 保存重试时间和次数。调度只领取 ID，执行时读取当前资料，避免缓存旧引用或旧货品。
 
-`work_queue.py` 的触发器与业务 SQL 处于同一个事务：
+`db/work_queue.py` 的触发器与业务 SQL 处于同一个事务：
 
 1. 订单变为 `paid`，按订单 SKU/业务快照建立采购记录，再保存采购任务。只有历史快照缺失才回退读取商品。
 2. 订单/采购状态变化，同步相应的可执行任务。人工冻结、实体卡等待发货不会被反复扫描；原有 KYC 轮询条件保留。

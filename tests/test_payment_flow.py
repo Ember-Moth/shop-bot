@@ -29,7 +29,7 @@ from tests.fakes import FakeCommbitzGateway
 @pytest.fixture
 async def pending(db, user):
     product = Product(1, "测试商品", "", 999, "CNY")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     return await orders.create_order(db, user.id, product, 1)
 
 
@@ -97,14 +97,14 @@ async def test_callback_confirms_payment_and_worker_delivers_once(*, http_client
         response = await http_client.request(method, "/payment/callback", **kwargs)
         assert response.status == 200
         assert await response.text() == "success"
-    paid = await db.get_order(pending.id)
+    paid = await db.orders.get_order(pending.id)
     assert paid is not None and paid.status == OrderStatus.PAID
-    purchases = await db.list_purchases_by_states(tuple(PurchaseState))
+    purchases = await db.purchases.list_purchases_by_states(tuple(PurchaseState))
     assert len(purchases) == 1
     # 后台恢复循环驱动履约；重复回调/重复扫描都不重复采购
     await recover_once(db, purchaser, bot)
     await recover_once(db, purchaser, bot)
-    final = await db.get_order(pending.id)
+    final = await db.orders.get_order(pending.id)
     assert final is not None and final.payload and final.notified_at
     assert len(bot.session.sent) == 2  # 头条 + 货品分条
 
@@ -123,8 +123,8 @@ async def test_callback_confirms_payment_and_worker_delivers_once(*, http_client
 async def test_callback_rejects_inconsistent_payment(*, http_client, db, pending, purchaser, changes):
     response = await http_client.post("/payment/callback", data=callback_params(pending, **changes))
     assert response.status == 422
-    assert (await db.get_order(pending.id)).status == OrderStatus.PENDING_PAYMENT
-    assert await db.list_purchases_by_states(tuple(PurchaseState)) == []
+    assert (await db.orders.get_order(pending.id)).status == OrderStatus.PENDING_PAYMENT
+    assert await db.purchases.list_purchases_by_states(tuple(PurchaseState)) == []
 
 
 async def test_callback_rejects_bad_signature_and_duplicate_keys(*, http_client, pending):
@@ -138,11 +138,11 @@ async def test_callback_rejects_bad_signature_and_duplicate_keys(*, http_client,
 async def test_trade_number_cannot_pay_two_orders(*, http_client, db, pending, purchaser):
     first = await http_client.get("/payment/callback", params=callback_params(pending))
     assert first.status == 200
-    second = await db.create_order(pending.user_id, pending.product_id, 1, 999, "CNY")
+    second = await db.orders.create_order(pending.user_id, pending.product_id, 1, 999, "CNY")
     response = await http_client.get("/payment/callback", params=callback_params(second, trade_no=f"T{pending.id}"))
     assert response.status == 422
-    assert (await db.get_order(second.id)).status == OrderStatus.PENDING_PAYMENT
-    assert await db.get_purchase_by_order(second.id) is None
+    assert (await db.orders.get_order(second.id)).status == OrderStatus.PENDING_PAYMENT
+    assert await db.purchases.get_purchase_by_order(second.id) is None
 
 
 @pytest.mark.parametrize(
@@ -151,8 +151,8 @@ async def test_trade_number_cannot_pay_two_orders(*, http_client, db, pending, p
 async def test_query_uses_same_payment_checks(*, db, pending, epay, purchaser, bot, httpx_mock, changes):
     httpx_mock.add_response(json=query_result(pending, **changes))
     await cmd_query(query_message(bot, pending), db, epay, purchaser, bot)
-    assert (await db.get_order(pending.id)).status == OrderStatus.PENDING_PAYMENT
-    assert await db.get_purchase_by_order(pending.id) is None
+    assert (await db.orders.get_order(pending.id)).status == OrderStatus.PENDING_PAYMENT
+    assert await db.purchases.get_purchase_by_order(pending.id) is None
 
 
 @pytest.mark.parametrize("user_id,chat_id", [(42, -100123), (700, 700)])
@@ -171,9 +171,9 @@ async def test_query_only_sends_goods_to_owner(
 
 
 async def test_query_denies_other_buyers(*, db, pending, epay, purchaser, bot):
-    await db.upsert_user(43, "other")
+    await db.users.upsert_user(43, "other")
     await cmd_query(query_message(bot, pending, 43, 43), db, epay, purchaser, bot)
-    assert await db.get_purchase_by_order(pending.id) is None
+    assert await db.purchases.get_purchase_by_order(pending.id) is None
     assert "只能查询自己的订单" in bot.session.sent[-1].text
 
 
@@ -185,7 +185,7 @@ async def test_payment_error_does_not_leak_key_in_reply_or_logs(
         await cmd_query(query_message(bot, pending), db, epay, purchaser, bot)
     assert "audit-secret" not in caplog.text
     assert all("audit-secret" not in m.text for m in bot.session.sent)
-    assert await db.get_purchase_by_order(pending.id) is None
+    assert await db.purchases.get_purchase_by_order(pending.id) is None
 
 
 async def test_notification_failure_recovers_without_purchasing_again(
@@ -195,14 +195,14 @@ async def test_notification_failure_recovers_without_purchasing_again(
     response = await http_client.post("/payment/callback", data=callback_params(pending))
     assert response.status == 200
     await recover_once(db, purchaser, bot)
-    persisted = await db.get_order(pending.id)
+    persisted = await db.orders.get_order(pending.id)
     assert persisted is not None and persisted.payload and persisted.notified_at is None
     bot.session.fail_send = False
     queue_clock()
     await recover_once(db, purchaser, bot)
-    final = await db.get_order(pending.id)
+    final = await db.orders.get_order(pending.id)
     assert final is not None and final.notified_at
-    purchase = await db.get_purchase_by_order(pending.id)
+    purchase = await db.purchases.get_purchase_by_order(pending.id)
     assert purchase is not None and purchase.state == PurchaseState.FULFILLED
     # 已通知的订单仍可通过 /query 明确请求补发，只发送同一份货品。
     await cmd_query(query_message(bot, pending), db, epay, purchaser, bot)
@@ -217,15 +217,15 @@ async def test_restart_before_submit_becomes_manual_not_repurchase(*, tmp_path, 
     db = Database(path)
     await db.connect()
     try:
-        user = await db.upsert_user(42, "audit")
+        user = await db.users.upsert_user(42, "audit")
         product = Product(1, "test", "", 999, "CNY", sku="US-1", request_type="esim")
-        await db.seed_products([product])
+        await db.products.seed_products([product])
         pending = await orders.create_order(db, user.id, product, 1)
         await orders.mark_paid(db, DemoPurchaser(), pending.id, trade_no="T1")
         # 模拟：提交意图已持久化，但进程在等待上游响应时崩溃
-        purchase = await db.get_purchase_by_order(pending.id)
+        purchase = await db.purchases.get_purchase_by_order(pending.id)
         assert purchase is not None
-        await db.transition_purchase(purchase.id, PurchaseState.SUBMITTING, from_state=PurchaseState.READY)
+        await db.purchases.transition_purchase(purchase.id, PurchaseState.SUBMITTING, from_state=PurchaseState.READY)
     finally:
         await db.close()
 
@@ -235,11 +235,11 @@ async def test_restart_before_submit_becomes_manual_not_repurchase(*, tmp_path, 
         gateway = FakeCommbitzGateway()
         purchaser = CommbitzPurchaser(gateway)
         await recover_once(recovered, purchaser, bot)
-        purchase = await recovered.get_purchase_by_order(pending.id)
+        purchase = await recovered.purchases.get_purchase_by_order(pending.id)
         assert purchase is not None
         assert purchase.state == PurchaseState.SUBMISSION_UNKNOWN
         assert gateway.create_calls == 0  # 恢复只归档状态，不重新购买
-        saved = await recovered.get_order(pending.id)
+        saved = await recovered.orders.get_order(pending.id)
         assert saved is not None and saved.status == OrderStatus.PAID
     finally:
         await recovered.close()
@@ -247,7 +247,7 @@ async def test_restart_before_submit_becomes_manual_not_repurchase(*, tmp_path, 
 
 @pytest.mark.parametrize("status", [OrderStatus.PAID, OrderStatus.DELIVERY_FAILED])
 async def test_admin_can_resume_paid_or_failed_without_pending_reset(*, db, pending, purchaser, bot, status):
-    await db.transition_order(pending.id, status, trade_no="T1")
+    await db.orders.transition_order(pending.id, status, trade_no="T1")
     message = Message.model_validate(
         {
             "message_id": 1,
@@ -260,7 +260,7 @@ async def test_admin_can_resume_paid_or_failed_without_pending_reset(*, db, pend
     )
     await cmd_paid(message, db, purchaser, bot)
     await recover_once(db, purchaser, bot)
-    final = await db.get_order(pending.id)
+    final = await db.orders.get_order(pending.id)
     assert final is not None and final.status == OrderStatus.DELIVERED and final.trade_no == "T1"
     async with db.connection() as conn:
         async with conn.execute("SELECT to_status FROM order_events") as cur:
@@ -332,7 +332,7 @@ async def test_dispatcher_serializes_duplicate_order_confirmation(db, pending, b
             "product_id": pending.product_id,
             "quantity": 2,
             "product_quote": {
-                key: getattr(await db.get_product(pending.product_id), key)
+                key: getattr(await db.products.get_product(pending.product_id), key)
                 for key in ("price_cents", "currency", "sku", "request_type", "upstream_plan_id")
             },
         }
@@ -354,7 +354,7 @@ async def test_dispatcher_serializes_duplicate_order_confirmation(db, pending, b
         dispatcher.feed_raw_update(bot, confirm(1)),
         dispatcher.feed_raw_update(bot, confirm(2)),
     )
-    created = await db.list_orders()
+    created = await db.orders.list_orders()
     assert len(created) == 2  # 一个 fixture 订单，加一个确认订单。
     assert sum(o.quantity == 2 for o in created) == 1
     assert await context.get_data() == {}
@@ -363,12 +363,12 @@ async def test_dispatcher_serializes_duplicate_order_confirmation(db, pending, b
 async def test_failed_explicit_resend_remains_pending_for_worker(db, pending, purchaser, bot):
     await orders.mark_paid(db, purchaser, pending.id)
     await recover_once(db, purchaser, bot)
-    assert (await db.get_order(pending.id)).notified_at
+    assert (await db.orders.get_order(pending.id)).notified_at
     bot.session.fail_send = True
     assert not await notify_owner(db, bot, pending.id, resend=True)
-    assert (await db.get_order(pending.id)).notification_pending
+    assert (await db.orders.get_order(pending.id)).notification_pending
     bot.session.fail_send = False
     await recover_once(db, purchaser, bot)
-    assert not (await db.get_order(pending.id)).notification_pending
-    purchase = await db.get_purchase_by_order(pending.id)
+    assert not (await db.orders.get_order(pending.id)).notification_pending
+    purchase = await db.purchases.get_purchase_by_order(pending.id)
     assert purchase is not None and purchase.state == PurchaseState.FULFILLED

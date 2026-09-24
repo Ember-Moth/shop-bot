@@ -73,20 +73,22 @@ async def frozen_orders(tmp_path):
         async with database.transaction() as conn:
             await conn.execute("DROP INDEX idx_purchases_upstream")
         product = Product(1, "audit", "", 999, "CNY", sku="SKU", upstream_plan_id="PLAN", request_type="esim")
-        await database.seed_products([product])
+        await database.products.seed_products([product])
         for telegram_id in (42, 43):
-            user = await database.upsert_user(telegram_id, f"buyer-{telegram_id}")
+            user = await database.users.upsert_user(telegram_id, f"buyer-{telegram_id}")
             order = await orders.create_order(database, user.id, product, 1)
             await orders.mark_paid(database, purchaser, order.id, trade_no=f"PAY-{telegram_id}")
-            purchase = await database.get_purchase_by_order(order.id)
+            purchase = await database.purchases.get_purchase_by_order(order.id)
             assert purchase is not None
-            await database.transition_purchase(
+            await database.purchases.transition_purchase(
                 purchase.id,
                 PurchaseState.FULFILLED,
                 upstream_request_id=OLD_REF,
                 upstream_order_no="OLD-NO",
             )
-            await database.transition_order(order.id, OrderStatus.DELIVERED, upstream_ref=OLD_REF, payload=STALE_GOODS)
+            await database.orders.transition_order(
+                order.id, OrderStatus.DELIVERED, upstream_ref=OLD_REF, payload=STALE_GOODS
+            )
             order_ids.append(order.id)
     finally:
         await database.close()
@@ -114,7 +116,7 @@ async def test_rebind_invalidates_old_delivery_and_rechecks_both_buyers(frozen_o
     gateway = Gateway()
     purchaser = CommbitzPurchaser(gateway)
     if already_notified:
-        await db.mark_notified(second)
+        await db.deliveries.mark_notified(second)
     await recover_once(db, purchaser, bot)
     for order_id in (first, second):
         assert not await notify_owner(db, bot, order_id, resend=True)
@@ -124,8 +126,8 @@ async def test_rebind_invalidates_old_delivery_and_rechecks_both_buyers(frozen_o
     gateway.responses[NEW_REF].pop("orderId")
     ok, reason = await purchaser.bind_unknown_purchase(db, second, NEW_REF)
     assert ok, reason
-    order = await db.get_order(second)
-    purchase = await db.get_purchase_by_order(second)
+    order = await db.orders.get_order(second)
+    purchase = await db.purchases.get_purchase_by_order(second)
     assert order.status == OrderStatus.PAID
     assert order.amount_cents == 999 and order.trade_no == "PAY-43"
     assert order.payload is None and order.upstream_ref is None
@@ -136,7 +138,7 @@ async def test_rebind_invalidates_old_delivery_and_rechecks_both_buyers(frozen_o
     assert bot.session.sent == []
 
     await recover_once(db, purchaser, bot)
-    final = await db.get_order(second)
+    final = await db.orders.get_order(second)
     assert final.status == OrderStatus.DELIVERED and final.upstream_ref == NEW_REF
     assert final.notified_at and "NEW-VERIFIED" in final.payload
     assert len(goods_messages(bot, 43)) == 1
@@ -147,12 +149,12 @@ async def test_rebind_invalidates_old_delivery_and_rechecks_both_buyers(frozen_o
     # 第一名买家绑定回原单也必须重新读取，不能直接解冻旧缓存。
     ok, reason = await purchaser.bind_unknown_purchase(db, first, OLD_REF)
     assert ok, reason
-    assert (await db.get_order(first)).status == OrderStatus.PAID
+    assert (await db.orders.get_order(first)).status == OrderStatus.PAID
     assert not await notify_owner(db, bot, first, resend=True)
     await recover_once(db, purchaser, bot)
     assert len(goods_messages(bot, 42)) == 1 and "OLD-VERIFIED" in goods_messages(bot, 42)[0]
-    assert (await db.get_purchase_by_order(first)).state == PurchaseState.FULFILLED
-    assert (await db.get_purchase_by_order(second)).state == PurchaseState.FULFILLED
+    assert (await db.purchases.get_purchase_by_order(first)).state == PurchaseState.FULFILLED
+    assert (await db.purchases.get_purchase_by_order(second)).state == PurchaseState.FULFILLED
     assert gateway.queries == [NEW_REF, NEW_REF, OLD_REF, OLD_REF]
     assert gateway.create_calls == 0
 
@@ -173,8 +175,8 @@ async def test_rebound_order_waits_without_sending_old_goods(frozen_orders, bot,
     else:
         gateway.responses[NEW_REF] = CommbitzError("simulated query failure", 503)
     await recover_once(db, purchaser, bot)
-    assert (await db.get_order(order_id)).status == OrderStatus.PAID
-    assert (await db.get_order(order_id)).payload is None
+    assert (await db.orders.get_order(order_id)).status == OrderStatus.PAID
+    assert (await db.orders.get_order(order_id)).payload is None
     assert not await notify_owner(db, bot, order_id, resend=True)
     assert bot.session.sent == [] and gateway.create_calls == 0
     gateway.responses[NEW_REF] = details(NEW_REF, "NEW-VERIFIED")
@@ -221,10 +223,10 @@ async def test_rebind_survives_restart_and_only_queries_existing_order(frozen_or
     restarted = Database(path)
     await restarted.connect()
     try:
-        rebound = await restarted.get_order(order_id)
+        rebound = await restarted.orders.get_order(order_id)
         assert rebound is not None and rebound.payload is None
         await recover_once(restarted, purchaser, bot)
-        final = await restarted.get_order(order_id)
+        final = await restarted.orders.get_order(order_id)
         assert final is not None and final.upstream_ref == NEW_REF
         assert "NEW-VERIFIED" in goods_messages(bot, 43)[0]
         assert gateway.create_calls == 0
@@ -238,19 +240,19 @@ async def test_repairs_old_rebinding_bug_even_if_already_notified(frozen_orders,
     db, (_, order_id), _ = frozen_orders
     gateway = Gateway()
     purchaser = CommbitzPurchaser(gateway)
-    purchase = await db.get_purchase_by_order(order_id)
+    purchase = await db.purchases.get_purchase_by_order(order_id)
     # 模拟旧版 /bind 只更新采购引用，订单仍保存旧引用/旧货品。
-    await db.transition_purchase(purchase.id, state, upstream_request_id=NEW_REF)
+    await db.purchases.transition_purchase(purchase.id, state, upstream_request_id=NEW_REF)
     if notified:
-        await db.mark_notified(order_id)
+        await db.deliveries.mark_notified(order_id)
     assert not await notify_owner(db, bot, order_id, resend=True)
-    assert order_id in [o.id for o in await db.list_recovery_orders()]
+    assert order_id in [o.id for o in await db.work.list_recovery_orders()]
     await recover_once(db, purchaser, bot)
-    final = await db.get_order(order_id)
+    final = await db.orders.get_order(order_id)
     assert final.status == OrderStatus.DELIVERED and final.upstream_ref == NEW_REF
     assert final.trade_no == "PAY-43" and final.amount_cents == 999
     assert "NEW-VERIFIED" in final.payload and final.notified_at
-    assert (await db.get_purchase_by_order(order_id)).state == PurchaseState.FULFILLED
+    assert (await db.purchases.get_purchase_by_order(order_id)).state == PurchaseState.FULFILLED
     assert gateway.queries == [NEW_REF] and gateway.create_calls == 0
     assert "NEW-VERIFIED" in goods_messages(bot, 43)[0]
 
@@ -259,18 +261,18 @@ async def test_rebind_update_and_old_payload_invalidation_rollback_together(froz
     db, (_, order_id), _ = frozen_orders
     gateway = Gateway()
     purchaser = CommbitzPurchaser(gateway)
-    before_order = await db.get_order(order_id)
-    before_purchase = await db.get_purchase_by_order(order_id)
-    before_events = await db._all("SELECT * FROM order_events WHERE order_id = ?", (order_id,))
+    before_order = await db.orders.get_order(order_id)
+    before_purchase = await db.purchases.get_purchase_by_order(order_id)
+    before_events = await db.fetch_all("SELECT * FROM order_events WHERE order_id = ?", (order_id,))
     async with db.transaction() as conn:
         await conn.execute("""CREATE TRIGGER reject_binding BEFORE UPDATE OF upstream_request_id ON purchases
             WHEN NEW.upstream_request_id = 'new-correct'
             BEGIN SELECT RAISE(ABORT, 'simulated binding failure'); END""")
     with pytest.raises(sqlite3.IntegrityError, match="simulated binding failure"):
         await purchaser.bind_unknown_purchase(db, order_id, NEW_REF)
-    assert await db.get_order(order_id) == before_order
-    assert await db.get_purchase_by_order(order_id) == before_purchase
-    assert len(await db._all("SELECT * FROM order_events WHERE order_id = ?", (order_id,))) == len(before_events)
+    assert await db.orders.get_order(order_id) == before_order
+    assert await db.purchases.get_purchase_by_order(order_id) == before_purchase
+    assert len(await db.fetch_all("SELECT * FROM order_events WHERE order_id = ?", (order_id,))) == len(before_events)
     assert not await notify_owner(db, bot, order_id, resend=True)
     assert bot.session.sent == []
 
@@ -296,7 +298,7 @@ async def test_notification_waits_for_rebind_and_rejects_old_payload(frozen_orde
         release.set()
         result, sent = await asyncio.gather(binding, notifying)
     assert result[0] and not sent
-    assert bot.session.sent == [] and (await db.get_order(order_id)).payload is None
+    assert bot.session.sent == [] and (await db.orders.get_order(order_id)).payload is None
 
 
 @pytest.mark.parametrize("problem", ["state_changed", "wrong_purchase", "wrong_reference"])
@@ -304,16 +306,16 @@ async def test_finalize_delivery_refuses_stale_identity(frozen_orders, problem):
     db, (first, second), _ = frozen_orders
     purchaser = CommbitzPurchaser(Gateway())
     assert (await purchaser.bind_unknown_purchase(db, second, NEW_REF))[0]
-    purchase = await db.get_purchase_by_order(second)
+    purchase = await db.purchases.get_purchase_by_order(second)
     purchase_id = purchase.id
     reference = NEW_REF
     if problem == "state_changed":
-        await db.transition_purchase(purchase.id, PurchaseState.SUBMISSION_UNKNOWN)
+        await db.purchases.transition_purchase(purchase.id, PurchaseState.SUBMISSION_UNKNOWN)
     elif problem == "wrong_purchase":
-        purchase_id = (await db.get_purchase_by_order(first)).id
+        purchase_id = (await db.purchases.get_purchase_by_order(first)).id
     else:
         reference = OLD_REF
-    final = await db.finalize_delivery(
+    final = await db.deliveries.finalize_delivery(
         second,
         purchase_id,
         from_purchase_state=PurchaseState.UPSTREAM_PENDING,
@@ -321,8 +323,8 @@ async def test_finalize_delivery_refuses_stale_identity(frozen_orders, problem):
         payload="unverified goods",
     )
     assert final is None
-    assert (await db.get_order(second)).status == OrderStatus.PAID
-    assert (await db.get_order(second)).payload is None
+    assert (await db.orders.get_order(second)).status == OrderStatus.PAID
+    assert (await db.orders.get_order(second)).payload is None
 
 
 async def test_rebound_kyc_order_can_submit_documents_before_new_delivery(frozen_orders, bot):
@@ -332,15 +334,15 @@ async def test_rebound_kyc_order_can_submit_documents_before_new_delivery(frozen
     purchaser = CommbitzPurchaser(gateway)
     assert (await purchaser.bind_unknown_purchase(db, order_id, NEW_REF))[0]
     await recover_once(db, purchaser, bot)
-    assert (await db.get_purchase_by_order(order_id)).state == PurchaseState.AWAITING_KYC
-    assert (await db.get_order(order_id)).payload is None and bot.session.sent == []
+    assert (await db.purchases.get_purchase_by_order(order_id)).state == PurchaseState.AWAITING_KYC
+    assert (await db.orders.get_order(order_id)).payload is None and bot.session.sent == []
     accepted, reason = await purchaser.submit_kyc(
         db,
         order_id,
         documents={"passportFront": "https://example.invalid/kyc.jpg"},
     )
     assert accepted, reason
-    assert (await db.get_purchase_by_order(order_id)).state == PurchaseState.KYC_SUBMITTED
+    assert (await db.purchases.get_purchase_by_order(order_id)).state == PurchaseState.KYC_SUBMITTED
     gateway.responses[NEW_REF].update(status="Success", kycStatus="verified", isKycVerified=True)
     await recover_once(db, purchaser, bot)
     assert "NEW-VERIFIED" in goods_messages(bot, 43)[0]
@@ -349,7 +351,7 @@ async def test_rebound_kyc_order_can_submit_documents_before_new_delivery(frozen
 
 async def test_concurrent_rebinding_keeps_losing_order_frozen_without_index(frozen_orders, bot):
     db, order_ids, _ = frozen_orders
-    assert await db._one("SELECT name FROM sqlite_master WHERE name = 'idx_purchases_upstream'") is None
+    assert await db.fetch_one("SELECT name FROM sqlite_master WHERE name = 'idx_purchases_upstream'") is None
     ready = asyncio.Event()
 
     class ConcurrentGateway(Gateway):
@@ -366,8 +368,8 @@ async def test_concurrent_rebinding_keeps_losing_order_frozen_without_index(froz
     results = await asyncio.gather(*(purchaser.bind_unknown_purchase(db, oid, NEW_REF) for oid in order_ids))
     assert sum(ok for ok, _ in results) == 1
     for order_id, (accepted, _) in zip(order_ids, results, strict=True):
-        order = await db.get_order(order_id)
-        purchase = await db.get_purchase_by_order(order_id)
+        order = await db.orders.get_order(order_id)
+        purchase = await db.purchases.get_purchase_by_order(order_id)
         if accepted:
             assert order.status == OrderStatus.PAID and order.payload is None
             assert purchase.state == PurchaseState.UPSTREAM_PENDING and purchase.upstream_request_id == NEW_REF
@@ -383,15 +385,15 @@ async def test_new_goods_and_purchase_completion_rollback_together(frozen_orders
     gateway = Gateway()
     purchaser = CommbitzPurchaser(gateway)
     assert (await purchaser.bind_unknown_purchase(db, order_id, NEW_REF))[0]
-    before = await db.get_order(order_id)
+    before = await db.orders.get_order(order_id)
     async with db.transaction() as conn:
         await conn.execute("""CREATE TRIGGER reject_completion BEFORE UPDATE OF state ON purchases
             WHEN NEW.state = 'fulfilled'
             BEGIN SELECT RAISE(ABORT, 'simulated completion failure'); END""")
     with pytest.raises(sqlite3.IntegrityError, match="simulated completion failure"):
         await purchaser.fulfill(db, order_id)
-    assert await db.get_order(order_id) == before
-    assert (await db.get_purchase_by_order(order_id)).state == PurchaseState.UPSTREAM_PENDING
+    assert await db.orders.get_order(order_id) == before
+    assert (await db.purchases.get_purchase_by_order(order_id)).state == PurchaseState.UPSTREAM_PENDING
     assert not await notify_owner(db, bot, order_id, resend=True)
     assert bot.session.sent == []
     async with db.transaction() as conn:

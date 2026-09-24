@@ -67,7 +67,7 @@ async def cmd_start(message: Message, db: Database, state: FSMContext) -> None:
     from_user = message.from_user
     assert from_user is not None  # aiogram 在私聊场景下保证非空
     display_name = " ".join(filter(None, [from_user.first_name, from_user.last_name])) or None
-    await db.upsert_user(from_user.id, from_user.username, display_name)
+    await db.users.upsert_user(from_user.id, from_user.username, display_name)
     settings = get_settings()
     await message.answer("👇 请选择功能 👇", reply_markup=main_menu())
     # 常驻回复键盘：发送一次即驻留，用户点底部按钮即可触发功能
@@ -87,7 +87,7 @@ async def cb_menu(callback: CallbackQuery) -> None:
 
 
 async def _send_catalog(message: Message, db: Database) -> None:
-    products, page, page_count = await db.list_products_page(0, keyboards.CATALOG_PAGE_SIZE)
+    products, page, page_count = await db.products.list_products_page(0, keyboards.CATALOG_PAGE_SIZE)
     if not products:
         await message.answer("暂时没有商品")
         return
@@ -101,11 +101,11 @@ async def _send_catalog(message: Message, db: Database) -> None:
 async def _render_my_orders(message: Message, db: Database, title: str) -> None:
     from_user = message.from_user
     assert from_user is not None
-    user = await db.get_user_by_telegram_id(from_user.id)
+    user = await db.users.get_user_by_telegram_id(from_user.id)
     if user is None:
         await message.answer("你还没有下过单")
         return
-    user_orders = await db.list_orders_for_user(user.id)
+    user_orders = await db.orders.list_orders_for_user(user.id)
     if not user_orders:
         await message.answer("你还没有订单。\n点「🛒 购买商品」开始第一单！", reply_markup=main_menu())
         return
@@ -119,11 +119,11 @@ async def cb_my_orders(callback: CallbackQuery, db: Database) -> None:
     if msg is None or isinstance(msg, InaccessibleMessage):
         await callback.answer()
         return
-    user = await db.get_user_by_telegram_id(callback.from_user.id)
+    user = await db.users.get_user_by_telegram_id(callback.from_user.id)
     if user is None:
         await callback.answer("你还没有下过单", show_alert=True)
         return
-    user_orders = await db.list_orders_for_user(user.id)
+    user_orders = await db.orders.list_orders_for_user(user.id)
     if not user_orders:
         await _safe_edit(callback, "你还没有订单。\n点「🛒 购买商品」开始第一单！", reply_markup=main_menu())
         await callback.answer()
@@ -222,7 +222,7 @@ async def cmd_query(message: Message, db: Database, epay: EPayClient | None, pur
         await message.answer("订单号必须是数字")
         return
 
-    order = await db.get_order(order_id)
+    order = await db.orders.get_order(order_id)
     if order is None:
         await message.answer("订单不存在")
         return
@@ -230,7 +230,7 @@ async def cmd_query(message: Message, db: Database, epay: EPayClient | None, pur
     # 只能查自己的订单（管理员除外）
     from_user = message.from_user
     assert from_user is not None
-    user = await db.get_user_by_telegram_id(from_user.id)
+    user = await db.users.get_user_by_telegram_id(from_user.id)
     if from_user.id not in get_settings().admin_ids and (user is None or order.user_id != user.id):
         await message.answer("只能查询自己的订单")
         return
@@ -256,10 +256,10 @@ async def cmd_query(message: Message, db: Database, epay: EPayClient | None, pur
             await message.answer("支付信息暂时无法确认，请稍后再试或联系管理员")
             return
     if order.status == OrderStatus.DELIVERED:
-        await db.queue_redelivery(order.id)
+        await db.deliveries.queue_redelivery(order.id)
         await message.answer(f"订单 #{order.id} 已发货，系统会将货品私信发送给买家")
     elif order.status == OrderStatus.PAID:
-        purchase = await db.get_purchase_by_order(order.id)
+        purchase = await db.purchases.get_purchase_by_order(order.id)
         detail = "正在履约，请稍等"
         if purchase is not None and purchase.state == PurchaseState.AWAITING_DISPATCH:
             detail = "实体 SIM 已受理，等待人工发货"

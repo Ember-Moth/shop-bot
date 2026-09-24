@@ -120,7 +120,7 @@ async def test_menu_router_debounces_repeated_taps(db, user, bot):
     """连点同一菜单按钮 3 秒内只处理第一次。"""
     start._menu_last_seen.clear()
     product = Product(1, "美国 1GB", "", 999, "CNY")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     for _ in range(5):
         await start.menu_router(menu_message(bot, MENU_BUY), db, None, None)
     catalog_msgs = [m.text for m in bot.session.sent if m.text and "选择eSIM套餐" in m.text]
@@ -131,7 +131,7 @@ async def test_menu_router_dispatches_each_entry(db, user, bot):
     """防抖窗口外，各菜单入口都能正确分发。"""
     start._menu_last_seen.clear()
     product = Product(1, "美国 1GB", "", 999, "CNY")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     await start.menu_router(menu_message(bot, MENU_BUY), db, None, None)
     # 手动清除防抖时间戳，模拟 3 秒后
     start._menu_last_seen.clear()
@@ -163,13 +163,13 @@ async def test_cmd_start_records_username_and_display_name(db, bot):
     """/start 建档时记录 TG ID、用户名、昵称；改名后再次 /start 刷新。"""
     context = FSMContext(storage=FSMStorage(db), key=StorageKey(bot_id=1, chat_id=42, user_id=42))
     await start.cmd_start(menu_message(bot, "/start"), db, context)
-    user = await db.get_user_by_telegram_id(42)
+    user = await db.users.get_user_by_telegram_id(42)
     assert user.username is None and user.display_name == "Tester"
     renamed = menu_message(bot, "/start").model_copy(
         update={"from_user": User(id=42, is_bot=False, first_name="伟", last_name="张", username="zhangwei")}
     )
     await start.cmd_start(renamed, db, context)
-    user = await db.get_user_by_telegram_id(42)
+    user = await db.users.get_user_by_telegram_id(42)
     assert user.username == "zhangwei" and user.display_name == "伟 张"
 
 
@@ -194,7 +194,7 @@ async def test_cmd_start_answers_even_if_admin_menu_fails(db, bot, monkeypatch):
 
 async def test_menu_router_buy_and_orders(db, user, bot):
     start._menu_last_seen.clear()
-    await db.seed_products([Product(1, "美国 1GB", "", 999, "CNY")])
+    await db.products.seed_products([Product(1, "美国 1GB", "", 999, "CNY")])
     await start.menu_router(menu_message(bot, MENU_BUY), db, None, None)
     assert any("选择eSIM套餐" in (m.text or "") for m in bot.session.sent)
 
@@ -203,9 +203,9 @@ async def test_menu_router_buy_and_orders(db, user, bot):
     assert any("你还没有订单" in (m.text or "") for m in bot.session.sent)
 
     product2 = Product(2, "美国 1GB", "", 999, "CNY")
-    await db.seed_products([product2])
-    order = await db.create_order(user.id, product2.id, 1, 999, "CNY")
-    await db.transition_order(order.id, OrderStatus.DELIVERED)
+    await db.products.seed_products([product2])
+    order = await db.orders.create_order(user.id, product2.id, 1, 999, "CNY")
+    await db.orders.transition_order(order.id, OrderStatus.DELIVERED)
     start._menu_last_seen.clear()
     await start.menu_router(menu_message(bot, MENU_ORDERS), db, None, None)
     texts = [m.text or "" for m in bot.session.sent]

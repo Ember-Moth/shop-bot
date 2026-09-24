@@ -18,7 +18,7 @@ async def test_mark_paid_confirms_payment_and_creates_purchase(db, user, product
     order = await orders.create_order(db, user.id, product, 1)
     final = await orders.mark_paid(db, purchaser, order.id)
     assert final.status == OrderStatus.PAID
-    purchase = await db.get_purchase_by_order(order.id)
+    purchase = await db.purchases.get_purchase_by_order(order.id)
     assert purchase is not None
     assert purchase.state.value == "ready"
     assert purchase.sku  # 演示商品也有兜底 SKU
@@ -30,7 +30,7 @@ async def test_double_mark_paid_is_idempotent(db, user, product, purchaser):
     final = await orders.mark_paid(db, purchaser, order.id, trade_no="T1")
     assert final.status == OrderStatus.PAID
     assert final.trade_no == "T1"
-    purchases = await db.list_purchases_by_states(tuple(PurchaseState))
+    purchases = await db.purchases.list_purchases_by_states(tuple(PurchaseState))
     assert len(purchases) == 1  # 采购任务不重复
 
 
@@ -43,7 +43,7 @@ async def test_concurrent_mark_paid_single_payment_and_purchase(db, user, produc
     )
     # 同交易重复确认幂等成功，采购任务只建一份
     assert all(not isinstance(r, Exception) for r in results)
-    purchases = await db.list_purchases_by_states(tuple(PurchaseState))
+    purchases = await db.purchases.list_purchases_by_states(tuple(PurchaseState))
     assert len(purchases) == 1
 
 
@@ -80,6 +80,6 @@ async def test_demo_fulfill_delivers_and_purchases_once(db, user, product, purch
     assert first.payload == f"[stub goods for order #{order.id}]"
     second = await purchaser.fulfill(db, order.id)
     assert second is not None and second.status == OrderStatus.DELIVERED
-    purchase = await db.get_purchase_by_order(order.id)
+    purchase = await db.purchases.get_purchase_by_order(order.id)
     assert purchase is not None and purchase.state == PurchaseState.FULFILLED
     assert purchase.attempts == 0  # 模拟模式不经过提交

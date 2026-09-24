@@ -113,9 +113,9 @@ def format_daily_report(summary: dict, date_label: str) -> str:
 async def send_daily_report(db: Database, bot: Bot, settings: Settings) -> bool:
     """生成并发送昨日报表；至少送达一位管理员才登记为已发送。"""
     date_label, start_utc, end_utc = yesterday_window()
-    if await db.report_sent(date_label):
+    if await db.operations.report_sent(date_label):
         return True  # 当天已送达（重启重入）
-    summary = await db.daily_summary(start_utc, end_utc)
+    summary = await db.operations.daily_summary(start_utc, end_utc)
     text = format_daily_report(summary, date_label)
     delivered = False
     for admin_id in settings.admin_ids:
@@ -125,7 +125,7 @@ async def send_daily_report(db: Database, bot: Bot, settings: Settings) -> bool:
         except Exception as exc:
             logger.warning("daily report delivery failed", extra={"error": type(exc).__name__})
     if delivered:
-        await db.mark_report_sent(date_label)
+        await db.operations.mark_report_sent(date_label)
     return delivered
 
 
@@ -143,7 +143,7 @@ async def _attempt_yesterday_report(db: Database, bot: Bot, settings: Settings) 
 async def daily_report_loop(db: Database, bot: Bot, settings: Settings, runtime: RuntimeState | None = None) -> None:
     while True:
         # 启动/重启后：若昨天的报表尚未送达（如 0 点时服务不可用），先补发再进入常规调度
-        if not await db.report_sent(yesterday_window()[0]):
+        if not await db.operations.report_sent(yesterday_window()[0]):
             await _attempt_yesterday_report(db, bot, settings)
         remaining = seconds_until_next_midnight()
         while remaining > 0:  # 分片睡眠：长眠期间保持心跳，供 worker 监督判定存活

@@ -102,9 +102,9 @@ async def amain() -> None:
         for event, recipients in routes.items():
             if not recipients:
                 logger.warning("business notification event %s has no recipients; configure its route", event)
-        await db.configure_business_notifications(routes)
-        if not settings.upstream.provider and not await db.list_all_products():
-            await db.seed_products(DEMO_PRODUCTS)
+        await db.work.configure_business_notifications(routes)
+        if not settings.upstream.provider and not await db.products.list_all_products():
+            await db.products.seed_products(DEMO_PRODUCTS)
 
         # Commbitz 共享客户端：目录同步 + 采购 + 人工核对共用，随进程生命周期关闭
         commbitz_client = build_commbitz_client(settings)
@@ -189,7 +189,7 @@ async def amain() -> None:
             # supervisor(systemd) 将重启服务；告警失败不阻挡退出。
             try:
                 async with asyncio.timeout(10):
-                    await db.set_alert(f"worker_{failed_name}", f"后台任务 {failed_name} 退出，服务将重启")
+                    await db.operations.set_alert(f"worker_{failed_name}", f"后台任务 {failed_name} 退出，服务将重启")
                     await operations.deliver_alerts()
             except Exception:
                 logger.warning("worker failure alert unavailable")

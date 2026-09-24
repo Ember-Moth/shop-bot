@@ -77,32 +77,32 @@ def test_format_cents():
 
 async def test_topup_credit_is_idempotent(db, user):
     """充值到账只入账一次：重复回调（同/不同交易号）不重复加钱。"""
-    topup = await db.create_topup(user.id, 100_00)
-    first = await db.complete_topup(topup.id, trade_no="TX-1")
+    topup = await db.wallet.create_topup(user.id, 100_00)
+    first = await db.wallet.complete_topup(topup.id, trade_no="TX-1")
     assert first is not None and first.status.value == "paid"
     # 网关重试：再次回调 complete_topup 返回已有记录，不重复入账
-    again = await db.complete_topup(topup.id, trade_no="TX-1")
+    again = await db.wallet.complete_topup(topup.id, trade_no="TX-1")
     assert again is not None and again.status.value == "paid"
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 100_00
-    txs = await db.list_balance_transactions(user.id)
+    txs = await db.wallet.list_balance_transactions(user.id)
     assert len(txs) == 1
 
 
 async def test_pay_order_with_balance_success_writes_ledger(db, user):
     product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
     # 先充值 10 元
-    topup = await db.create_topup(user.id, 1000_00)
-    await db.complete_topup(topup.id, trade_no="TX-0")
+    topup = await db.wallet.create_topup(user.id, 1000_00)
+    await db.wallet.complete_topup(topup.id, trade_no="TX-0")
 
-    paid, err = await db.pay_order_with_balance(order.id, user.id, order.amount_cents)
+    paid, err = await db.payments.pay_order_with_balance(order.id, user.id, order.amount_cents)
     assert err is None and paid is not None and paid.status.value == "paid"
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None
     assert user_after.balance_cents == 1000_00 - order.amount_cents
-    txs = await db.list_balance_transactions(user.id)
+    txs = await db.wallet.list_balance_transactions(user.id)
     assert [t.kind for t in txs] == ["purchase", "topup"]
     assert txs[0].amount_cents == -order.amount_cents
     assert txs[0].balance_after == user_after.balance_cents
@@ -110,28 +110,28 @@ async def test_pay_order_with_balance_success_writes_ledger(db, user):
 
 async def test_pay_order_with_balance_insufficient(db, user):
     product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)  # 余额 0
-    paid, err = await db.pay_order_with_balance(order.id, user.id, order.amount_cents)
+    paid, err = await db.payments.pay_order_with_balance(order.id, user.id, order.amount_cents)
     assert paid is None and err == "insufficient"
-    assert (await db.get_order(order.id)).status.value == "pending_payment"
+    assert (await db.orders.get_order(order.id)).status.value == "pending_payment"
 
 
 async def test_concurrent_balance_pay_only_one_succeeds(db, user):
     """余额只够一单：并发支付两单只有一单成功，绝不透支。"""
     product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
-    await db.seed_products([product])
-    topup = await db.create_topup(user.id, 100)  # 余额 1 元，只够一单
-    await db.complete_topup(topup.id, trade_no="TX")
+    await db.products.seed_products([product])
+    topup = await db.wallet.create_topup(user.id, 100)  # 余额 1 元，只够一单
+    await db.wallet.complete_topup(topup.id, trade_no="TX")
     o1 = await orders.create_order(db, user.id, product, 1)
     o2 = await orders.create_order(db, user.id, product, 1)
     results = await asyncio.gather(
-        db.pay_order_with_balance(o1.id, user.id, o1.amount_cents),
-        db.pay_order_with_balance(o2.id, user.id, o2.amount_cents),
+        db.payments.pay_order_with_balance(o1.id, user.id, o1.amount_cents),
+        db.payments.pay_order_with_balance(o2.id, user.id, o2.amount_cents),
     )
     successes = [r for r, e in results if r is not None and e is None]
     assert len(successes) == 1
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 0
 
 
@@ -151,44 +151,44 @@ def _topup_callback_params(topup_id, amount="10.00", **changes):
 
 async def test_topup_callback_credits_once(*, http_client, db, user, epay):
     """T 前缀回调走充值分支：入账幂等，重复回调返回 success。"""
-    topup = await db.create_topup(user.id, 1000_00)
+    topup = await db.wallet.create_topup(user.id, 1000_00)
     for _ in range(2):
         params = _topup_callback_params(topup.id, amount="1000.00")
         params["sign"] = _create_sign(params, "audit-secret")
         response = await http_client.post("/payment/callback", data=params)
         assert response.status == 200 and (await response.text()) == "success"
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 1000_00
-    txs = await db.list_balance_transactions(user.id)
+    txs = await db.wallet.list_balance_transactions(user.id)
     assert len(txs) == 1 and txs[0].kind == "topup" and txs[0].amount_cents == 1000_00
 
 
 async def test_topup_callback_rejects_amount_mismatch(*, http_client, db, user, epay):
-    topup = await db.create_topup(user.id, 1000_00)
+    topup = await db.wallet.create_topup(user.id, 1000_00)
     params = _topup_callback_params(topup.id, amount="1.00")
     response = await http_client.post("/payment/callback", data=params)
     assert response.status == 422
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 0
 
 
 async def test_order_callback_ignores_topup_namespace(*, http_client, db, user, epay):
     """纯数字回调不受 T 前缀影响；T 前缀不会命中商品订单。"""
     product = Product(1, "p", "", 100, "CNY")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
     # 充值回调携带不存在的充值单 → 404，不影响商品订单
-    topup = await db.create_topup(user.id, 100_00)
+    topup = await db.wallet.create_topup(user.id, 100_00)
     params = _topup_callback_params(topup.id, amount="999.00")
     params["sign"] = _create_sign(params, "audit-secret")
     response = await http_client.post("/payment/callback", data=params)
     assert response.status == 422
-    assert (await db.get_order(order.id)).status.value == "pending_payment"
+    assert (await db.orders.get_order(order.id)).status.value == "pending_payment"
 
 
 async def test_menu_balance_shows_balance(db, user, bot):
-    topup = await db.create_topup(user.id, 500_00)
-    await db.complete_topup(topup.id, trade_no="TX")
+    topup = await db.wallet.create_topup(user.id, 500_00)
+    await db.wallet.complete_topup(topup.id, trade_no="TX")
     await render_balance(menu_message_of(bot), db)
     texts = [m.text or "" for m in bot.session.sent]
     assert any("500.00 CNY" in t and "充值" in t for t in texts)
@@ -231,35 +231,35 @@ def _balance_callback(bot, order_id):
 
 async def test_cb_pay_with_balance_success(db, user, purchaser, bot):
     product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
-    topup = await db.create_topup(user.id, 1000_00)
-    await db.complete_topup(topup.id, trade_no="TX")
+    topup = await db.wallet.create_topup(user.id, 1000_00)
+    await db.wallet.complete_topup(topup.id, trade_no="TX")
 
     await cb_pay_with_balance(_balance_callback(bot, order.id), db, purchaser, bot)
 
     # 收款入口只入账并建立采购任务；后台履约
-    order = await db.get_order(order.id)
+    order = await db.orders.get_order(order.id)
     assert order is not None and order.status.value == "paid"
-    purchase = await db.get_purchase_by_order(order.id)
+    purchase = await db.purchases.get_purchase_by_order(order.id)
     assert purchase is not None and purchase.state.value == "ready"
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 1000_00 - order.amount_cents
     # 恢复循环完成履约并私信
     await recover_once(db, purchaser, bot)
-    order = await db.get_order(order.id)
+    order = await db.orders.get_order(order.id)
     assert order is not None and order.status.value == "delivered" and order.payload
-    assert await db.get_purchase_by_order(order.id) is not None
+    assert await db.purchases.get_purchase_by_order(order.id) is not None
 
 
 async def test_cb_pay_with_balance_insufficient_alerts(db, user, purchaser, bot):
     product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)  # 无余额
     await cb_pay_with_balance(_balance_callback(bot, order.id), db, purchaser, bot)
-    order = await db.get_order(order.id)
+    order = await db.orders.get_order(order.id)
     assert order is not None and order.status.value == "pending_payment"
-    assert await db.get_purchase_by_order(order.id) is None
+    assert await db.purchases.get_purchase_by_order(order.id) is None
 
 
 async def test_migration_adds_user_balance_column(tmp_path):
@@ -276,7 +276,7 @@ async def test_migration_adds_user_balance_column(tmp_path):
     db = Database(path)
     await db.connect()
     try:
-        user = await db.upsert_user(7, "legacy")
+        user = await db.users.upsert_user(7, "legacy")
         assert user.balance_cents == 0
     finally:
         await db.close()
@@ -313,11 +313,11 @@ async def test_render_balance_unknown_user_prompts_start(db, bot):
 async def test_epay_callback_compensates_after_legacy_balance_payment(*, http_client, db, user, epay):
     """历史余额单收到真实收款后同币种补偿，重放同一交易只补一次。"""
     product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
-    topup = await db.create_topup(user.id, 1000_00)
-    await db.complete_topup(topup.id, trade_no="TX")
-    paid, err = await db.pay_order_with_balance(order.id, user.id, order.amount_cents)
+    topup = await db.wallet.create_topup(user.id, 1000_00)
+    await db.wallet.complete_topup(topup.id, trade_no="TX")
+    paid, err = await db.payments.pay_order_with_balance(order.id, user.id, order.amount_cents)
     assert err is None and paid is not None
     assert paid.trade_no == f"BAL{order.id}"  # 占位 trade_no 已写入
     # 旧版本已打开的 EPay 收银台完成付款：记录并补偿，绝不丢弃真实收款
@@ -334,32 +334,32 @@ async def test_epay_callback_compensates_after_legacy_balance_payment(*, http_cl
     assert response.status == 200
     repeated = await http_client.post("/payment/callback", data=params)
     assert repeated.status == 200
-    order_after = await db.get_order(order.id)
+    order_after = await db.orders.get_order(order.id)
     assert order_after is not None and order_after.trade_no == f"BAL{order.id}"
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 1000_00
-    assert len([t for t in await db.list_balance_transactions(user.id) if t.kind == "payment_credit"]) == 1
+    assert len([t for t in await db.wallet.list_balance_transactions(user.id) if t.kind == "payment_credit"]) == 1
 
 
 async def test_topup_callback_rejects_whitespace_trade_no(*, http_client, db, user, epay):
     """充值回调交易号首尾空白拒绝（与商品订单 validate_payment 同款规则）。"""
-    topup = await db.create_topup(user.id, 1000_00)
+    topup = await db.wallet.create_topup(user.id, 1000_00)
     params = _topup_callback_params(topup.id, amount="1000.00", trade_no=" TT1 ")
     response = await http_client.post("/payment/callback", data=params)
     assert response.status == 400
-    topup_after = await db.get_topup(topup.id)
+    topup_after = await db.wallet.get_topup(topup.id)
     assert topup_after is not None and topup_after.status.value == "pending"
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 0
 
 
 async def test_topup_callback_rejects_nonstandard_money_format(*, http_client, db, user, epay):
     """充值回调金额格式非法（科学计数法，Decimal 可解析但格式不合法）拒绝。"""
-    topup = await db.create_topup(user.id, 100_00)
+    topup = await db.wallet.create_topup(user.id, 100_00)
     params = _topup_callback_params(topup.id, amount="1e2")  # 数值恰等于 100 元
     response = await http_client.post("/payment/callback", data=params)
     assert response.status == 422
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 0
 
 
@@ -375,11 +375,11 @@ def test_parse_signed_amount():
 
 async def test_adjust_balance_credit_and_debit(db, user):
     """调账：正负调整入账并各写一条 adjust 流水。"""
-    assert await db.adjust_balance(user.id, 500_00, "充值补单") == 500_00
-    assert await db.adjust_balance(user.id, -200_00, "订单退款") == 300_00
-    user_after = await db.get_user(user.id)
+    assert await db.wallet.adjust_balance(user.id, 500_00, "充值补单") == 500_00
+    assert await db.wallet.adjust_balance(user.id, -200_00, "订单退款") == 300_00
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 300_00
-    txs = await db.list_balance_transactions(user.id)
+    txs = await db.wallet.list_balance_transactions(user.id)
     assert [t.kind for t in txs] == ["adjust", "adjust"]
     assert txs[0].amount_cents == -200_00 and txs[0].note == "订单退款"
     assert txs[0].balance_after == 300_00
@@ -387,11 +387,11 @@ async def test_adjust_balance_credit_and_debit(db, user):
 
 async def test_adjust_balance_rejects_overdraft_and_unknown_user(db, user):
     """负向调账不允许扣成负余额；不存在的用户拒绝；拒绝时不写流水。"""
-    assert await db.adjust_balance(user.id, -1, "超额扣减") is None
-    assert await db.adjust_balance(9999, 100, "不存在") is None
-    user_after = await db.get_user(user.id)
+    assert await db.wallet.adjust_balance(user.id, -1, "超额扣减") is None
+    assert await db.wallet.adjust_balance(9999, 100, "不存在") is None
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 0
-    assert await db.list_balance_transactions(user.id) == []
+    assert await db.wallet.list_balance_transactions(user.id) == []
 
 
 async def test_cmd_adjust_replies_and_notifies_user(db, user, bot, purchaser):
@@ -411,7 +411,7 @@ async def test_cmd_adjust_replies_and_notifies_user(db, user, bot, purchaser):
     texts = [m.text or "" for m in bot.session.sent]
     assert any("已调账 +5.50 CNY" in t for t in texts)  # 管理员确认
     assert any("余额调整 +5.50 CNY" in t and "测试调账" in t for t in texts)  # 用户私信
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 550
 
 
@@ -424,46 +424,46 @@ from shop_bot.models import OrderStatus  # noqa: E402
 async def test_refund_order_to_balance_success_and_guards(db, user):
     """paid → refunded：余额入账 + refund 流水；重复退款与非 paid 订单拒绝（防双退）。"""
     product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
-    refunded, err = await db.refund_order_to_balance(order.id, "too early")
+    refunded, err = await db.payments.refund_order_to_balance(order.id, "too early")
     assert refunded is None and err == "not refundable"  # pending_payment 不可退
-    await db.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
-    refunded, err = await db.refund_order_to_balance(order.id, "test refund")
+    await db.orders.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
+    refunded, err = await db.payments.refund_order_to_balance(order.id, "test refund")
     assert err is None and refunded is not None and refunded.status == OrderStatus.REFUNDED
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == order.amount_cents
-    again, err = await db.refund_order_to_balance(order.id, "again")
+    again, err = await db.payments.refund_order_to_balance(order.id, "again")
     assert again is None and err == "not refundable"  # 幂等：余额不翻倍
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == order.amount_cents
-    txs = await db.list_balance_transactions(user.id)
+    txs = await db.wallet.list_balance_transactions(user.id)
     assert len(txs) == 1 and txs[0].kind == "refund" and txs[0].amount_cents == order.amount_cents
 
 
 async def test_balance_paid_order_refund_cycle(db, user):
     """余额支付闭环：充值 → 支付 → 履约失败退款 → 余额复原，流水完整可溯。"""
     product = Product(1, "p", "", 100, "CNY", sku="S", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
-    topup = await db.create_topup(user.id, 1000_00)
-    await db.complete_topup(topup.id, trade_no="TX")
-    paid, err = await db.pay_order_with_balance(order.id, user.id, order.amount_cents)
+    topup = await db.wallet.create_topup(user.id, 1000_00)
+    await db.wallet.complete_topup(topup.id, trade_no="TX")
+    paid, err = await db.payments.pay_order_with_balance(order.id, user.id, order.amount_cents)
     assert err is None and paid is not None
-    refunded, err = await db.refund_order_to_balance(order.id, "upstream rejected")
+    refunded, err = await db.payments.refund_order_to_balance(order.id, "upstream rejected")
     assert err is None and refunded is not None
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == 1000_00
-    txs = await db.list_balance_transactions(user.id)
+    txs = await db.wallet.list_balance_transactions(user.id)
     assert [t.kind for t in txs] == ["refund", "purchase", "topup"]
 
 
 async def test_cmd_refund_paid_order_notifies_buyer(db, user, bot, purchaser):
     """人工退款：/refund 关单、回复管理员并私信买家；已退款订单再次拒绝。"""
     product = Product(1, "p", "", 100, "CNY")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
-    await db.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
+    await db.orders.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
     msg = Message.model_validate(
         {
             "message_id": 1,
@@ -476,7 +476,7 @@ async def test_cmd_refund_paid_order_notifies_buyer(db, user, bot, purchaser):
     )
     await cmd_refund(msg, db, bot)
     await recover_once(db, purchaser, bot)
-    order_after = await db.get_order(order.id)
+    order_after = await db.orders.get_order(order.id)
     assert order_after is not None and order_after.status == OrderStatus.REFUNDED
     texts = [m.text or "" for m in bot.session.sent]
     assert any("已退款 1.00 CNY" in t for t in texts)  # 管理员确认
@@ -488,17 +488,17 @@ async def test_cmd_refund_paid_order_notifies_buyer(db, user, bot, purchaser):
 async def test_recover_once_sends_refund_notification(db, user, bot):
     """恢复循环：fulfill 结果为 refunded 时发退款私信（而非交付通知）。"""
     product = Product(1, "p", "", 100, "CNY")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
-    await db.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
+    await db.orders.transition_order(order.id, OrderStatus.PAID, from_status=OrderStatus.PENDING_PAYMENT)
 
     class _RefundingPurchaser(Purchaser):
         async def ensure_purchase(self, db, order) -> Purchase:
             raise AssertionError("本测试只经过 fulfill，不应建立采购")
 
         async def fulfill(self, db, order_id):
-            await db.refund_order_to_balance(order_id, "test")
-            return await db.get_order(order_id)
+            await db.payments.refund_order_to_balance(order_id, "test")
+            return await db.orders.get_order(order_id)
 
     await recover_once(db, _RefundingPurchaser(), bot)
     texts = [m.text or "" for m in bot.session.sent]
@@ -546,7 +546,7 @@ async def test_start_topup_shows_balance_and_presets(db, user, bot, epay):
 
 async def test_cb_topup_preset_creates_invoice(db, user, bot, epay):
     await cb_topup_preset(_topup_callback(bot, "topup:1000"), db, epay, _topup_state(db))
-    topups = await db._all("SELECT * FROM balance_topups")
+    topups = await db.fetch_all("SELECT * FROM balance_topups")
     assert len(topups) == 1 and topups[0]["amount_cents"] == 1000 and topups[0]["currency"] == "CNY"
     edited = [m for m in bot.session.sent if m.__api_method__ == "editMessageText"]
     assert edited and "充值单" in edited[-1].text
@@ -557,7 +557,7 @@ async def test_cb_topup_preset_creates_invoice(db, user, bot, epay):
 async def test_cb_topup_preset_rejects_forged_amount(db, user, bot, epay):
     # callback data 可被伪造：档位外的金额必须服务端拒绝
     await cb_topup_preset(_topup_callback(bot, "topup:50"), db, epay, _topup_state(db))
-    assert await db._all("SELECT * FROM balance_topups") == []
+    assert await db.fetch_all("SELECT * FROM balance_topups") == []
     answers = [m for m in bot.session.sent if m.__api_method__ == "answerCallbackQuery"]
     assert answers and "范围" in answers[-1].text
 

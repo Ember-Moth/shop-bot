@@ -43,7 +43,7 @@ def product_buttons(message: CatalogView) -> list[InlineKeyboardButton]:
 @pytest.mark.parametrize("character", ["D", "😀"])
 async def test_both_catalog_entrypoints_are_bounded_and_all_products_reachable(db, bot, character):
     products = [Product(i, f"Plan {i} " + "😀" * 90, character * 500, 999) for i in range(1, 13)]
-    await db.seed_products(products)
+    await db.products.seed_products(products)
     await _send_catalog(menu_message_of(bot), db)
     first = last_catalog(bot)
     assert text_units(first.text) <= 4096 and first.parse_mode is None
@@ -66,7 +66,7 @@ async def test_both_catalog_entrypoints_are_bounded_and_all_products_reachable(d
 
 async def test_product_details_return_to_same_page_and_keep_full_description(db, bot):
     products = [Product(i, f"Plan[{i}]", "😀" * 500, 999) for i in range(1, 9)]
-    await db.seed_products(products)
+    await db.products.seed_products(products)
     await cb_catalog(callback(bot, "catalog:1"), db)
     catalog = last_catalog(bot)
     selected = product_buttons(catalog)[0]
@@ -83,14 +83,14 @@ async def test_product_details_return_to_same_page_and_keep_full_description(db,
 
 
 async def test_pagination_clamps_page_after_unpublish_and_handles_empty(db, bot):
-    await db.seed_products([Product(i, f"Plan {i}", "", 999) for i in range(1, 9)])
+    await db.products.seed_products([Product(i, f"Plan {i}", "", 999) for i in range(1, 9)])
     for product_id in (6, 7, 8):
-        await db.configure_product(product_id, active=False)
+        await db.products.configure_product(product_id, active=False)
     await cb_catalog(callback(bot, "catalog:1"), db)
     assert "第 1/1 页" in last_catalog(bot).text
     assert [b.callback_data for b in product_buttons(last_catalog(bot))] == [f"p:{i}:0" for i in range(1, 6)]
     for product_id in range(1, 6):
-        await db.configure_product(product_id, active=False)
+        await db.products.configure_product(product_id, active=False)
     await cb_catalog(callback(bot, "catalog:1"), db)
     assert last_catalog(bot).text == "暂时没有商品"
 
@@ -103,7 +103,7 @@ async def test_invalid_page_callback_is_rejected(db, bot, data):
 
 
 async def test_real_router_dispatches_pagination_and_product_callbacks(db, bot):
-    await db.seed_products([Product(i, f"Plan {i}", "detail", 999) for i in range(1, 9)])
+    await db.products.seed_products([Product(i, f"Plan {i}", "detail", 999) for i in range(1, 9)])
     await catalog_router.propagate_event(update_type="callback_query", event=callback(bot, "catalog:1"), db=db)
     assert "第 2/2 页" in last_catalog(bot).text
     await catalog_router.propagate_event(update_type="callback_query", event=callback(bot, "p:6:1"), db=db)

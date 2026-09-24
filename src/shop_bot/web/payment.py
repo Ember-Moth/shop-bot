@@ -35,7 +35,7 @@ async def epay_callback(request: web.Request) -> web.Response:
     if not order_no.isascii() or not order_no.isdecimal() or len(order_no) > 18:
         return web.Response(text="fail", status=400)
     order_id = int(order_no)
-    order = await db.get_order(order_id)
+    order = await db.orders.get_order(order_id)
     if order is None:
         return web.Response(text="fail", status=404)
     try:
@@ -51,7 +51,7 @@ async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -
     """充值单回调：金额/商户/交易号核验 → 到账入账（幂等）→ 通知买家。"""
     db: Database = request.app["db"]
     epay: EPayClient = request.app["epay"]
-    topup = await db.get_topup(topup_id)
+    topup = await db.wallet.get_topup(topup_id)
     if topup is None:
         logger.warning("topup callback for unknown topup", extra={"order_id": topup_id})
         return web.Response(text="fail", status=404)
@@ -77,7 +77,7 @@ async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -
 
     # 同一外部交易幂等；网关若确实收取另一笔款，则记录该交易并入账。
     try:
-        credited = await db.complete_topup(topup.id, trade_no=payment.trade_no)
+        credited = await db.wallet.complete_topup(topup.id, trade_no=payment.trade_no)
     except ValueError:
         return web.Response(text="fail", status=422)
     if credited is None:

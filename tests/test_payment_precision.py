@@ -62,9 +62,9 @@ async def test_signed_fractional_callback_cannot_create_payment_or_credit(
     *, db, user, epay, purchaser, bot, target, money
 ):
     product = Product(1, "test", "", 999, "CNY")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
-    topup = await db.create_topup(user.id, 999)
+    topup = await db.wallet.create_topup(user.id, 999)
     ref = str(order.id) if target == "order" else f"T{topup.id}"
     app = web.Application()
     app.update({"db": db, "epay": epay, "purchaser": purchaser, "bot": bot})
@@ -73,30 +73,30 @@ async def test_signed_fractional_callback_cannot_create_payment_or_credit(
     async with TestClient(TestServer(app)) as client:
         response = await client.post("/callback", data=params)
         assert response.status == 422
-        assert (await db.get_order(order.id)).status == OrderStatus.PENDING_PAYMENT
-        assert (await db.get_topup(topup.id)).status.value == "pending"
-        assert await db.get_balance(user.id, "CNY") == 0
-        assert await db.get_purchase_by_order(order.id) is None
-        assert await db._all("SELECT * FROM payment_receipts") == []
+        assert (await db.orders.get_order(order.id)).status == OrderStatus.PENDING_PAYMENT
+        assert (await db.wallet.get_topup(topup.id)).status.value == "pending"
+        assert await db.wallet.get_balance(user.id, "CNY") == 0
+        assert await db.purchases.get_purchase_by_order(order.id) is None
+        assert await db.fetch_all("SELECT * FROM payment_receipts") == []
         # 同一交易重新回传精确金额时可以入账，拒绝路径不留下半笔交易。
         params["money"] = "9.9900"
         params["sign"] = _create_sign(params, "audit-secret")
         response = await client.post("/callback", data=params)
         assert response.status == 200
         if target == "order":
-            assert (await db.get_order(order.id)).status == OrderStatus.PAID
-            assert await db.get_balance(user.id, "CNY") == 0
+            assert (await db.orders.get_order(order.id)).status == OrderStatus.PAID
+            assert await db.wallet.get_balance(user.id, "CNY") == 0
         else:
-            assert (await db.get_topup(topup.id)).status.value == "paid"
-            assert await db.get_balance(user.id, "CNY") == 999
+            assert (await db.wallet.get_topup(topup.id)).status.value == "paid"
+            assert await db.wallet.get_balance(user.id, "CNY") == 999
 
 
 async def test_payment_query_also_rejects_fractional_shortfall(*, db, user, epay, purchaser, bot, httpx_mock):
     product = Product(1, "test", "", 999, "CNY")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
     httpx_mock.add_response(json=query_result(order, money="9.9851"))
     await cmd_query(query_message(bot, order), db, epay, purchaser, bot)
-    assert (await db.get_order(order.id)).status == OrderStatus.PENDING_PAYMENT
-    assert await db.get_purchase_by_order(order.id) is None
-    assert await db._all("SELECT * FROM payment_receipts") == []
+    assert (await db.orders.get_order(order.id)).status == OrderStatus.PENDING_PAYMENT
+    assert await db.purchases.get_purchase_by_order(order.id) is None
+    assert await db.fetch_all("SELECT * FROM payment_receipts") == []

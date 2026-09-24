@@ -76,7 +76,7 @@ flowchart TD
 | `config.py` | 增加上游提供商/环境、Secret Key、超时及后台查询配置；凭据由私密配置注入 |
 | `services/commbitz_api.py`（计划新增） | 获取/刷新令牌、并发刷新协调、目录、全部请求类型、详情、KYC JSON/multipart、用量接口；安全错误归一化 |
 | 上游业务适配器（计划新增） | 把本店订单映射为上游请求，管理提交记录、上游 ID、待处理状态和交付结果 |
-| `models.py` / `db.py` | 商品 SKU/请求类型映射，订单输入快照，采购状态及请求证据，持久化上游 ID；旧库迁移 |
+| `models.py` / `db/` | 商品 SKU/请求类型映射，订单输入快照，采购状态及请求证据，持久化上游 ID；旧库迁移 |
 | `services/orders.py` | 分离收款确认和采购履约；保留已付款事实，增加等待/人工核对语义 |
 | `services/fulfillment.py` | 从持久化任务恢复；已有上游 ID 时只查询；交付通知与采购分别重试 |
 | `handlers/order.py` | 按业务类型采集 ICCID、号码、数量、天数等信息，确认页展示售价与可能的 KYC 要求 |

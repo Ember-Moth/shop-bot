@@ -19,7 +19,7 @@ EVENTS = ["order_paid", "topup_paid"]
 
 
 async def broadcasts(db):
-    return await db._all("SELECT * FROM business_deliveries ORDER BY id")
+    return await db.fetch_all("SELECT * FROM business_deliveries ORDER BY id")
 
 
 def sent_broadcasts(bot):
@@ -27,24 +27,24 @@ def sent_broadcasts(bot):
 
 
 async def test_no_broadcast_for_unpaid_orders_and_topups(db, user, product):
-    await db.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
+    await db.work.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
     await orders.create_order(db, user.id, product, 1)
-    await db.create_topup(user.id, 999)
+    await db.wallet.create_topup(user.id, 999)
     assert await broadcasts(db) == []
-    assert await db.claim_work("business") is None
+    assert await db.work.claim_work("business") is None
 
 
 @pytest.mark.parametrize("method", ["epay", "balance", "manual"])
 async def test_paid_order_broadcasts_once_to_each_target(*, db, user, product, purchaser, bot, method):
-    await db.configure_business_notifications({event: [*TARGETS, 700] for event in EVENTS})
+    await db.work.configure_business_notifications({event: [*TARGETS, 700] for event in EVENTS})
     order = await orders.create_order(db, user.id, product, 2)
     if method == "epay":
-        await db.record_epay_payment(order.id, "PAY")
-        await db.record_epay_payment(order.id, "PAY")
+        await db.payments.record_epay_payment(order.id, "PAY")
+        await db.payments.record_epay_payment(order.id, "PAY")
     elif method == "balance":
-        await db.adjust_balance(user.id, 10000, "funding")
-        await db.pay_order_with_balance(order.id, user.id, order.amount_cents)
-        await db.pay_order_with_balance(order.id, user.id, order.amount_cents)
+        await db.wallet.adjust_balance(user.id, 10000, "funding")
+        await db.payments.pay_order_with_balance(order.id, user.id, order.amount_cents)
+        await db.payments.pay_order_with_balance(order.id, user.id, order.amount_cents)
     else:
         await orders.mark_paid(db, purchaser, order.id)
         await orders.mark_paid(db, purchaser, order.id)
@@ -69,22 +69,22 @@ async def test_paid_order_broadcasts_once_to_each_target(*, db, user, product, p
 
 
 async def test_topup_receipts_deduplicate_but_real_second_payment_has_own_notice(db, user, purchaser, bot):
-    await db.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
-    topup = await db.create_topup(user.id, 999, "USD")
-    await db.complete_topup(topup.id, "FIRST")
-    await db.complete_topup(topup.id, "FIRST")
-    await db.complete_topup(topup.id, "SECOND")
+    await db.work.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
+    topup = await db.wallet.create_topup(user.id, 999, "USD")
+    await db.wallet.complete_topup(topup.id, "FIRST")
+    await db.wallet.complete_topup(topup.id, "FIRST")
+    await db.wallet.complete_topup(topup.id, "SECOND")
     assert len(await broadcasts(db)) == 4
     await recover_once(db, purchaser, bot)
     assert len(sent_broadcasts(bot)) == 4
     assert all("充值已到账" in message.text and "9.99 USD" in message.text for message in sent_broadcasts(bot))
-    assert await db.get_balance(user.id, "USD") == 1998
+    assert await db.wallet.get_balance(user.id, "USD") == 1998
 
 
 async def test_channel_failure_does_not_resend_to_admin(*, db, user, purchaser, bot, monkeypatch, queue_clock):
-    await db.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
-    topup = await db.create_topup(user.id, 999)
-    await db.complete_topup(topup.id, "PAY")
+    await db.work.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
+    topup = await db.wallet.create_topup(user.id, 999)
+    await db.wallet.complete_topup(topup.id, "PAY")
     original = bot.send_message
 
     async def send(chat_id, text, **kwargs):
@@ -107,18 +107,18 @@ async def test_channel_failure_does_not_resend_to_admin(*, db, user, purchaser, 
 async def test_successful_recipient_survives_restart_without_duplicate(tmp_path, bot, purchaser):
     db = Database(str(tmp_path / "broadcast.db"))
     await db.connect()
-    user = await db.upsert_user(42, "buyer")
-    await db.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
-    topup = await db.create_topup(user.id, 999)
-    await db.complete_topup(topup.id, "PAY")
-    first = await db.claim_work("business")
+    user = await db.users.upsert_user(42, "buyer")
+    await db.work.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
+    topup = await db.wallet.create_topup(user.id, 999)
+    await db.wallet.complete_topup(topup.id, "PAY")
+    first = await db.work.claim_work("business")
     assert first is not None
     # 发出后已记录成功，但调度任务尚未来得及删除时进程退出。
     await notify_business(db, bot, first.entity_id)
     await db.close()
     await db.connect()
     try:
-        await db.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
+        await db.work.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
         await recover_once(db, purchaser, bot)
         assert len(sent_broadcasts(bot)) == len(TARGETS)
         assert {message.chat_id for message in sent_broadcasts(bot)} == set(TARGETS)
@@ -127,24 +127,24 @@ async def test_successful_recipient_survives_restart_without_duplicate(tmp_path,
 
 
 async def test_configuration_removal_cancels_backlog_and_does_not_replay(db, user, purchaser, bot):
-    await db.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
-    topup = await db.create_topup(user.id, 999)
-    await db.complete_topup(topup.id, "PAY")
-    await db.configure_business_notifications({event: [700] for event in EVENTS})
+    await db.work.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
+    topup = await db.wallet.create_topup(user.id, 999)
+    await db.wallet.complete_topup(topup.id, "PAY")
+    await db.work.configure_business_notifications({event: [700] for event in EVENTS})
     await recover_once(db, purchaser, bot)
     assert [message.chat_id for message in sent_broadcasts(bot)] == [700]
     assert {row["chat_id"]: row["state"] for row in await broadcasts(db)} == {700: "sent", TARGETS[1]: "skipped"}
-    await db.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
+    await db.work.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
     await recover_once(db, purchaser, bot)
     assert len(sent_broadcasts(bot)) == 1
-    await db.configure_business_notifications({})
-    second = await db.create_topup(user.id, 999)
-    await db.complete_topup(second.id, "SECOND")
+    await db.work.configure_business_notifications({})
+    second = await db.wallet.create_topup(user.id, 999)
+    await db.wallet.complete_topup(second.id, "SECOND")
     assert len(await broadcasts(db)) == 2
 
 
 async def test_broadcast_uses_payment_time_snapshot(db, user, product, purchaser, bot):
-    await db.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
+    await db.work.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
     order = await orders.create_order(db, user.id, product, 1)
     await orders.mark_paid(db, purchaser, order.id)
     async with db.transaction() as conn:
@@ -154,23 +154,23 @@ async def test_broadcast_uses_payment_time_snapshot(db, user, product, purchaser
 
 
 async def test_broadcast_insertion_failure_rolls_back_payment(db, user, product):
-    await db.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
+    await db.work.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
     order = await orders.create_order(db, user.id, product, 1)
     async with db.transaction() as conn:
         await conn.execute("""CREATE TRIGGER fail_business BEFORE INSERT ON business_deliveries
             BEGIN SELECT RAISE(ABORT, 'test broadcast failure'); END""")
     with pytest.raises(aiosqlite.IntegrityError, match="broadcast failure"):
-        await db.record_epay_payment(order.id, "PAY")
-    assert (await db.get_order(order.id)).status == "pending_payment"
+        await db.payments.record_epay_payment(order.id, "PAY")
+    assert (await db.orders.get_order(order.id)).status == "pending_payment"
     assert await broadcasts(db) == []
-    assert await db._all("SELECT * FROM payment_receipts") == []
+    assert await db.fetch_all("SELECT * FROM payment_receipts") == []
 
 
 async def test_enabling_broadcasts_does_not_send_historical_payments(db, user, product, purchaser, bot):
     order = await orders.create_order(db, user.id, product, 1)
-    await db.record_epay_payment(order.id, "PAY")
-    await db.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
-    await db.record_epay_payment(order.id, "PAY")
+    await db.payments.record_epay_payment(order.id, "PAY")
+    await db.work.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
+    await db.payments.record_epay_payment(order.id, "PAY")
     await recover_once(db, purchaser, bot)
     assert not sent_broadcasts(bot)
 
@@ -198,11 +198,11 @@ async def test_order_to_channel_topup_to_admin_without_cross_delivery(db, user, 
             },
         }
     )
-    await db.configure_business_notifications(settings.resolve_routes([700]))
+    await db.work.configure_business_notifications(settings.resolve_routes([700]))
     order = await orders.create_order(db, user.id, product, 1)
     await orders.mark_paid(db, purchaser, order.id)
-    topup = await db.create_topup(user.id, 999)
-    await db.complete_topup(topup.id, "TOPUP")
+    topup = await db.wallet.create_topup(user.id, 999)
+    await db.wallet.complete_topup(topup.id, "TOPUP")
     await recover_once(db, purchaser, bot)
     messages = sent_broadcasts(bot)
     assert len(messages) == 2

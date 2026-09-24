@@ -59,7 +59,7 @@ async def sync_catalog(db: Database, client: PlanSource) -> SyncResult:
             continue
         # 上游报价（USD）不写进本地价格；币种与扣款规则未经采购对账验证
         description = f"{plan.sim_category or 'unknown'} · planIsFor={plan.plan_is_for}"
-        created = await db.upsert_product_from_upstream(
+        created = await db.products.upsert_product_from_upstream(
             sku=plan.sku,
             name=plan.name,
             description=description,

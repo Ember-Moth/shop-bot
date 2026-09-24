@@ -41,18 +41,18 @@ async def _owned_order_or_reply(db: Database, message: Message, order_id: int | 
     if order_id is None:
         await message.answer(f"用法：/{message.text.split()[0].lstrip('/')} <订单号>" if message.text else "用法错误")
         return None
-    order = await db.get_order(order_id)
+    order = await db.orders.get_order(order_id)
     if order is None:
         await message.answer("订单不存在")
         return None
     from_user = message.from_user
     assert from_user is not None
-    await db.refresh_user_profile(
+    await db.users.refresh_user_profile(
         from_user.id,
         from_user.username,
         " ".join(filter(None, [from_user.first_name, from_user.last_name])) or None,
     )
-    user = await db.get_user_by_telegram_id(from_user.id)
+    user = await db.users.get_user_by_telegram_id(from_user.id)
     if not _is_admin(from_user.id) and (user is None or order.user_id != user.id):
         await message.answer("只能操作自己的订单")
         return None
@@ -92,7 +92,7 @@ async def cmd_kyc(message: Message, db: Database, purchaser: CommbitzPurchaser, 
         return
     if not await _require_private(message):
         return
-    purchase = await db.get_purchase_by_order(order.id)
+    purchase = await db.purchases.get_purchase_by_order(order.id)
     if order.status.value != "paid":
         await message.answer("订单已关闭或不可履约，不能提交证件")
         return

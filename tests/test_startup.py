@@ -54,7 +54,7 @@ async def test_actual_startup_authentication_and_resource_cleanup(tmp_path, monk
                 await task
     # 启动失败和正常退出都必须释放连接，不能留下 aiosqlite 后台线程。
     with pytest.raises(RuntimeError, match="must be called first"):
-        await database.get_user(1)
+        await database.users.get_user(1)
 
 
 @pytest.mark.parametrize("worker_fails", [False, True])
@@ -106,7 +106,7 @@ async def test_live_startup_has_no_demo_products_and_supervises_workers(
     else:
         try:
             await asyncio.wait_for(ready.wait(), timeout=2)
-            assert await database.list_all_products() == []
+            assert await database.products.list_all_products() == []
             async with ClientSession() as client:
                 async with client.get(f"http://127.0.0.1:{settings.webhook.port}/readyz") as response:
                     assert response.status == 200

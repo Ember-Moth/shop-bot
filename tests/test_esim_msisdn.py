@@ -45,9 +45,9 @@ def test_legacy_missing_number_is_not_claimed_as_missing_upstream():
 async def test_number_persists_across_restart_in_photo_or_zip(tmp_path, bot, count):
     db = Database(str(tmp_path / "numbers.db"))
     await db.connect()
-    user = await db.upsert_user(42, "buyer")
+    user = await db.users.upsert_user(42, "buyer")
     product = Product(1, "eSIM", "", 999, sku="SKU", request_type="esim", upstream_plan_id="plan")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, count)
     details = esim_details(count=count)
     for index, esim in enumerate(details["esims"]):
@@ -63,7 +63,7 @@ async def test_number_persists_across_restart_in_photo_or_zip(tmp_path, bot, cou
     await db.connect()
     try:
         assert await notify_owner(db, bot, order.id)
-        saved = await db.get_order(order.id)
+        saved = await db.orders.get_order(order.id)
         assert saved is not None and saved.notification_plan_version == NOTIFICATION_PLAN_VERSION
         assert gateway.create_calls == 1
         if count == 1:

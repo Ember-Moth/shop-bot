@@ -35,14 +35,14 @@ async def start_topup(message: Message, db: Database, epay: EPayClient | None, s
     balance = 0
     from_user = message.from_user
     if from_user is not None:
-        await db.refresh_user_profile(
+        await db.users.refresh_user_profile(
             from_user.id,
             from_user.username,
             " ".join(filter(None, [from_user.first_name, from_user.last_name])) or None,
         )
-        user = await db.get_user_by_telegram_id(from_user.id)
+        user = await db.users.get_user_by_telegram_id(from_user.id)
         if user is not None:
-            balance = await db.get_balance(user.id, epay.currency)
+            balance = await db.wallet.get_balance(user.id, epay.currency)
     await message.answer(
         f"💰 充值余额\n\n当前余额：{format_cents(balance)} {epay.currency}\n\n请选择充值金额：",
         reply_markup=keyboards.topup_amounts(epay.currency),
@@ -53,7 +53,7 @@ async def _create_topup_invoice(
     message: Message, db: Database, epay: EPayClient, user: User, amount_cents: int
 ) -> tuple[str, InlineKeyboardMarkup]:
     """创建充值单并生成 EPay 收银台链接，返回账单文本与支付按钮。"""
-    topup = await db.create_topup(user.id, amount_cents, epay.currency)
+    topup = await db.wallet.create_topup(user.id, amount_cents, epay.currency)
     bot = message.bot
     assert bot is not None
     pay_url = await payment_url(
@@ -83,7 +83,7 @@ async def cb_topup_preset(callback: CallbackQuery, db: Database, epay: EPayClien
     if not 100 <= amount_cents <= 1_000_000:  # 与 parse_topup_amount 同边界：1–10000
         await callback.answer("金额超出允许范围", show_alert=True)
         return
-    user = await db.get_user_by_telegram_id(callback.from_user.id)
+    user = await db.users.get_user_by_telegram_id(callback.from_user.id)
     if user is None:
         await callback.answer("请先发送 /start 完成注册", show_alert=True)
         return
@@ -138,7 +138,7 @@ async def topup_amount_input(message: Message, db: Database, epay: EPayClient | 
         return
     from_user = message.from_user
     assert from_user is not None
-    user = await db.get_user_by_telegram_id(from_user.id)
+    user = await db.users.get_user_by_telegram_id(from_user.id)
     if user is None:
         await state.clear()
         await message.answer("请先发送 /start 完成注册")
@@ -157,14 +157,14 @@ async def topup_amount_non_text(message: Message) -> None:
 async def render_balance(message: Message, db: Database) -> None:
     from_user = message.from_user
     assert from_user is not None
-    user = await db.get_user_by_telegram_id(from_user.id)
+    user = await db.users.get_user_by_telegram_id(from_user.id)
     if user is None:
         await message.answer("请先发送 /start 完成注册")
         return
-    balances = await db.get_balances(user.id)
+    balances = await db.wallet.get_balances(user.id)
     balances.setdefault("USD", 0)
     lines = [f"当前余额：{format_cents(value)} {currency}" for currency, value in sorted(balances.items())]
-    txs = await db.list_balance_transactions(user.id)
+    txs = await db.wallet.list_balance_transactions(user.id)
     if txs:
         lines.append("")
         lines.append("最近记录：")

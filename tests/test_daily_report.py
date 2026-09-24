@@ -52,7 +52,7 @@ async def test_daily_summary_groups_by_kind_currency_and_purpose(db, user):
             " VALUES (?, -630, 70, 'purchase', 'USD', '2026-09-18 06:00:00')",
             (user.id,),
         )
-    summary = await db.daily_summary("2026-09-17 16:00:00", "2026-09-18 16:00:00")
+    summary = await db.operations.daily_summary("2026-09-17 16:00:00", "2026-09-18 16:00:00")
     receipts = {r["currency"]: r for r in summary["receipts"]}
     assert receipts["USD"]["n"] == 2 and receipts["USD"]["cents"] == 2700
     assert receipts["USD"]["order_cents"] == 700 and receipts["USD"]["order_n"] == 1
@@ -93,11 +93,11 @@ async def test_send_daily_report_marks_only_after_delivery(db, user, bot, monkey
     # 第一次全部失败：不登记，可重试
     bot.session.fail_send = True
     assert not await send_daily_report(db, bot, settings)
-    assert not await db.report_sent("2026-09-18")
+    assert not await db.operations.report_sent("2026-09-18")
     # 重试成功：登记
     bot.session.fail_send = False
     assert await send_daily_report(db, bot, settings)
-    assert await db.report_sent("2026-09-18")
+    assert await db.operations.report_sent("2026-09-18")
     sent_count = len(bot.session.sent)
     # 当天再次调用（重启重入）：直接返回，不再发送
     assert await send_daily_report(db, bot, settings)

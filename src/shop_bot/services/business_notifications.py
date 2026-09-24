@@ -33,7 +33,7 @@ async def notify_business(
     delivery_id: int,
     throttle: NotificationThrottle | None = None,
 ) -> bool:
-    delivery = await db.get_business_delivery(delivery_id)
+    delivery = await db.work.get_business_delivery(delivery_id)
     if delivery is None or delivery["state"] != "pending":
         return True
     if throttle is not None:
@@ -44,5 +44,5 @@ async def notify_business(
         parse_mode=None,
         request_timeout=20,
     )
-    await db.mark_business_sent(delivery_id)
+    await db.work.mark_business_sent(delivery_id)
     return True

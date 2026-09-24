@@ -62,10 +62,10 @@ async def test_restore_wallet_receipts_and_orders(tmp_path):
     db = Database(str(source))
     await db.connect()
     try:
-        user = await db.upsert_user(42, "buyer")
-        await db.adjust_balance(user.id, 10000, "opening", "USD")
-        order = await db.create_order(user.id, 1, 1, 2500, "USD")
-        await db.pay_order_with_balance(order.id, user.id, 2500)
+        user = await db.users.upsert_user(42, "buyer")
+        await db.wallet.adjust_balance(user.id, 10000, "opening", "USD")
+        order = await db.orders.create_order(user.id, 1, 1, 2500, "USD")
+        await db.payments.pay_order_with_balance(order.id, user.id, 2500)
         manager = BackupManager(str(source), BackupSettings())
         snapshot = await manager.run_once()
         assert manager.last_success and manager.error is None
@@ -74,10 +74,10 @@ async def test_restore_wallet_receipts_and_orders(tmp_path):
     restored = Database(str(snapshot))
     await restored.connect()
     try:
-        assert await restored.get_balance(user.id, "USD") == 7500
-        saved = await restored.get_order(order.id)
+        assert await restored.wallet.get_balance(user.id, "USD") == 7500
+        saved = await restored.orders.get_order(order.id)
         assert saved is not None and saved.status.value == "paid"
-        ledger = await restored.list_balance_transactions(user.id)
+        ledger = await restored.wallet.list_balance_transactions(user.id)
         assert [entry.kind for entry in ledger] == ["purchase", "adjust"]
     finally:
         await restored.close()

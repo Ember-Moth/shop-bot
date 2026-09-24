@@ -90,7 +90,9 @@ class Operations:
             return
         for admin_id in self.admin_ids:
             self.runtime.beat("monitor")
-            for alert in await self.db.pending_alerts(admin_id, time.time(), self.settings.alert_cooldown_seconds):
+            for alert in await self.db.operations.pending_alerts(
+                admin_id, time.time(), self.settings.alert_cooldown_seconds
+            ):
                 heading = "⚠️ 运维告警" if alert["active"] else "✅ 告警恢复"
                 hint = "/status 查看运行状态"
                 if alert["key"] == "stalled_orders" and alert["active"]:
@@ -105,13 +107,13 @@ class Operations:
                 except Exception as exc:
                     logger.warning("operator alert delivery failed", extra={"error": type(exc).__name__})
                     break  # 同一管理员暂不可达，留到下一轮重试，其他管理员照常通知。
-                await self.db.mark_alert_sent(alert["key"], admin_id, alert["revision"], time.time())
+                await self.db.operations.mark_alert_sent(alert["key"], admin_id, alert["revision"], time.time())
 
     async def monitor_once(self) -> None:
         self.runtime.beat("monitor")
         try:
             async with asyncio.timeout(self.settings.health_timeout_seconds):
-                issues = await self.db.operational_issues(
+                issues = await self.db.operations.operational_issues(
                     self.settings.stale_order_seconds,
                     self.settings.notification_stale_seconds,
                 )
@@ -124,7 +126,7 @@ class Operations:
             if self.backups.error:
                 issues["backup"] = f"数据库备份失败（{self.backups.error}），现有备份保留，稍后自动重试"
             for key in MONITORED_KEYS:
-                await self.db.set_alert(key, issues.get(key))
+                await self.db.operations.set_alert(key, issues.get(key))
             await self.deliver_alerts()
             self.runtime.beat("monitor")
         except Exception as exc:

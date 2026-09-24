@@ -20,7 +20,7 @@ async def test_unversioned_pending_notification_replays_safely_after_upgrade(tmp
     await db.connect()
     try:
         order_id, purchaser, gateway = await delivered_order(db, count=quantity)
-        saved = await db.get_order(order_id)
+        saved = await db.orders.get_order(order_id)
         assert saved is not None
         original_payload, original_media = saved.payload, saved.delivery_esims
         async with db.transaction() as conn:
@@ -33,7 +33,7 @@ async def test_unversioned_pending_notification_replays_safely_after_upgrade(tmp
     await db.connect()
     try:
         await recover_once(db, purchaser, bot)
-        saved = await db.get_order(order_id)
+        saved = await db.orders.get_order(order_id)
         assert saved is not None and not saved.notification_pending and saved.notified_at
         assert saved.notification_plan_version == NOTIFICATION_PLAN_VERSION
         assert saved.payload == original_payload and saved.delivery_esims == original_media
@@ -53,7 +53,7 @@ async def test_upgrade_preserves_completed_notifications_until_manual_resend(tmp
     await db.connect()
     try:
         order_id, purchaser, gateway = await delivered_order(db)
-        await db.mark_notified(order_id)
+        await db.deliveries.mark_notified(order_id)
         async with db.transaction() as conn:
             await conn.execute("ALTER TABLE orders DROP COLUMN notification_plan_version")
             await conn.execute("UPDATE orders SET notification_cursor = 2 WHERE id = ?", (order_id,))
@@ -72,9 +72,9 @@ async def test_upgrade_preserves_completed_notifications_until_manual_resend(tmp
 
 @pytest.mark.parametrize("suffix", ["A" * 1100, "😀" * 480])
 async def test_long_lpa_is_delivered_whole_and_never_truncated(db, bot, suffix):
-    user = await db.upsert_user(42, "buyer")
+    user = await db.users.upsert_user(42, "buyer")
     product = Product(1, "eSIM", "", 999, sku="SKU", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
     details = esim_details()
     lpa = "LPA:1$rsp.example.invalid$" + suffix
@@ -89,7 +89,7 @@ async def test_long_lpa_is_delivered_whole_and_never_truncated(db, bot, suffix):
     install_texts = [m.text for m in bot.session.sent if isinstance(m, SendMessage) and lpa in m.text]
     assert len(install_texts) == 1 and text_units(install_texts[0]) <= 4096
     assert "LPA: " not in sent_photos[0].caption  # 不给买家一份看似可复制的截断安装码
-    saved = await db.get_order(order.id)
+    saved = await db.orders.get_order(order.id)
     assert not saved.notification_pending and saved.notification_cursor == 3
 
 
@@ -116,7 +116,7 @@ async def test_long_lpa_text_failure_resumes_without_repeating_photo(tmp_path, b
                 (json.dumps([{"iccid": "89000", "lpa": lpa}]), f"[1]\nICCID: 89000\nLPA: {lpa}", order_id),
             )
         assert not await notify_owner(db, bot, order_id)
-        saved = await db.get_order(order_id)
+        saved = await db.orders.get_order(order_id)
         assert saved is not None and saved.notification_cursor == 2
         assert saved.notification_plan_version == NOTIFICATION_PLAN_VERSION and saved.notification_pending
         assert len(photos(bot)) == 1
@@ -129,7 +129,7 @@ async def test_long_lpa_text_failure_resumes_without_repeating_photo(tmp_path, b
         await recover_once(db, purchaser, bot)
         assert len(photos(bot)) == 1 and gateway.create_calls == 1
         assert isinstance(bot.session.sent[-1], SendMessage) and lpa in bot.session.sent[-1].text
-        saved = await db.get_order(order_id)
+        saved = await db.orders.get_order(order_id)
         assert saved is not None and not saved.notification_pending and saved.notification_cursor == 3
     finally:
         await db.close()

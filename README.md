@@ -98,7 +98,9 @@ uv run ty check        # 类型检查
 src/shop_bot/
 ├── config.py           # pydantic-settings：config.yaml + SHOP_BOT_* 环境变量
 ├── models.py           # Product / Order / Purchase / 状态枚举
-├── db.py               # aiosqlite 连接与 DAO（users / products / orders / order_events / purchases / fsm_state）
+├── db/                 # 持久化包：core（连接/锁/事务）、schema + mappers（模型层）、repositories/（仓储层）
+│                       # 仓储按聚合划分：users / products / orders / purchases / deliveries / wallet / payments / operations / work
+│                       # work_queue.py、business_notifications.py 维护任务表与触发器；fsm.py 为 FSM 持久化存储
 ├── keyboards.py        # 内联键盘（含 Web App 支付按钮）
 ├── logging_config.py   # 日志系统（彩色开发格式 + JSON 生产格式）
 ├── handlers/           # start / catalog / order(FSM) / kyc / admin

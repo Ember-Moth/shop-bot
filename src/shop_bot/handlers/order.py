@@ -93,7 +93,7 @@ def _extra_hint(product: Product, quantity: int) -> str | None:
 async def cb_start_order(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
     data = callback.data
     assert data is not None  # 过滤器已保证非空
-    product = await db.get_product(int(data.removeprefix(keyboards.CB_ORDER_PREFIX)))
+    product = await db.products.get_product(int(data.removeprefix(keyboards.CB_ORDER_PREFIX)))
     if product is None or not product.active:
         await callback.answer("商品不存在或已下架", show_alert=True)
         return
@@ -126,7 +126,7 @@ async def msg_quantity(message: Message, state: FSMContext, db: Database) -> Non
         await message.answer(f"数量需在 1–{MAX_QUANTITY} 之间。")
         return
     data = await state.get_data()
-    product = await db.get_product(data["product_id"])
+    product = await db.products.get_product(data["product_id"])
     if product is None or not product.active:
         await state.clear()
         await message.answer("商品不存在或已下架，下单已取消。")
@@ -150,7 +150,7 @@ async def msg_extra(message: Message, state: FSMContext, db: Database) -> None:
     text = message.text
     assert text is not None
     data = await state.get_data()
-    product = await db.get_product(data["product_id"])
+    product = await db.products.get_product(data["product_id"])
     if product is None or not product.active:
         await state.clear()
         await message.answer("商品不存在或已下架，下单已取消。")
@@ -180,7 +180,7 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, e
     if product_id is None or quantity is None:
         await callback.answer("会话已过期，请重新下单", show_alert=True)
         return
-    product = await db.get_product(product_id)
+    product = await db.products.get_product(product_id)
     if product is None or not product.active:
         await state.clear()
         await callback.answer("商品不存在或已下架，下单失败", show_alert=True)
@@ -202,7 +202,7 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, e
             )
         await callback.answer("请确认最新报价", show_alert=True)
         return
-    user = await db.get_user_by_telegram_id(callback.from_user.id)
+    user = await db.users.get_user_by_telegram_id(callback.from_user.id)
     if user is None:
         await callback.answer("请先发 /start 再下单", show_alert=True)
         return
@@ -226,7 +226,7 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, e
         await callback.answer()
         return
 
-    balance = await db.get_balance(user.id, order.currency)
+    balance = await db.wallet.get_balance(user.id, order.currency)
     allow_balance = balance >= order.amount_cents and order.amount_cents > 0
     allow_online = epay is not None and order.currency == epay.currency
     hint = "请选择支付方式。选择在线支付后，本订单只能通过该收银台付款。"
@@ -250,11 +250,11 @@ async def cb_pay_online(callback: CallbackQuery, db: Database, epay: EPayClient 
     if msg is None or isinstance(msg, InaccessibleMessage):
         await callback.answer()
         return
-    user = await db.get_user_by_telegram_id(callback.from_user.id)
+    user = await db.users.get_user_by_telegram_id(callback.from_user.id)
     if user is None:
         await callback.answer("请先发 /start 再操作", show_alert=True)
         return
-    order = await db.reserve_epay(int(raw), user.id, epay.currency)
+    order = await db.payments.reserve_epay(int(raw), user.id, epay.currency)
     if order is None:
         await callback.answer("订单状态或币种不支持此收款渠道", show_alert=True)
         return
@@ -285,23 +285,23 @@ async def cb_pay_with_balance(callback: CallbackQuery, db: Database, purchaser: 
     order_id = int(data.removeprefix(keyboards.CB_BALANCE_PAY))
     from_user = callback.from_user
     assert from_user is not None
-    await db.refresh_user_profile(
+    await db.users.refresh_user_profile(
         callback.from_user.id,
         callback.from_user.username,
         " ".join(filter(None, [callback.from_user.first_name, callback.from_user.last_name])) or None,
     )
-    user = await db.get_user_by_telegram_id(from_user.id)
+    user = await db.users.get_user_by_telegram_id(from_user.id)
     if user is None:
         await callback.answer("请先发 /start 再操作", show_alert=True)
         return
-    order = await db.get_order(order_id)
+    order = await db.orders.get_order(order_id)
     if order is None or order.user_id != user.id:
         await callback.answer("订单不存在", show_alert=True)
         return
     if order.status != OrderStatus.PENDING_PAYMENT:
         await callback.answer("订单当前状态不可支付", show_alert=True)
         return
-    paid, err = await db.pay_order_with_balance(order_id, user.id, order.amount_cents)
+    paid, err = await db.payments.pay_order_with_balance(order_id, user.id, order.amount_cents)
     if err == "online payment selected":
         await callback.answer("此订单已选择在线支付，请使用原收银台完成付款", show_alert=True)
         return

@@ -149,7 +149,7 @@ EPay 使用明确的 `epay.currency` 配置与订单币种核验；生产实款�
 
 ## 已解决 ✅
 
-- ~~**FSM 用内存存储**~~：已改成 SQLite 持久化（`db.py` 里的 `FSMStorage`），bot 重启后对话状态恢复
+- ~~**FSM 用内存存储**~~：已改成 SQLite 持久化（`db/fsm.py` 的 `FSMStorage`），bot 重启后对话状态恢复
 
 ## 接入上游 API 清单
 

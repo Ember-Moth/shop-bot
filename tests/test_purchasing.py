@@ -89,7 +89,7 @@ def _details_with_esims(status="Success", count=1, plan_id="id-US-1", request_ty
 @pytest.fixture
 async def esim_order(db, user):
     product = Product(1, "US 1GB", "", 4999, "CNY", sku="US-1", upstream_plan_id="id-US-1", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
     return order
 
@@ -117,7 +117,7 @@ async def test_submit_once_then_deliver_from_details(*, db, esim_order, commbitz
     assert order is not None and order.status == OrderStatus.DELIVERED
     assert order.upstream_ref == "up-1"
     assert "ICCID: 89-0" in (order.payload or "") and "LPA: LPA:0" in (order.payload or "")
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None
     assert purchase.state == PurchaseState.FULFILLED
     assert purchase.upstream_request_id == "up-1"
@@ -136,7 +136,7 @@ async def test_pending_upstream_stays_paid_and_polls_later(*, db, esim_order, co
     await orders.mark_paid(db, purchaser, esim_order.id)
     order = await purchaser.fulfill(db, esim_order.id)
     assert order is not None and order.status == OrderStatus.PAID  # 等待不是失败
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.UPSTREAM_PENDING
     # 下次轮询成功交付
     _details_mock(httpx_mock)
@@ -152,7 +152,7 @@ async def test_network_failure_becomes_submission_unknown_never_repurchases(
     await orders.mark_paid(db, purchaser, esim_order.id)
     order = await purchaser.fulfill(db, esim_order.id)
     assert order is not None and order.status == OrderStatus.PAID
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN
     # 再多次恢复也绝不重新购买
     for _ in range(2):
@@ -165,12 +165,12 @@ async def test_timeout_becomes_submission_unknown(*, db, esim_order, commbitz_pu
     httpx_mock.add_exception(httpx.ConnectError("network down"))
     await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
     await commbitz_purchaser.fulfill(db, esim_order.id)
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None
     assert purchase.state == PurchaseState.SUBMISSION_UNKNOWN
     assert "network" in (purchase.last_error or "")
     # 钱货状态不明绝不自动退款：订单保持 paid，等人工核对后 /bind 或 /refund
-    order_after = await db.get_order(esim_order.id)
+    order_after = await db.orders.get_order(esim_order.id)
     assert order_after is not None and order_after.status == OrderStatus.PAID
 
 
@@ -183,12 +183,12 @@ async def test_definite_rejection_auto_refunds_and_closes_order(
     await orders.mark_paid(db, purchaser, esim_order.id)
     order = await purchaser.fulfill(db, esim_order.id)
     assert order is not None and order.status == OrderStatus.REFUNDED
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.REFUNDED
     # 全额退款到余额并写 refund 流水
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == esim_order.amount_cents
-    txs = await db.list_balance_transactions(user.id)
+    txs = await db.wallet.list_balance_transactions(user.id)
     assert [t.kind for t in txs] == ["refund"] and txs[0].amount_cents == esim_order.amount_cents
     # 已退款关闭的订单不能重试，也不会再发创建请求
     ok, detail = await purchaser.retry_rejected(db, esim_order.id)
@@ -212,7 +212,7 @@ async def test_missing_id_in_success_response_becomes_unknown(*, db, esim_order,
     httpx_mock.add_response(json=body)
     await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
     await commbitz_purchaser.fulfill(db, esim_order.id)
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN
 
 
@@ -224,7 +224,7 @@ async def test_missing_id_records_upstream_message(*, db, esim_order, commbitz_p
     httpx_mock.add_response(json=body)
     await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
     await commbitz_purchaser.fulfill(db, esim_order.id)
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN
     assert "Plan not found with SKU" in (purchase.last_error or "")
 
@@ -259,7 +259,7 @@ async def test_create_response_with_id_field_is_accepted(*, db, esim_order, comm
     _details_mock(httpx_mock, status="Success")
     await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
     order = await commbitz_purchaser.fulfill(db, esim_order.id)
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     # 取到 id 作为上游单号，不再卡 submission_unknown
     assert purchase is not None and purchase.upstream_request_id == "up-1"
     assert purchase.state != PurchaseState.SUBMISSION_UNKNOWN
@@ -296,16 +296,16 @@ async def test_upstream_failure_status_auto_refunds(*, db, user, esim_order, com
     await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
     order = await commbitz_purchaser.fulfill(db, esim_order.id)
     assert order is not None and order.status == OrderStatus.REFUNDED
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.REFUNDED
-    user_after = await db.get_user(user.id)
+    user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == esim_order.amount_cents
 
 
 async def test_partial_esims_keep_waiting(*, db, esim_order, commbitz_purchaser, httpx_mock):
     """数量 2 只返回 1 张：继续等待补齐，绝不只发一半货品。"""
     product = Product(1, "US 1GB", "", 4999, "CNY", sku="US-1", upstream_plan_id="id-US-1", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, esim_order.user_id, product, 2)
     await orders.mark_paid(db, commbitz_purchaser, order.id)
     httpx_mock.add_response(json=_create_ok())
@@ -338,15 +338,15 @@ async def test_restart_recovery_with_known_id_only_queries(*, tmp_path, httpx_mo
     db = Database(path)
     await db.connect()
     try:
-        user = await db.upsert_user(42, "audit")
+        user = await db.users.upsert_user(42, "audit")
         product = Product(1, "test", "", 999, "CNY", sku="US-1", request_type="esim")
-        await db.seed_products([product])
+        await db.products.seed_products([product])
         order = await orders.create_order(db, user.id, product, 1)
         await orders.mark_paid(db, DemoPurchaser(), order.id, trade_no="T1")
-        purchase = await db.get_purchase_by_order(order.id)
+        purchase = await db.purchases.get_purchase_by_order(order.id)
         assert purchase is not None
         # 模拟中断在「已保存 _id、尚未交付」之后
-        await db.transition_purchase(
+        await db.purchases.transition_purchase(
             purchase.id, PurchaseState.UPSTREAM_PENDING, from_state=PurchaseState.READY, upstream_request_id="up-9"
         )
     finally:
@@ -365,7 +365,7 @@ async def test_restart_recovery_with_known_id_only_queries(*, tmp_path, httpx_mo
         )
         purchaser = CommbitzPurchaser(gateway)
         await recover_once(recovered, purchaser, None)  # bot=None：通知失败由异常路径吞掉，不重复采购
-        order = await recovered.get_order(order.id)
+        order = await recovered.orders.get_order(order.id)
         assert order is not None and order.status == OrderStatus.DELIVERED
         assert order.upstream_ref == "up-9"
         # 只查询既有 ID，绝不重新购买
@@ -387,7 +387,7 @@ async def test_bind_verifies_and_binds_unknown_purchase(*, db, esim_order, commb
     _details_mock(httpx_mock)
     ok, detail = await commbitz_purchaser.bind_unknown_purchase(db, esim_order.id, "up-x")
     assert ok, detail
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.UPSTREAM_PENDING
     assert purchase.upstream_request_id == "up-x"
     async with db.connection() as conn:
@@ -429,7 +429,7 @@ def test_split_payload_chunks_keeps_blocks_intact():
 async def test_multi_esim_notification_sends_one_archive(*, db, user, commbitz_purchaser, httpx_mock, bot):
     """多张 eSIM：一份 ZIP，正文不再逐张发送 LPA 或图片。"""
     product = Product(1, "US bulk", "", 4999, "CNY", sku="US-100", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 5)
     await orders.mark_paid(db, commbitz_purchaser, order.id)
     httpx_mock.add_response(json=_create_ok())
@@ -448,8 +448,8 @@ async def test_multi_esim_notification_sends_one_archive(*, db, user, commbitz_p
 
 async def _seed_order(db, user_id, sku, request_type):
     product = Product(1, "p", "", 999, "CNY", sku=sku, request_type=request_type)
-    await db.seed_products([product])
-    stored = await db.get_product(product.id)
+    await db.products.seed_products([product])
+    stored = await db.products.get_product(product.id)
     assert stored is not None
     return await orders.create_order(db, user_id, stored, 1)
 
@@ -457,7 +457,7 @@ async def _seed_order(db, user_id, sku, request_type):
 async def test_recharge_days_included_in_payment_amount(db, user):
     """P1-1：充值天数计入收款金额（unitPrice × quantity × days）。"""
     product = Product(1, "1GB/day", "", 100, "CNY", sku="R-1", request_type="recharge")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1, msisdn="+919876543210", days=30)
     assert order.amount_cents == 100 * 1 * 30
     order_one_day = await orders.create_order(db, user.id, product, 2)
@@ -528,14 +528,14 @@ async def test_retry_refuses_when_upstream_order_exists(*, db, esim_order, commb
     await commbitz_purchaser.fulfill(db, esim_order.id)
     httpx_mock.add_response(json=_details(status="failed", esims=[]))
     await commbitz_purchaser.fulfill(db, esim_order.id)  # 详情 failed → rejected → 自动退款关单
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.REFUNDED
     assert purchase.upstream_request_id == "remote-1"
 
     ok, detail = await commbitz_purchaser.retry_rejected(db, esim_order.id)
     assert not ok and "已退款关闭" in detail
     # 状态不变，也不发新的创建请求
-    assert (await db.get_purchase_by_order(esim_order.id)).state == PurchaseState.REFUNDED
+    assert (await db.purchases.get_purchase_by_order(esim_order.id)).state == PurchaseState.REFUNDED
     paths = [r.url.path for r in httpx_mock.get_requests()]
     assert paths.count("/distributor-api/v1/request") == 1
 
@@ -547,7 +547,7 @@ async def test_bind_refuses_plan_mismatch_and_duplicate_upstream_id(
     httpx_mock.add_response(status_code=503)
     await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
     await commbitz_purchaser.fulfill(db, esim_order.id)
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN
 
     # planId 与本地商品 upstream_plan_id 不一致 → 拒绝
@@ -572,7 +572,7 @@ async def test_bind_refuses_plan_mismatch_and_duplicate_upstream_id(
 async def test_order_snapshot_survives_product_change(*, db, user, commbitz_purchaser, httpx_mock):
     """P1-5：下单后修改商品，采购仍使用下单时锁定的 SKU/业务类型。"""
     product = Product(1, "old", "", 999, "CNY", sku="OLD-SKU", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
     # 下单后篡改商品
     async with db.transaction() as conn:
@@ -611,13 +611,13 @@ async def test_catalog_sync_preserves_manual_request_type(db):
                 }
             ]
 
-    await db.upsert_product_from_upstream(
+    await db.products.upsert_product_from_upstream(
         sku="US-1", name="n", description="d", upstream_plan_id="id-US-1", request_type="esim"
     )
     async with db.transaction() as conn:
         await conn.execute("UPDATE products SET request_type = 'recharge' WHERE sku = 'US-1'")
     await sync_catalog(db, FakeCommbitz())
-    row = await db._one("SELECT request_type FROM products WHERE sku = 'US-1'")
+    row = await db.fetch_one("SELECT request_type FROM products WHERE sku = 'US-1'")
     assert row is not None and row["request_type"] == "recharge"  # 人工配置保留
 
 
@@ -633,14 +633,14 @@ async def test_account_level_kyc_requires_documents_before_creation(*, db, esim_
     await orders.mark_paid(db, commbitz_purchaser, esim_order.id)
     order = await commbitz_purchaser.fulfill(db, esim_order.id)
     assert order is not None and order.status == OrderStatus.PAID
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.AWAITING_KYC
     assert purchase.upstream_request_id is None
 
     # 买家补交链接证件 → 暂存并回到 ready
     ok, detail = await purchaser_submit_links(commbitz_purchaser, db, esim_order.id)
     assert ok, detail
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.READY
     assert purchase.kyc_documents is not None and "passportFront" in purchase.kyc_documents
 
@@ -680,7 +680,7 @@ async def test_account_level_kyc_requires_documents_before_creation(*, db, esim_
     request = [r for r in httpx_mock.get_requests() if r.url.path.endswith("/v1/request")][-1]
     assert "kycDocuments" in request.read().decode()
     # 已带证件建单，kycStatus=pending：保持等待审核，轮询到 submitted/verified 再推进
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.AWAITING_KYC
     assert purchase.upstream_request_id == "up-9"
     # 上游标记 submitted → kyc_submitted
@@ -700,7 +700,7 @@ async def test_account_level_kyc_requires_documents_before_creation(*, db, esim_
         }
     )
     await commbitz_purchaser.fulfill(db, esim_order.id)
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.KYC_SUBMITTED
 
 
@@ -742,7 +742,7 @@ async def test_bind_uses_order_plan_snapshot_and_refuses_unverifiable(*, db, use
     """P1-b：绑定用下单时套餐快照；商品被改后旧订单仍按原套餐核验；
     上游响应无套餐/SKU 标识时拒绝绑定而不是放行。"""
     product = Product(1, "US 1GB", "", 4999, "CNY", sku="US-1", upstream_plan_id="id-US-1", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
     await orders.mark_paid(db, commbitz_purchaser, order.id)
     httpx_mock.add_response(status_code=503)
@@ -783,7 +783,7 @@ async def test_bind_uses_order_plan_snapshot_and_refuses_unverifiable(*, db, use
     )
     ok, detail = await commbitz_purchaser.bind_unknown_purchase(db, order.id, "up-x")
     assert ok, detail
-    purchase = await db.get_purchase_by_order(order.id)
+    purchase = await db.purchases.get_purchase_by_order(order.id)
     assert purchase is not None and purchase.upstream_request_id == "up-x"
 
 
@@ -800,7 +800,7 @@ async def test_server_error_with_kyc_message_stays_unknown_never_repurchases(
         },
     )
     await commbitz_purchaser.fulfill(db, esim_order.id)
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN
     # 恢复不得再次发起创建
     await commbitz_purchaser.fulfill(db, esim_order.id)
@@ -816,20 +816,20 @@ async def test_interrupt_between_order_and_purchase_finalizes_on_recovery(
     httpx_mock.add_response(json=_create_ok())
     _details_mock(httpx_mock)
     await commbitz_purchaser.fulfill(db, esim_order.id)
-    assert (await db.get_order(esim_order.id)).status == OrderStatus.DELIVERED
+    assert (await db.orders.get_order(esim_order.id)).status == OrderStatus.DELIVERED
     # 模拟历史中断窗口：采购被回拨到 upstream_pending
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None
-    await db.transition_purchase(
+    await db.purchases.transition_purchase(
         purchase.id,
         PurchaseState.UPSTREAM_PENDING,
         from_state=PurchaseState.FULFILLED,
         upstream_request_id=None,
     )
     await recover_once(db, commbitz_purchaser, bot)
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.FULFILLED
-    final = await db.get_order(esim_order.id)
+    final = await db.orders.get_order(esim_order.id)
     assert final is not None and final.payload
     assert await notify_owner(db, bot, esim_order.id)
 
@@ -867,7 +867,7 @@ async def test_migration_survives_duplicate_upstream_ids(tmp_path, caplog):
     try:
         assert any("duplicate upstream request ids" in r.message for r in caplog.records)
         # 无唯一索引：重复记录保留，交由管理员人工处理
-        row = await db._one("SELECT COUNT(*) AS c FROM purchases WHERE upstream_request_id = 'shared-id'")
+        row = await db.fetch_one("SELECT COUNT(*) AS c FROM purchases WHERE upstream_request_id = 'shared-id'")
         assert row is not None and row["c"] == 2
     finally:
         await db.close()
@@ -907,7 +907,7 @@ async def test_duplicate_legacy_purchases_frozen_and_excluded_from_delivery(*, t
         db = Database(path)
         await db.connect()
     try:
-        frozen = await db.list_purchases_by_states((PurchaseState.SUBMISSION_UNKNOWN,))
+        frozen = await db.purchases.list_purchases_by_states((PurchaseState.SUBMISSION_UNKNOWN,))
         assert {p.order_id for p in frozen} == {1, 2}  # 两笔冲突记录都被冻结
         assert any("duplicate upstream request ids" in r.message for r in caplog.records)
 
@@ -921,7 +921,7 @@ async def test_duplicate_legacy_purchases_frozen_and_excluded_from_delivery(*, t
         await recover_once(db, CommbitzPurchaser(NoTouchGateway()), bot)
         # 冻结状态不翻转，两笔采购都等人处理
         for order_id in (1, 2):
-            purchase = await db.get_purchase_by_order(order_id)
+            purchase = await db.purchases.get_purchase_by_order(order_id)
             assert purchase is not None and purchase.state == PurchaseState.SUBMISSION_UNKNOWN
     finally:
         await db.close()
@@ -930,7 +930,7 @@ async def test_duplicate_legacy_purchases_frozen_and_excluded_from_delivery(*, t
 async def test_bind_atomic_conflict_under_concurrency(*, db, user, commbitz_purchaser, httpx_mock):
     """P1-1：无唯一索引时，并发绑定同一上游单也只有一个成功（事务内复核）。"""
     product = Product(1, "US 1GB", "", 4999, "CNY", sku="US-1", upstream_plan_id="id-US-1", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     orders_list = [await orders.create_order(db, user.id, product, 1) for _ in range(2)]
     for order in orders_list:
         await orders.mark_paid(db, commbitz_purchaser, order.id)
@@ -946,7 +946,7 @@ async def test_bind_atomic_conflict_under_concurrency(*, db, user, commbitz_purc
     assert len(successes) == 1  # 只有一个绑定成功
     owners = []
     for order in orders_list:
-        purchase = await db.get_purchase_by_order(order.id)
+        purchase = await db.purchases.get_purchase_by_order(order.id)
         assert purchase is not None
         if purchase.upstream_request_id == "shared-x":
             owners.append(order.id)
@@ -958,7 +958,7 @@ async def test_bind_refused_when_local_snapshot_missing_and_upstream_plan_differ
 ):
     """P1-2：旧订单无套餐快照、上游只返回 planId（无 SKU）→ 无法核对，拒绝绑定。"""
     product = Product(1, "legacy", "", 999, "CNY", sku="ORIGINAL-SKU", request_type="esim")
-    await db.seed_products([product])
+    await db.products.seed_products([product])
     order = await orders.create_order(db, user.id, product, 1)
     await orders.mark_paid(db, commbitz_purchaser, order.id)
     httpx_mock.add_response(status_code=503)
@@ -1012,17 +1012,17 @@ async def test_notified_delivered_order_with_pending_purchase_converges(
     _details_mock(httpx_mock)
     await commbitz_purchaser.fulfill(db, esim_order.id)
     await notify_owner(db, bot, esim_order.id)
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None
     # 模拟历史中断窗口：采购停留在 upstream_pending，且订单已通知完毕
-    await db.transition_purchase(
+    await db.purchases.transition_purchase(
         purchase.id,
         PurchaseState.UPSTREAM_PENDING,
         from_state=PurchaseState.FULFILLED,
         upstream_request_id=None,
     )
     await recover_once(db, commbitz_purchaser, bot)
-    purchase = await db.get_purchase_by_order(esim_order.id)
+    purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.FULFILLED
 
 
@@ -1063,11 +1063,11 @@ async def test_frozen_duplicate_purchases_block_notification_to_both_buyers(*, t
     await db.connect()
     try:
         # 买家必须真实存在，避免因找不到收件人而让“未发送”的断言虚假通过。
-        first_buyer = await db.upsert_user(42, "buyer-one")
-        second_buyer = await db.upsert_user(43, "buyer-two")
+        first_buyer = await db.users.upsert_user(42, "buyer-one")
+        second_buyer = await db.users.upsert_user(43, "buyer-two")
         assert first_buyer.id == 1 and second_buyer.id == 2
         # 迁移把 fulfilled 记录也冻结（重复货品归属存疑，通知前必须人工确认）
-        frozen = await db.list_purchases_by_states((PurchaseState.SUBMISSION_UNKNOWN,))
+        frozen = await db.purchases.list_purchases_by_states((PurchaseState.SUBMISSION_UNKNOWN,))
         assert {p.order_id for p in frozen} == {1, 2}
 
         await recover_once(db, CommbitzPurchaser(FakeCommbitzGateway()), bot)
@@ -1075,7 +1075,7 @@ async def test_frozen_duplicate_purchases_block_notification_to_both_buyers(*, t
         assert bot.session.sent == []
         # 通知保持待发状态，等管理员人工核对后处理
         for order_id in (1, 2):
-            order = await db.get_order(order_id)
+            order = await db.orders.get_order(order_id)
             assert order is not None and order.notification_pending == 1
 
         # 手动补发（resend=True）同样被拦截
