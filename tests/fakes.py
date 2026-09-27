@@ -12,6 +12,7 @@ class FakeSession(BaseSession):
         self.fail_photo = False
         self.fail_document = False
         self.fail_commands_for = set()  # 模拟 Telegram 拒绝为这些 chat scope 注册菜单
+        self.edit_failure = None  # callable(method) -> Exception：模拟编辑消息被拒或限流
 
     async def close(self):
         pass
@@ -20,6 +21,8 @@ class FakeSession(BaseSession):
         self.sent.append(method)
         if method.__api_method__ == "getMe":
             return User(id=123456, is_bot=True, first_name="Audit", username="audit_bot")
+        if method.__api_method__ == "editMessageText" and self.edit_failure is not None:
+            raise self.edit_failure(method)
         if method.__api_method__ in ("sendMessage", "editMessageText"):
             if self.fail_send:
                 raise RuntimeError("simulated Telegram unavailable")

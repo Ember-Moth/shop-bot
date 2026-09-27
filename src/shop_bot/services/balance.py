@@ -46,5 +46,13 @@ def parse_topup_amount(text: str) -> int | None:
     return cents
 
 
+def topup_gap(amount_cents: int, balance_cents: int) -> int:
+    """补差价充值额：余额已够返回 0；差额低于单笔最低充值时按最低额充值，多出部分留在余额。"""
+    gap = amount_cents - balance_cents
+    if gap <= 0:
+        return 0
+    return max(gap, MIN_TOPUP_CENTS)
+
+
 def format_cents(cents: int) -> str:
     return f"{cents / 100:.2f}"

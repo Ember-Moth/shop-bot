@@ -151,38 +151,56 @@ class PaymentRepository(Repository):
         self, order_id: int, user_id: int, amount_cents: int
     ) -> tuple[Order | None, str | None]:
         async with self._db.transaction() as conn:
-            async with conn.execute(
-                "SELECT * FROM orders WHERE id = ? AND status = 'pending_payment'", (order_id,)
-            ) as cur:
-                order = await cur.fetchone()
-            if order is None:
-                return None, "order not payable"
-            if order["user_id"] != user_id or order["amount_cents"] != amount_cents or amount_cents <= 0:
-                return None, "order mismatch"
-            if order["payment_method"] == "epay":
-                return None, "online payment selected"
-            balance = await self._db.wallet.change_wallet(
-                conn,
-                user_id,
-                order["currency"],
-                -amount_cents,
-                "purchase",
-                order_id=order_id,
-                note=f"order #{order_id}",
-            )
-            if balance is None:
-                return None, "insufficient"
-            async with conn.execute(
-                """UPDATE orders SET status = 'paid', payment_method = 'balance',
-                trade_no = ?, updated_at = datetime('now') WHERE id = ? RETURNING *""",
-                (f"BAL{order_id}", order_id),
-            ) as cur:
-                paid = await cur.fetchone()
-            await conn.execute(
-                "INSERT INTO order_events (order_id, from_status, to_status, note)"
-                " VALUES (?, 'pending_payment', 'paid', 'balance payment')",
-                (order_id,),
-            )
+            return await self.settle_with_balance(conn, order_id, user_id, amount_cents)
+
+    async def settle_with_balance(
+        self,
+        conn: aiosqlite.Connection,
+        order_id: int,
+        user_id: int,
+        amount_cents: int | None = None,
+        *,
+        currency: str | None = None,
+        event_note: str = "balance payment",
+    ) -> tuple[Order | None, str | None]:
+        """调用方持有事务：用同币种余额全额支付待付订单；任一条件不满足都不扣款。
+
+        amount_cents、currency 是调用方预期的金额与币种，与订单不一致即拒绝。
+        补差价自动付款不传金额，但必须传充值币种，绝不动用其他币种的余额。
+        """
+        async with conn.execute("SELECT * FROM orders WHERE id = ? AND status = 'pending_payment'", (order_id,)) as cur:
+            order = await cur.fetchone()
+        if order is None:
+            return None, "order not payable"
+        expected = order["amount_cents"] if amount_cents is None else amount_cents
+        if order["user_id"] != user_id or order["amount_cents"] != expected or expected <= 0:
+            return None, "order mismatch"
+        if currency is not None and order["currency"] != currency:
+            return None, "currency mismatch"
+        if order["payment_method"] == "epay":
+            return None, "online payment selected"
+        balance = await self._db.wallet.change_wallet(
+            conn,
+            user_id,
+            order["currency"],
+            -expected,
+            "purchase",
+            order_id=order_id,
+            note=f"order #{order_id}",
+        )
+        if balance is None:
+            return None, "insufficient"
+        async with conn.execute(
+            """UPDATE orders SET status = 'paid', payment_method = 'balance',
+            trade_no = ?, updated_at = datetime('now') WHERE id = ? RETURNING *""",
+            (f"BAL{order_id}", order_id),
+        ) as cur:
+            paid = await cur.fetchone()
+        await conn.execute(
+            """INSERT INTO order_events (order_id, from_status, to_status, note)
+            VALUES (?, 'pending_payment', 'paid', ?)""",
+            (order_id, event_note),
+        )
         assert paid is not None
         return row_to_order(paid), None
 

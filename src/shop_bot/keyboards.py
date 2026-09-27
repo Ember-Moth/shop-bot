@@ -18,9 +18,13 @@ CB_TOPUP_PREFIX = "topup:"  # topup:<金额分> 预设档位
 CB_TOPUP_CUSTOM = "topup:custom"
 CB_TOPUP_CANCEL = "topup:cancel"
 CB_CATALOG_PAGE = "catalog:"
+CB_RESUME_PAY = "resume:"  # resume:<订单号>，从订单列表继续支付
+CB_TOPUP_GAP = "gap:"  # gap:<订单号>，补差价充值；不能用 topup: 前缀，那是金额档位
+CB_WALLET_VIEW = "wallet:view"
 CATALOG_PAGE_SIZE = 5
+MAX_RESUME_BUTTONS = 5
 
-TOPUP_PRESETS = (10, 20, 30, 50, 100)  # 预设充值档位（元），自定义金额走文本输入
+TOPUP_PRESETS = (10, 20, 30, 50, 100)  # 预设充值档位，单位为收款币种；自定义金额走文本输入
 
 # 主菜单文案（回复键盘与文本路由共用，改文案需同步 handlers/start.py）
 MENU_BUY = "🛒 购买商品"
@@ -121,11 +125,20 @@ def confirm_order() -> InlineKeyboardMarkup:
 
 
 def order_created(
-    order_id: int, pay_url: str | None = None, allow_balance: bool = False, allow_online: bool = False
+    order_id: int,
+    pay_url: str | None = None,
+    allow_balance: bool = False,
+    allow_online: bool = False,
+    gap_label: str | None = None,
 ) -> InlineKeyboardMarkup:
+    """gap_label 为补差价金额（如 "11.00 USD"），余额不足但有部分余额时给出。"""
     rows = []
     if allow_balance:
         rows.append([InlineKeyboardButton(text="💰 余额支付", callback_data=f"{CB_BALANCE_PAY}{order_id}")])
+    if gap_label:
+        rows.append(
+            [InlineKeyboardButton(text=f"➕ 补差价 {gap_label} 并支付", callback_data=f"{CB_TOPUP_GAP}{order_id}")]
+        )
     if pay_url:
         # Web App 按钮：在 Telegram 内嵌打开支付页面
         rows.append([InlineKeyboardButton(text="💳 立即支付", web_app=WebAppInfo(url=pay_url))])
@@ -133,6 +146,37 @@ def order_created(
         rows.append([InlineKeyboardButton(text="💳 在线支付", callback_data=f"{CB_EPAY_PAY}{order_id}")])
     rows.append([InlineKeyboardButton(text="📦 查看我的订单", callback_data="myorders")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def topup_invoice(pay_url: str) -> InlineKeyboardMarkup:
+    """充值单不在订单列表里，付款后去「我的余额」查看到账。"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 立即支付", web_app=WebAppInfo(url=pay_url))],
+            [InlineKeyboardButton(text=MENU_BALANCE, callback_data=CB_WALLET_VIEW)],
+        ]
+    )
+
+
+def settled_order() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="📦 查看我的订单", callback_data="myorders")]]
+    )
+
+
+def settled_topup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=MENU_BALANCE, callback_data=CB_WALLET_VIEW)]]
+    )
+
+
+def my_orders(pending_order_ids: list[int]) -> InlineKeyboardMarkup:
+    """订单列表：最近的待支付订单各给一个继续支付入口，下面保留主菜单。"""
+    rows = [
+        [InlineKeyboardButton(text=f"💳 支付订单 #{order_id}", callback_data=f"{CB_RESUME_PAY}{order_id}")]
+        for order_id in pending_order_ids[:MAX_RESUME_BUTTONS]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[*rows, *main_menu().inline_keyboard])
 
 
 def topup_amounts(currency: str) -> InlineKeyboardMarkup:

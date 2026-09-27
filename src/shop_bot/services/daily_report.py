@@ -17,7 +17,7 @@ from aiogram import Bot
 from ..config import Settings
 from ..db import Database
 from ..logging_config import get_logger
-from ..models import OrderStatus
+from ..models import ORDER_STATUS_LABELS, OrderStatus
 from .balance import format_cents
 
 if TYPE_CHECKING:
@@ -27,15 +27,6 @@ logger = get_logger(__name__)
 
 HEARTBEAT_SLICE = 30.0  # 分片睡眠上限，期间持续上报心跳
 SEND_RETRY_DELAYS = (0, 900, 1800, 3600)  # 发送失败的重试间隔（秒），用尽后等明天
-
-_ORDER_STATUS_LABELS = {
-    OrderStatus.PENDING_PAYMENT: "待支付",
-    OrderStatus.PAID: "已付款",
-    OrderStatus.DELIVERED: "已交付",
-    OrderStatus.DELIVERY_FAILED: "交付失败",
-    OrderStatus.CANCELLED: "已取消",
-    OrderStatus.REFUNDED: "已退款",
-}
 
 _TX_KIND_LABELS = {
     "topup": "充值入账",
@@ -75,7 +66,7 @@ def format_daily_report(summary: dict, date_label: str) -> str:
     orders_by_status: dict[str, int] = {}
     for row in summary["orders"]:
         status = str(row["status"])
-        label = _ORDER_STATUS_LABELS.get(OrderStatus(status), status)
+        label = ORDER_STATUS_LABELS.get(OrderStatus(status), status)
         orders_by_status[label] = orders_by_status.get(label, 0) + row["n"]
     if orders_by_status:
         lines.append("  " + " · ".join(f"{k} {v}" for k, v in sorted(orders_by_status.items())))

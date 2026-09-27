@@ -13,6 +13,21 @@ class OrderStatus(StrEnum):
     CANCELLED = "cancelled"
     REFUNDED = "refunded"  # 履约失败，已退款到买家余额（终态，不再履约/取消）
 
+    @property
+    def label(self) -> str:
+        """买家与报表看到的中文状态名；管理员命令仍用英文值做过滤参数。"""
+        return ORDER_STATUS_LABELS[self]
+
+
+ORDER_STATUS_LABELS: dict[OrderStatus, str] = {
+    OrderStatus.PENDING_PAYMENT: "待支付",
+    OrderStatus.PAID: "已付款",
+    OrderStatus.DELIVERED: "已交付",
+    OrderStatus.DELIVERY_FAILED: "交付失败",
+    OrderStatus.CANCELLED: "已取消",
+    OrderStatus.REFUNDED: "已退款",
+}
+
 
 class PurchaseState(StrEnum):
     """采购状态（docs/reseller-bot-development.md 5.3），与订单收款状态分开保存。"""
@@ -122,6 +137,7 @@ class Topup:
     created_at: datetime
     updated_at: datetime
     currency: str = "CNY"
+    order_id: int | None = None  # 补差价充值的目标订单：到账时同事务尝试用余额付清
 
 
 @dataclass(slots=True)

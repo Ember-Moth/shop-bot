@@ -77,8 +77,13 @@ class WorkRepository(Repository):
 
     async def get_wallet_notification(self, transaction_id: int) -> dict[str, Any] | None:
         row = await self._db.fetch_one(
-            """SELECT t.*, u.telegram_id FROM balance_transactions t
-            JOIN users u ON u.id = t.user_id WHERE t.id = ?""",
+            """SELECT t.*, u.telegram_id, b.order_id AS target_order_id,
+                (SELECT p.balance_after FROM balance_transactions p
+                    WHERE p.kind = 'purchase' AND p.order_id = t.order_id ORDER BY p.id LIMIT 1) AS paid_balance_after
+            FROM balance_transactions t
+            JOIN users u ON u.id = t.user_id
+            LEFT JOIN balance_topups b ON b.id = t.topup_id
+            WHERE t.id = ?""",
             (transaction_id,),
         )
         return dict(row) if row else None

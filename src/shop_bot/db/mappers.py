@@ -71,6 +71,7 @@ def row_to_topup(row: aiosqlite.Row) -> Topup:
         trade_no=row["trade_no"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        order_id=row["order_id"],
     )
 
 

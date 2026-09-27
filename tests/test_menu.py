@@ -209,7 +209,8 @@ async def test_menu_router_buy_and_orders(db, user, bot):
     start._menu_last_seen.clear()
     await start.menu_router(menu_message(bot, MENU_ORDERS), db, None, None)
     texts = [m.text or "" for m in bot.session.sent]
-    assert any(f"#{order.id}" in t and "delivered" in t for t in texts)
+    assert any(f"#{order.id}" in t and "已交付" in t for t in texts)
+    assert all("delivered" not in t for t in texts)  # 买家看到中文状态，不是内部值
 
 
 # ---- KYC 功能开关 ----

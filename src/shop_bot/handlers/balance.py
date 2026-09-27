@@ -1,10 +1,13 @@
-"""钱包相关交互：充值余额（预设档位/自定义金额 + EPay 链接）与我的余额（含流水）。
+"""钱包相关交互：充值余额（预设档位/自定义金额 + EPay 链接）、我的余额与交易记录。
 
-入口由 start.py 的 menu_router 分发（start_topup / render_balance）；
-TopupFlow.amount 状态处理器注册在本模块 router 上。
+入口由 start.py 的 menu_router 分发（start_topup / render_balance / render_history）；
+TopupFlow.amount 状态处理器和钱包按钮回调注册在本模块 router 上。
 """
 
 from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -14,13 +17,29 @@ from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMark
 from .. import keyboards
 from ..db import Database
 from ..logging_config import get_logger
-from ..models import User
+from ..models import Order, Topup, User
 from ..services.balance import format_cents, parse_topup_amount
 from ..services.epay import EPayClient
 from ..services.invoices import payment_url
 
 router = Router()
 logger = get_logger(__name__)
+
+_WALLET_KIND_LABELS = {
+    "topup": "充值",
+    "purchase": "消费",
+    "refund": "退款",
+    "adjust": "调账",
+    "payment_credit": "重复/关单收款补偿",
+}
+# 交易记录同时列出在线支付，钱包流水需写明是余额变动。
+_HISTORY_KIND_LABELS = {
+    "topup": "充值到余额",
+    "purchase": "余额支付",
+    "refund": "退款到余额",
+    "adjust": "余额调整",
+    "payment_credit": "额外收款转入余额",
+}
 
 
 class TopupFlow(StatesGroup):
@@ -49,21 +68,31 @@ async def start_topup(message: Message, db: Database, epay: EPayClient | None, s
     )
 
 
-async def _create_topup_invoice(
-    message: Message, db: Database, epay: EPayClient, user: User, amount_cents: int
-) -> tuple[str, InlineKeyboardMarkup]:
-    """创建充值单并生成 EPay 收银台链接，返回账单文本与支付按钮。"""
-    topup = await db.wallet.create_topup(user.id, amount_cents, epay.currency)
+async def create_topup_invoice(
+    message: Message, db: Database, epay: EPayClient, user: User, amount_cents: int, *, order: Order | None = None
+) -> tuple[Topup, str, InlineKeyboardMarkup]:
+    """创建充值单并生成 EPay 收银台链接，返回充值单、账单文本（Markdown）与支付按钮。
+
+    传入 order 时为补差价充值：到账后在同一事务内用余额付清该订单。
+    """
+    if order is None:
+        topup = await db.wallet.create_topup(user.id, amount_cents, epay.currency)
+        name, title = "余额充值", f"💰 充值单 `{topup.id}` 已创建"
+        body = "点击下方按钮完成支付，到账后自动通知："
+    else:
+        topup = await db.wallet.gap_topup(user.id, order.id, amount_cents, epay.currency)
+        name, title = f"订单 #{order.id} 补差价", f"💰 补差价充值单 `{topup.id}`"
+        body = (
+            f"到账后自动用余额支付订单 #{order.id}（{order.amount_text}），多出部分留在余额。\n"
+            "如果订单已付款、已取消或改选在线支付，款项全部留在余额。"
+        )
     bot = message.bot
     assert bot is not None
     pay_url = await payment_url(
-        bot, epay, name="余额充值", order_no=f"T{topup.id}", amount_cents=amount_cents, currency=topup.currency
+        bot, epay, name=name, order_no=f"T{topup.id}", amount_cents=topup.amount_cents, currency=topup.currency
     )
-    text = (
-        f"💰 充值单 `{topup.id}` 已创建\n金额：{format_cents(amount_cents)} {topup.currency}\n\n"
-        "点击下方按钮完成支付，到账后自动通知："
-    )
-    return text, keyboards.order_created(topup.id, pay_url)
+    text = f"{title}\n金额：{format_cents(topup.amount_cents)} {topup.currency}\n\n{body}"
+    return topup, text, keyboards.topup_invoice(pay_url)
 
 
 @router.callback_query(
@@ -91,8 +120,9 @@ async def cb_topup_preset(callback: CallbackQuery, db: Database, epay: EPayClien
     if msg is None or isinstance(msg, InaccessibleMessage):
         await callback.answer("消息已过期，请重新发起充值", show_alert=True)
         return
-    text, markup = await _create_topup_invoice(msg, db, epay, user, amount_cents)
+    topup, text, markup = await create_topup_invoice(msg, db, epay, user, amount_cents)
     await msg.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+    await db.prompts.record(msg.chat.id, msg.message_id, topup_id=topup.id)
     await callback.answer()
 
 
@@ -144,23 +174,33 @@ async def topup_amount_input(message: Message, db: Database, epay: EPayClient | 
         await message.answer("请先发送 /start 完成注册")
         return
     await state.clear()
-    text_out, markup = await _create_topup_invoice(message, db, epay, user, amount_cents)
-    await message.answer(text_out, parse_mode="Markdown", reply_markup=markup)
+    topup, text_out, markup = await create_topup_invoice(message, db, epay, user, amount_cents)
+    sent = await message.answer(text_out, parse_mode="Markdown", reply_markup=markup)
+    await db.prompts.record(sent.chat.id, sent.message_id, topup_id=topup.id)
 
 
 @router.message(TopupFlow.amount)
-async def topup_amount_non_text(message: Message) -> None:
+async def topup_amount_non_text(message: Message, epay: EPayClient | None = None) -> None:
     """等待金额时收到图片/贴纸等非文本消息：提示而非让上一个 handler 的 assert 崩溃。"""
-    await message.answer("请回复文本形式的充值金额（元），或发 /start 取消。")
+    unit = f"（{epay.currency}）" if epay is not None else ""
+    await message.answer(f"请回复文本形式的充值金额{unit}，或发 /start 取消。")
 
 
-async def render_balance(message: Message, db: Database) -> None:
-    from_user = message.from_user
-    assert from_user is not None
-    user = await db.users.get_user_by_telegram_id(from_user.id)
-    if user is None:
-        await message.answer("请先发送 /start 完成注册")
+@router.callback_query(F.data == keyboards.CB_WALLET_VIEW)
+async def cb_wallet_view(callback: CallbackQuery, db: Database) -> None:
+    msg = callback.message
+    if msg is None or isinstance(msg, InaccessibleMessage):
+        await callback.answer("消息已过期，请点底部「💳 我的余额」", show_alert=True)
         return
+    user = await db.users.get_user_by_telegram_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("请先发送 /start 完成注册", show_alert=True)
+        return
+    await msg.answer(await balance_text(db, user))
+    await callback.answer()
+
+
+async def balance_text(db: Database, user: User) -> str:
     balances = await db.wallet.get_balances(user.id)
     balances.setdefault("USD", 0)
     lines = [f"当前余额：{format_cents(value)} {currency}" for currency, value in sorted(balances.items())]
@@ -170,15 +210,56 @@ async def render_balance(message: Message, db: Database) -> None:
         lines.append("最近记录：")
         for tx in txs:
             sign = "+" if tx.amount_cents >= 0 else "-"
-            kind = {
-                "topup": "充值",
-                "purchase": "消费",
-                "refund": "退款",
-                "adjust": "调账",
-                "payment_credit": "重复/关单收款补偿",
-            }.get(tx.kind, tx.kind)
+            kind = _WALLET_KIND_LABELS.get(tx.kind, tx.kind)
             lines.append(
                 f"{sign}{format_cents(abs(tx.amount_cents))} {tx.currency}（{kind}）"
                 f"→ 余额 {format_cents(tx.balance_after)} {tx.currency}"
             )
-    await message.answer("💳 我的余额\n\n" + "\n".join(lines))
+    return "💳 我的余额\n\n" + "\n".join(lines)
+
+
+async def render_balance(message: Message, db: Database) -> None:
+    from_user = message.from_user
+    assert from_user is not None
+    user = await db.users.get_user_by_telegram_id(from_user.id)
+    if user is None:
+        await message.answer("请先发送 /start 完成注册")
+        return
+    await message.answer(await balance_text(db, user))
+
+
+def _local_time(created_at: str) -> str:
+    """库内时间为 UTC；按服务器本地时区显示，与每日报表一致。"""
+    try:
+        moment = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    except ValueError:
+        return created_at
+    return moment.astimezone().strftime("%m-%d %H:%M")
+
+
+def _history_line(row: dict[str, Any]) -> str:
+    order = f" 订单 #{row['order_id']}" if row["order_id"] else ""
+    amount = f"{format_cents(abs(row['amount_cents']))} {row['currency']}"
+    if row["source"] == "online":
+        return f"{_local_time(row['created_at'])} · 在线支付{order} · {amount}"
+    sign = "+" if row["amount_cents"] >= 0 else "-"
+    label = _HISTORY_KIND_LABELS.get(row["kind"], row["kind"])
+    if row["kind"] == "topup" and row["order_id"]:
+        label = "补差价充值"  # 到账后已自动付清该订单
+    return f"{_local_time(row['created_at'])} · {label}{order} · {sign}{amount}"
+
+
+async def render_history(message: Message, db: Database) -> None:
+    """「🧾 交易记录」：充值、付款、退款等资金记录；订单状态在「📦 我的订单」。"""
+    from_user = message.from_user
+    assert from_user is not None
+    user = await db.users.get_user_by_telegram_id(from_user.id)
+    if user is None:
+        await message.answer("请先发送 /start 完成注册")
+        return
+    rows = await db.wallet.list_payment_history(user.id)
+    if not rows:
+        await message.answer("🧾 交易记录\n\n暂无充值、付款或退款记录。")
+        return
+    lines = [_history_line(row) for row in rows]
+    await message.answer("🧾 交易记录\n\n" + "\n".join(lines) + "\n\n订单进度请看「📦 我的订单」。")

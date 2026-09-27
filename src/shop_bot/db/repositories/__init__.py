@@ -6,6 +6,7 @@ from .operations import OperationsRepository
 from .orders import OrderRepository
 from .payments import PaymentRepository
 from .products import ProductRepository
+from .prompts import PaymentPromptRepository
 from .purchases import PurchaseRepository
 from .users import UserRepository
 from .wallet import WalletRepository
@@ -15,6 +16,7 @@ __all__ = [
     "DeliveryRepository",
     "OperationsRepository",
     "OrderRepository",
+    "PaymentPromptRepository",
     "PaymentRepository",
     "ProductRepository",
     "PurchaseRepository",

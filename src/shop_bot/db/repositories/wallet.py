@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import aiosqlite
 
 from ...models import BalanceTransaction, Topup
@@ -77,6 +79,37 @@ class WalletRepository(Repository):
         assert row is not None
         return row_to_topup(row)
 
+    async def gap_topup(self, user_id: int, order_id: int, amount_cents: int, currency: str) -> Topup:
+        """补差价充值单。同一订单、同金额的待付单直接复用，重复点按钮不会堆积充值单或付两次。"""
+        currency = normalize_currency(currency)
+        if amount_cents <= 0:
+            raise ValueError("topup amount must be positive")
+        async with self._db.transaction() as conn:
+            async with conn.execute(
+                """SELECT * FROM balance_topups WHERE user_id = ? AND order_id = ? AND amount_cents = ?
+                AND currency = ? AND status = 'pending' ORDER BY id DESC LIMIT 1""",
+                (user_id, order_id, amount_cents, currency),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                async with conn.execute(
+                    """INSERT INTO balance_topups (user_id, amount_cents, currency, order_id)
+                    VALUES (?, ?, ?, ?) RETURNING *""",
+                    (user_id, amount_cents, currency, order_id),
+                ) as cur:
+                    row = await cur.fetchone()
+        assert row is not None
+        return row_to_topup(row)
+
+    async def topup_applied_order(self, topup_id: int) -> int | None:
+        """这张充值单到账后自动付清的订单；未自动付款返回 None。"""
+        row = await self._db.fetch_one(
+            """SELECT order_id FROM balance_transactions
+            WHERE topup_id = ? AND kind = 'topup' AND order_id IS NOT NULL LIMIT 1""",
+            (topup_id,),
+        )
+        return row["order_id"] if row else None
+
     async def get_topup(self, topup_id: int) -> Topup | None:
         row = await self._db.fetch_one("SELECT * FROM balance_topups WHERE id = ?", (topup_id,))
         return row_to_topup(row) if row else None
@@ -114,8 +147,32 @@ class WalletRepository(Repository):
                 (trade_no, topup_id),
             ) as cur:
                 paid = await cur.fetchone()
+            if topup["order_id"] is not None:
+                await self._settle_target_order(conn, topup)
         assert paid is not None
         return row_to_topup(paid)
+
+    async def _settle_target_order(self, conn: aiosqlite.Connection, topup: aiosqlite.Row) -> None:
+        """补差价到账：同一事务内用余额付清目标订单。
+
+        订单已付款、已关闭、改选在线支付、币种不同或余额仍不足时什么都不做，款项留在余额。
+        付款成功才把这笔到账流水标记到订单上；同一充值单再次到账的流水不会被误标。
+        """
+        order, _ = await self._db.payments.settle_with_balance(
+            conn,
+            topup["order_id"],
+            topup["user_id"],
+            currency=topup["currency"],
+            event_note=f"balance payment after top-up T{topup['id']}",
+        )
+        if order is None:
+            return
+        await conn.execute(
+            """UPDATE balance_transactions SET order_id = ? WHERE id = (
+                SELECT id FROM balance_transactions WHERE topup_id = ? AND kind = 'topup' ORDER BY id DESC LIMIT 1
+            )""",
+            (order.id, topup["id"]),
+        )
 
     async def adjust_balance(self, user_id: int, delta_cents: int, note: str, currency: str = "CNY") -> int | None:
         async with self._db.transaction() as conn:
@@ -127,3 +184,22 @@ class WalletRepository(Repository):
             (user_id, limit),
         )
         return [row_to_balance_tx(r) for r in rows]
+
+    async def list_payment_history(self, user_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        """买家的资金记录：钱包流水加在线支付的订单收款，新的在前。
+
+        充值和额外收款已有对应流水，这里不再重复列出其在线收款凭据。
+        """
+        rows = await self._db.fetch_all(
+            """SELECT * FROM (
+                SELECT created_at, id AS seq, 'wallet' AS source, kind, amount_cents, currency, order_id
+                FROM balance_transactions WHERE user_id = ?
+                UNION ALL
+                SELECT r.created_at, r.rowid AS seq, 'online' AS source, 'epay' AS kind,
+                    r.amount_cents, r.currency, r.order_id
+                FROM payment_receipts r JOIN orders o ON o.id = r.order_id
+                WHERE o.user_id = ? AND r.disposition = 'order'
+            ) ORDER BY created_at DESC, seq DESC LIMIT ?""",
+            (user_id, user_id, limit),
+        )
+        return [dict(row) for row in rows]

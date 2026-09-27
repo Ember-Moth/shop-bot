@@ -4,7 +4,7 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InaccessibleMessage, Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from .. import keyboards
 from ..commands import register_admin_menu
@@ -27,8 +27,10 @@ from ..models import OrderStatus, PurchaseState
 from ..services import orders
 from ..services.epay import EPayClient, EPayError
 from ..services.orders import OrderError
+from ..services.payment_prompts import HEADER_UNPAID
 from ..services.purchasing import Purchaser
-from .balance import render_balance, start_topup
+from .balance import render_balance, render_history, start_topup
+from .order import send_order_prompt
 
 router = Router()
 logger = get_logger(__name__)
@@ -40,7 +42,9 @@ def help_text(kyc_enabled: bool = True) -> str:
         "❓ **使用帮助**",
         "",
         "下单：点「🛒 购买商品」选商品 → 按提示回复数量 / ICCID / 手机号 → 确认并支付",
+        "付款：待支付的订单可在「📦 我的订单」里继续付款；余额不够时可「➕ 补差价」，到账后自动付清",
         "查询：/query <订单号> 查支付状态；📦 我的订单 查看全部订单",
+        "记录：「🧾 交易记录」查看充值、付款与退款",
         "用量：/usage <订单号>（已交付 eSIM 的流量与有效期）",
     ]
     if kyc_enabled:
@@ -98,19 +102,27 @@ async def _send_catalog(message: Message, db: Database) -> None:
     )
 
 
-async def _render_my_orders(message: Message, db: Database, title: str) -> None:
+async def _my_orders_view(db: Database, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    user_orders = await db.orders.list_orders_for_user(user_id)
+    if not user_orders:
+        return "你还没有订单。\n点「🛒 购买商品」开始第一单！", main_menu()
+    lines = [f"#{o.id} · 数量 x{o.quantity} · {o.amount_text} · {o.status.label}" for o in user_orders]
+    pending = [o.id for o in user_orders if o.status == OrderStatus.PENDING_PAYMENT]
+    text = "📦 我的订单\n\n" + "\n".join(lines)
+    if pending:
+        text += "\n\n待支付的订单可点下方按钮继续付款。"
+    return text, keyboards.my_orders(pending)
+
+
+async def _render_my_orders(message: Message, db: Database) -> None:
     from_user = message.from_user
     assert from_user is not None
     user = await db.users.get_user_by_telegram_id(from_user.id)
     if user is None:
         await message.answer("你还没有下过单")
         return
-    user_orders = await db.orders.list_orders_for_user(user.id)
-    if not user_orders:
-        await message.answer("你还没有订单。\n点「🛒 购买商品」开始第一单！", reply_markup=main_menu())
-        return
-    lines = [f"#{o.id} · 数量 x{o.quantity} · {o.amount_text} · {o.status}" for o in user_orders]
-    await message.answer(f"{title}\n\n" + "\n".join(lines), reply_markup=main_menu())
+    text, markup = await _my_orders_view(db, user.id)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(F.data == "myorders")
@@ -123,13 +135,10 @@ async def cb_my_orders(callback: CallbackQuery, db: Database) -> None:
     if user is None:
         await callback.answer("你还没有下过单", show_alert=True)
         return
-    user_orders = await db.orders.list_orders_for_user(user.id)
-    if not user_orders:
-        await _safe_edit(callback, "你还没有订单。\n点「🛒 购买商品」开始第一单！", reply_markup=main_menu())
-        await callback.answer()
-        return
-    lines = [f"#{o.id} · 数量 x{o.quantity} · {o.amount_text} · {o.status}" for o in user_orders]
-    await _safe_edit(callback, "📦 我的订单\n\n" + "\n".join(lines), reply_markup=main_menu())
+    text, markup = await _my_orders_view(db, user.id)
+    await _safe_edit(callback, text, reply_markup=markup)
+    # 付款提示被换成了订单列表：付款后不再覆盖这条消息，列表里有继续支付入口。
+    await db.prompts.forget(msg.chat.id, msg.message_id)
     await callback.answer()
 
 
@@ -187,9 +196,10 @@ async def menu_router(message: Message, db: Database, state: FSMContext, epay: E
     kyc_enabled = get_settings().features.kyc
     if text == MENU_BUY:
         await _send_catalog(message, db)
-    elif text in (MENU_ORDERS, MENU_HISTORY):
-        title = "📦 我的订单" if text == MENU_ORDERS else "🧾 交易记录"
-        await _render_my_orders(message, db, title)
+    elif text == MENU_ORDERS:
+        await _render_my_orders(message, db)
+    elif text == MENU_HISTORY:
+        await render_history(message, db)
     elif text == MENU_TOPUP:
         await start_topup(message, db, epay, state)
     elif text == MENU_BALANCE:
@@ -239,16 +249,24 @@ async def cmd_query(message: Message, db: Database, epay: EPayClient | None, pur
         await message.answer(f"订单 #{order.id} 已退款到余额，可在「💳 我的余额」查看")
         return
     if order.status in (OrderStatus.CANCELLED, OrderStatus.DELIVERY_FAILED):
-        await message.answer(f"订单 #{order.id} 当前状态：{order.status}，如需协助请联系管理员")
+        await message.answer(f"订单 #{order.id} 当前状态：{order.status.label}，如需协助请联系管理员")
         return
     if order.status == OrderStatus.PENDING_PAYMENT:
+        # 付款按钮只发给买家本人的私聊；管理员代查或群聊里只回复状态。
+        owner_private = message.chat.type == "private" and user is not None and order.user_id == user.id
         if epay is None:
-            await message.answer(f"订单 #{order.id} 待支付，请稍后再试或联系管理员")
+            if owner_private:
+                await send_order_prompt(message, db, epay, order, HEADER_UNPAID)
+            else:
+                await message.answer(f"订单 #{order.id} 待支付，请稍后再试或联系管理员")
             return
         try:
             payment = await epay.query_order(str(order.id))
             if not payment.paid:
-                await message.answer(f"订单 #{order.id} 尚未支付")
+                if owner_private:
+                    await send_order_prompt(message, db, epay, order, HEADER_UNPAID)
+                else:
+                    await message.answer(f"订单 #{order.id} 尚未支付")
                 return
             order = await orders.confirm_epay_payment(db, purchaser, epay, order, payment)
         except EPayError, OrderError:
@@ -269,4 +287,4 @@ async def cmd_query(message: Message, db: Database, epay: EPayClient | None, pur
     elif order.status == OrderStatus.REFUNDED:
         await message.answer(f"订单 #{order.id} 已退款到余额")
     else:
-        await message.answer(f"订单 #{order.id} 当前状态：{order.status}，请查看余额或联系管理员")
+        await message.answer(f"订单 #{order.id} 当前状态：{order.status.label}，请查看余额或联系管理员")

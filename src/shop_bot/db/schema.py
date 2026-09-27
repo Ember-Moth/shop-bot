@@ -218,6 +218,12 @@ async def migrate(conn: aiosqlite.Connection) -> None:
         topup_columns = {row["name"] for row in await cur.fetchall()}
     if "currency" not in topup_columns:
         await conn.execute("ALTER TABLE balance_topups ADD COLUMN currency TEXT NOT NULL DEFAULT 'CNY'")
+    if "order_id" not in topup_columns:
+        # 补差价充值绑定的订单；普通充值为 NULL。
+        await conn.execute("ALTER TABLE balance_topups ADD COLUMN order_id INTEGER REFERENCES orders(id)")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_topups_order ON balance_topups(order_id) WHERE order_id IS NOT NULL"
+    )
     # 原 users.balance_cents 仅表示人民币；迁移不能把它重新解释为美元。
     await conn.execute("""
         INSERT OR IGNORE INTO wallet_balances (user_id, currency, balance_cents)

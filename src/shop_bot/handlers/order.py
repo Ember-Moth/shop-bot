@@ -1,4 +1,7 @@
+import contextlib
+
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InaccessibleMessage, Message
@@ -6,11 +9,19 @@ from aiogram.types import CallbackQuery, InaccessibleMessage, Message
 from .. import keyboards
 from ..db import Database
 from ..keyboards import escape_markdown
-from ..models import OrderStatus, Product
+from ..models import Order, OrderStatus, Product
 from ..services import orders
+from ..services.balance import format_cents
 from ..services.epay import EPayClient
-from ..services.invoices import payment_url
+from ..services.payment_prompts import (
+    HEADER_CREATED,
+    HEADER_PENDING,
+    gap_offer,
+    order_prompt,
+    settled_order_view,
+)
 from ..services.purchasing import Purchaser
+from .balance import create_topup_invoice
 
 router = Router()
 
@@ -225,18 +236,91 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, e
     if msg is None or isinstance(msg, InaccessibleMessage):
         await callback.answer()
         return
+    bot = callback.bot
+    assert bot is not None
+    text, markup = await order_prompt(bot, db, epay, order, HEADER_CREATED)
+    await msg.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+    await db.prompts.record(msg.chat.id, msg.message_id, order_id=order.id)
+    await callback.answer()
 
+
+async def send_order_prompt(message: Message, db: Database, epay: EPayClient | None, order: Order, header: str) -> None:
+    """在当前私聊另发一条待付款提示并登记，付款后由后台去掉按钮。"""
+    bot = message.bot
+    assert bot is not None
+    text, markup = await order_prompt(bot, db, epay, order, header)
+    sent = await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+    await db.prompts.record(sent.chat.id, sent.message_id, order_id=order.id)
+
+
+@router.callback_query(F.data.startswith(keyboards.CB_RESUME_PAY))
+async def cb_resume_payment(callback: CallbackQuery, db: Database, epay: EPayClient | None) -> None:
+    """订单列表里的「支付订单 #N」：重新给出付款方式，已锁定在线渠道的只给收银台。"""
+    raw = (callback.data or "").removeprefix(keyboards.CB_RESUME_PAY)
+    if not raw.isascii() or not raw.isdecimal() or len(raw) > 18:
+        await callback.answer("参数无效", show_alert=True)
+        return
+    msg = callback.message
+    if msg is None or isinstance(msg, InaccessibleMessage):
+        await callback.answer("消息已过期，请重新打开「📦 我的订单」", show_alert=True)
+        return
+    if msg.chat.type != "private":
+        await callback.answer("请在与机器人的私聊中付款", show_alert=True)
+        return
+    user = await db.users.get_user_by_telegram_id(callback.from_user.id)
+    order = await db.orders.get_order(int(raw))
+    if user is None or order is None or order.user_id != user.id:
+        await callback.answer("订单不存在", show_alert=True)
+        return
+    if order.status != OrderStatus.PENDING_PAYMENT:
+        await callback.answer(f"订单 #{order.id} 当前状态：{order.status.label}", show_alert=True)
+        return
+    await send_order_prompt(msg, db, epay, order, HEADER_PENDING)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith(keyboards.CB_TOPUP_GAP))
+async def cb_topup_gap(callback: CallbackQuery, db: Database, epay: EPayClient | None) -> None:
+    """「补差价并支付」：按当前余额算出差额生成充值单，到账后同一事务自动用余额付清订单。"""
+    raw = (callback.data or "").removeprefix(keyboards.CB_TOPUP_GAP)
+    if not raw.isascii() or not raw.isdecimal() or len(raw) > 18:
+        await callback.answer("参数无效", show_alert=True)
+        return
+    msg = callback.message
+    if msg is None or isinstance(msg, InaccessibleMessage):
+        await callback.answer("消息已过期，请重新打开「📦 我的订单」", show_alert=True)
+        return
+    if msg.chat.type != "private":
+        await callback.answer("请在与机器人的私聊中付款", show_alert=True)
+        return
+    user = await db.users.get_user_by_telegram_id(callback.from_user.id)
+    order = await db.orders.get_order(int(raw))
+    if user is None or order is None or order.user_id != user.id:
+        await callback.answer("订单不存在", show_alert=True)
+        return
+    if order.status != OrderStatus.PENDING_PAYMENT:
+        await callback.answer(f"订单 #{order.id} 当前状态：{order.status.label}", show_alert=True)
+        return
+    if order.payment_method == "epay":
+        await callback.answer("此订单已选择在线支付，请使用原收银台完成付款", show_alert=True)
+        return
+    if epay is None or epay.currency != order.currency:
+        await callback.answer(f"暂未开通 {order.currency} 在线收款，请联系管理员", show_alert=True)
+        return
     balance = await db.wallet.get_balance(user.id, order.currency)
-    allow_balance = balance >= order.amount_cents and order.amount_cents > 0
-    allow_online = epay is not None and order.currency == epay.currency
-    hint = "请选择支付方式。选择在线支付后，本订单只能通过该收银台付款。"
-    if not allow_balance and not allow_online:
-        hint = f"暂未开通 {order.currency} 在线收款，且同币种余额不足，请联系管理员。"
-    await msg.edit_text(
-        f"✅ 下单成功！\n\n订单号：`{order.id}`\n金额：{order.amount_text}\n\n{hint}",
-        parse_mode="Markdown",
-        reply_markup=keyboards.order_created(order.id, allow_balance=allow_balance, allow_online=allow_online),
-    )
+    if balance >= order.amount_cents:
+        # 不替买家直接扣款：给出一条带「余额支付」的新提示，由买家确认。
+        await send_order_prompt(msg, db, epay, order, HEADER_PENDING)
+        await callback.answer("余额已足够支付本单，请在新消息里点「💰 余额支付」", show_alert=True)
+        return
+    gap = gap_offer(order, balance, epay)
+    if not gap:
+        reason = "当前没有可用余额" if balance <= 0 else "差额超过单笔充值上限"
+        await callback.answer(f"{reason}，请直接选择在线支付", show_alert=True)
+        return
+    topup, text, markup = await create_topup_invoice(msg, db, epay, user, gap, order=order)
+    sent = await msg.answer(text, parse_mode="Markdown", reply_markup=markup)
+    await db.prompts.record(sent.chat.id, sent.message_id, topup_id=topup.id)
     await callback.answer()
 
 
@@ -260,23 +344,16 @@ async def cb_pay_online(callback: CallbackQuery, db: Database, epay: EPayClient 
         return
     bot = callback.bot
     assert bot is not None
-    pay_url = await payment_url(
-        bot,
-        epay,
-        name=f"订单 #{order.id}",
-        order_no=str(order.id),
-        amount_cents=order.amount_cents,
-        currency=order.currency,
-    )
-    await msg.edit_text(
-        f"订单 #{order.id} · {order.amount_text}\n已选择在线支付，请打开收银台完成付款。",
-        reply_markup=keyboards.order_created(order.id, pay_url),
-    )
+    text, markup = await order_prompt(bot, db, epay, order, HEADER_PENDING)
+    await msg.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+    await db.prompts.record(msg.chat.id, msg.message_id, order_id=order.id)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith(keyboards.CB_BALANCE_PAY))
-async def cb_pay_with_balance(callback: CallbackQuery, db: Database, purchaser: Purchaser, bot: Bot) -> None:
+async def cb_pay_with_balance(
+    callback: CallbackQuery, db: Database, purchaser: Purchaser, bot: Bot, epay: EPayClient | None = None
+) -> None:
     """余额支付：扣款与订单转 paid 同一事务，随后走统一履约链路。"""
     data = callback.data or ""
     if not data.removeprefix(keyboards.CB_BALANCE_PAY).isdecimal():
@@ -306,12 +383,27 @@ async def cb_pay_with_balance(callback: CallbackQuery, db: Database, purchaser: 
         await callback.answer("此订单已选择在线支付，请使用原收银台完成付款", show_alert=True)
         return
     if err == "insufficient":
-        await callback.answer(f"{order.currency} 余额不足，请选择在线支付或先充值同币种余额", show_alert=True)
+        balance = await db.wallet.get_balance(user.id, order.currency)
+        tip = (
+            "可点「➕ 补差价」在线付差额，到账后自动付款，或选择在线支付。"
+            if gap_offer(order, balance, epay)
+            else "请选择在线支付，或先充值同币种余额。"
+        )
+        await callback.answer(
+            f"{order.currency} 余额不足：当前 {format_cents(balance)}，本单 {format_cents(order.amount_cents)}。{tip}",
+            show_alert=True,
+        )
         return
     if err is not None or paid is None:
         await callback.answer("支付失败，请稍后再试", show_alert=True)
         return
     await callback.answer("✅ 已用余额支付，货品会自动私信发送", show_alert=True)
+    # 当场去掉付款按钮；后台的提示更新任务随后会得到相同内容，失败也不影响已完成的付款。
+    view = settled_order_view(paid)
+    msg = callback.message
+    if view is not None and msg is not None and not isinstance(msg, InaccessibleMessage):
+        with contextlib.suppress(TelegramAPIError):
+            await msg.edit_text(view[0], reply_markup=view[1])
 
 
 @router.callback_query(F.data == keyboards.CB_CANCEL_ORDER)

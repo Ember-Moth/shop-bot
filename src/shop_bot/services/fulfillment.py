@@ -19,6 +19,7 @@ from ..telegram_text import text_units
 from .business_notifications import notify_business
 from .esim_media import MAX_ESIMS_PER_ARCHIVE, EsimMedia, delivery_esims, esim_zip, qr_png
 from .notification_transport import NotificationThrottle
+from .payment_prompts import close_payment_prompt
 from .purchasing import Purchaser, split_payload_chunks
 
 logger = get_logger(__name__)
@@ -229,7 +230,18 @@ async def notify_wallet(db: Database, bot: Bot, transaction_id: int, throttle: N
         return True
     amount = tx["amount_cents"] / 100
     currency = tx["currency"]
-    if tx["kind"] == "topup":
+    balance_line = f"入账后余额：{tx['balance_after'] / 100:.2f} {currency}"
+    if tx["kind"] == "topup" and tx["target_order_id"] is not None:
+        # 补差价：到账流水只在同事务付款成功时才标记订单号。
+        if tx["order_id"] is not None and tx["paid_balance_after"] is not None:
+            heading = f"💰 补差价 {amount:.2f} {currency} 已到账，已自动支付订单 #{tx['order_id']}"
+            balance_line = f"付款后余额：{tx['paid_balance_after'] / 100:.2f} {currency}"
+        else:
+            heading = (
+                f"💰 补差价 {amount:.2f} {currency} 已到账\n"
+                f"订单 #{tx['target_order_id']} 未能自动付款，款项已存入余额，可在「📦 我的订单」查看"
+            )
+    elif tx["kind"] == "topup":
         heading = f"💰 充值到账 {amount:.2f} {currency}"
     elif tx["kind"] == "adjust":
         heading = f"💳 余额调整 {amount:+.2f} {currency}"
@@ -241,7 +253,7 @@ async def notify_wallet(db: Database, bot: Bot, transaction_id: int, throttle: N
         await throttle.wait(tx["telegram_id"])
     await bot.send_message(
         tx["telegram_id"],
-        f"{heading}\n入账后余额：{tx['balance_after'] / 100:.2f} {currency}",
+        f"{heading}\n{balance_line}",
         parse_mode=None,
         request_timeout=20,
     )
@@ -280,6 +292,8 @@ async def process_work(
                 done = await notify_business(db, bot, item.entity_id, throttle)
             elif bot is not None and item.kind == "wallet":
                 done = await notify_wallet(db, bot, item.entity_id, throttle)
+            elif bot is not None and item.kind == "prompt":
+                done = await close_payment_prompt(db, bot, item.entity_id, throttle)
     except TelegramRetryAfter as exc:
         delay = max(delay, exc.retry_after)
         failed = True
@@ -320,7 +334,10 @@ async def recover_once(
     results = await asyncio.gather(*(_drain_work(db, purchaser, bot, "purchase", runtime) for _ in range(3)))
     if bot is not None:
         results += await asyncio.gather(
-            *(_drain_work(db, purchaser, bot, kind, runtime) for kind in ("delivery", "delivery", "wallet", "business"))
+            *(
+                _drain_work(db, purchaser, bot, kind, runtime)
+                for kind in ("delivery", "delivery", "wallet", "business", "prompt")
+            )
         )
     return sum(results)
 
@@ -346,7 +363,7 @@ async def recovery_loop(db: Database, purchaser: Purchaser, bot: Bot, runtime: R
     throttle = NotificationThrottle()
     # 固定工作协程，不为整个积压队列一次性创建 Task。异常会传到主进程监督器。
     async with asyncio.TaskGroup() as group:
-        for kind in ("purchase", "purchase", "purchase", "delivery", "delivery", "wallet", "business"):
+        for kind in ("purchase", "purchase", "purchase", "delivery", "delivery", "wallet", "business", "prompt"):
             group.create_task(_work_loop(db, purchaser, bot, kind, throttle, runtime=runtime))
         while True:
             if runtime is not None:
