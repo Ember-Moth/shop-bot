@@ -46,3 +46,11 @@ async def migrate_payment_prompts(conn: aiosqlite.Connection) -> None:
             )""",
     ):
         await conn.execute(sql)
+    # 显示 GMPay 收款信息的提示记下对应交易，交易过期时去掉失效的地址和金额。
+    async with conn.execute("PRAGMA table_info(payment_prompts)") as cur:
+        columns = {row["name"] for row in await cur.fetchall()}
+    if "trade_ref" not in columns:
+        await conn.execute("ALTER TABLE payment_prompts ADD COLUMN trade_ref INTEGER")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_prompts_trade ON payment_prompts(trade_ref) WHERE trade_ref IS NOT NULL"
+    )

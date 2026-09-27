@@ -34,11 +34,13 @@ shop_bot/
 │   ├── purchasing.py   # 采购状态机（提交一次/详情轮询/KYC 等待/未知转人工）+ Demo/Commbitz 双模式
 │   ├── fulfillment.py  # 图文/ZIP 私信 + 独立采购、交付、钱包通知工作协程
 │   ├── payment_prompts.py  # 待付款提示（余额/在线/充值入口）与结算后去掉付款按钮
+│   ├── gateway.py      # 统一收款接口 PaymentGateway 与付款信息 Checkout
+│   ├── gmpay.py        # epusdt GMPay：HMAC-SHA256 签名、服务端下单、JSON 回调、状态查询、交易哈希补单
 │   ├── epay.py         # EPay 支付网关协议（MD5 签名、支付链接、回调验证、订单查询）
 │   ├── commbitz_api.py # Commbitz 分销 API 客户端（令牌/目录/详情/采购/KYC/用量）
 │   └── catalog_sync.py # 上游套餐同步为本地商品（SKU 映射；新商品 0 价下架待人工定价）
 └── web/
-    └── payment.py      # EPay 回调端点（验签核单 → 确认收款 → 快速应答）
+    └── payment.py      # 回调端点：POST JSON 按 GMPay、GET/表单按 EPay 验签核单，确认收款后快速应答
 ```
 
 ## 数据流
@@ -82,6 +84,7 @@ pending_payment --epay_callback--> paid --采购+交付--> delivered
       |                                +--履约需人工--> awaiting_dispatch（实体卡，/dispatch 确认）
       |                                +--上游明确拒绝--> refunded（自动退款到买家余额，终态）
       +--cancel--> cancelled
+      +--超时未付款--> expired（自动关闭；之后到账的款项存入买家余额）
 ```
 
 采购状态机（`services/purchasing.py`，规则详见 [开发方案](reseller-bot-development.md) 5.3/6 节）：
@@ -128,6 +131,20 @@ ready → submitting → upstream_pending → fulfilled
 历史交付/采购不一致检查只在启动迁移时执行；常驻领取使用 `idx_work_due`，不再每轮遍历全部已交付订单。升级不为历史钱包流水创建通知任务，避免群发旧通知。
 
 通知提供可恢复发送，不能保证 Telegram 恰好收到一次：远端收到后、本地确认前断电仍可能重复。采购则始终遵守提交一次、已知 ID 只查询的规则。
+
+### GMPay 在线收款
+
+配置 `gmpay` 后，处理器经 `PaymentGateway` 接口发起新付款，`GMPayGateway` 在服务端调用 epusdt 下单，把网络、精确转账数额、收款地址和截止时间直接展示在聊天里，网页收银台作为备用按钮。`EPayClient` 实现同一接口，只配置 `epay` 时行为不变。
+
+每次下单在 `gmpay_trades` 登记一行：先以 `creating` 状态取得带序号的商户订单号，请求成功后转为 `pending` 并保存 epusdt 交易号与收款信息，同一事务在截止时间后安排 `gmpay` 核对任务。请求失败或结果不明记为 `failed`，该商户订单号不再使用。同一订单或充值单的下单按目标串行，有效期还剩两分钟以上的收款信息直接复用。
+
+付款确认的三条路径最终都调用 `apply_payment`：订单走 `record_online_payment`，充值单走 `complete_topup`，补差价充值单随后按原有规则自动付清订单；重复确认由 `payment_receipts` 保证幂等。回调要求签名、商户号、支付状态、商户订单号与 epusdt 交易号对应，且法币金额精确相等。到期核对查询 epusdt 状态：已付款即入账，已过期则先把显示该交易的提示改为过期提示，再记为 `expired`。
+
+### 超时自动关闭
+
+`order_expiry_loop` 每分钟按 ID 分页扫描创建时间早于超时阈值的 `pending_payment` 订单，单轮最多处理 500 单。订单或其补差价充值单仍有有效 GMPay 收款信息（截止后留两分钟宽限，请求中的尝试五分钟内也算）时跳过；已锁定在线渠道的订单先调用 `reconcile_order` 向网关核对，已付款即入账，查询失败本轮跳过。其余订单以带前置状态条件的转换改为 `expired` 并写入审计事件，与付款并发时只有一方成功。状态变化触发付款提示更新，原消息改为超时关闭提示。
+
+`expired` 与 `cancelled` 一样不在收款补齐规则内：之后到账的真实款项记为 `wallet_credit` 存入买家余额，管理员 `/paid` 会被拒绝。
 
 ### 付款提示更新
 

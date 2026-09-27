@@ -44,6 +44,7 @@ class PaymentSettings(BaseSettings):
 
     callback_path: str = "/payment/callback"  # 支付网关回调路径
     secret: str = ""  # 签名验证共享密钥
+    order_timeout_minutes: int = Field(default=30, ge=0, le=10080)  # 待付订单超时自动关闭；0 表示不关闭
 
 
 class EPaySettings(BaseSettings):
@@ -59,6 +60,37 @@ class EPaySettings(BaseSettings):
     @classmethod
     def validate_currency(cls, value: str) -> str:
         return normalize_currency(value)
+
+
+class GMPaySettings(BaseSettings):
+    """epusdt GMPay 原生接口。url、pid、secret_key 齐全时，新付款全部走 GMPay。"""
+
+    model_config = SettingsConfigDict(env_prefix="SHOP_BOT_GMPAY_")
+
+    url: str = ""  # epusdt 地址，例如 https://pay.example.com（不含路径）
+    pid: str = ""  # epusdt API 密钥的 PID
+    secret_key: str = ""
+    currency: str = "USD"  # 订单计价法币；epusdt 按汇率折算成加密货币
+    token: str = "usdt"  # noqa: S105 - 收款币种代号，不是凭据
+    network: str = "tron"
+    timeout: float = Field(default=10, gt=0, le=60)
+
+    @field_validator("currency")
+    @classmethod
+    def validate_currency(cls, value: str) -> str:
+        return normalize_currency(value)
+
+    @field_validator("token", "network")
+    @classmethod
+    def validate_asset(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not value:
+            raise ValueError("token and network must not be empty")
+        return value
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.url and self.pid and self.secret_key)
 
 
 class FeaturesSettings(BaseSettings):
@@ -146,6 +178,7 @@ class Settings(BaseSettings):
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
     payment: PaymentSettings = Field(default_factory=PaymentSettings)
     epay: EPaySettings = Field(default_factory=EPaySettings)
+    gmpay: GMPaySettings = Field(default_factory=GMPaySettings)
     features: FeaturesSettings = Field(default_factory=FeaturesSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     operations: OperationsSettings = Field(default_factory=OperationsSettings)

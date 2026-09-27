@@ -48,8 +48,11 @@ class PaymentRepository(Repository):
                 row = await cur.fetchone()
         return row_to_order(row) if row else None
 
-    async def record_epay_payment(self, order_id: int, trade_no: str) -> tuple[Order, str]:
-        """调用方已验签并核对订单/金额/币种；重复收款同币种补偿入钱包。"""
+    async def record_online_payment(self, order_id: int, trade_no: str) -> tuple[Order, str]:
+        """在线收款（EPay 或 GMPay）入账，调用方已验签并核对订单、金额与币种。
+
+        trade_no 为网关交易号；payment_method 统一记为 epay，表示在线渠道。重复收款同币种补偿入钱包。
+        """
         async with self._db.transaction() as conn:
             async with conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cur:
                 order = await cur.fetchone()
@@ -122,8 +125,9 @@ class PaymentRepository(Repository):
                 row = await cur.fetchone()
             if row is None:
                 raise ValueError(f"order {order_id} not found")
-            if row["status"] == "cancelled":
-                raise ValueError(f"order {order_id} is cancelled")
+            if row["status"] in ("cancelled", "expired"):
+                # 已关闭订单不再确认收款；迟到的真实款项由回调存入买家余额。
+                raise ValueError(f"order {order_id} is {row['status']}")
             if trade_no is not None:
                 if row["trade_no"] and row["trade_no"] != trade_no:
                     raise ValueError("payment transaction does not match order")

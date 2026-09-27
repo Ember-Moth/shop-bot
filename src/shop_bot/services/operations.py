@@ -24,8 +24,10 @@ MONITORED_KEYS = (
     "worker_recovery",
     "worker_monitor",
     "worker_backup",
+    "worker_expiry",
     "backup",
     "catalog_sync",
+    "gmpay",
     "telegram_handler",
 )
 

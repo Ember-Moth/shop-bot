@@ -7,6 +7,7 @@ from aiogram import Bot
 from shop_bot.db import Database
 from shop_bot.models import Product
 from shop_bot.services.epay import EPayClient, EPayConfig
+from shop_bot.services.gmpay import GMPayClient, GMPayConfig, GMPayGateway
 from shop_bot.services.purchasing import DemoPurchaser
 
 from .fakes import FakeSession
@@ -35,6 +36,18 @@ async def product(db):
 async def epay():
     client = EPayClient(EPayConfig(pid="1000", key="audit-secret", url="https://pay.example.com"))
     yield client
+    await client.close()
+
+
+GM_URL = "https://pay.example.com"
+SECRET = "gm-secret"
+
+
+@pytest.fixture
+async def gmpay():
+    """GMPay 网关，epusdt 由 pytest-httpx 模拟。"""
+    client = GMPayClient(GMPayConfig(url=GM_URL, pid="1000", secret_key=SECRET, currency="CNY"))
+    yield GMPayGateway(client, notify_url="https://bot.example.com/payment/callback")
     await client.close()
 
 

@@ -30,7 +30,7 @@ from shop_bot.services.epay import (
 )
 from shop_bot.services.fulfillment import recover_once
 from shop_bot.services.purchasing import CommbitzPurchaser
-from shop_bot.web.payment import register_epay_routes
+from shop_bot.web.payment import register_payment_routes
 from tests.fakes import FakeCommbitzGateway
 from tests.test_balance import _balance_callback, menu_message_of
 
@@ -272,7 +272,7 @@ async def test_valid_late_payment_credits_once_without_reopening(db, purchaser, 
     user, order = await new_order(db)
     await db.orders.transition_order(order.id, closed, trade_no="ORIGINAL")
     for _ in range(2):
-        saved, disposition = await db.payments.record_epay_payment(order.id, "LATE")
+        saved, disposition = await db.payments.record_online_payment(order.id, "LATE")
         assert saved.status == closed and disposition == "wallet_credit"
     assert await db.wallet.get_balance(user.id, "USD") == 10000
     assert await db.purchases.get_purchase_by_order(order.id) is None
@@ -284,7 +284,7 @@ async def test_first_callback_after_manual_confirmation_only_attaches_receipt(db
     await orders.mark_paid(db, purchaser, order.id)
     await db.orders.transition_order(order.id, status)
     for _ in range(2):
-        saved, disposition = await db.payments.record_epay_payment(order.id, "ORIGINAL")
+        saved, disposition = await db.payments.record_online_payment(order.id, "ORIGINAL")
         assert saved.status == status and saved.trade_no == "ORIGINAL" and disposition == "order"
     assert await db.wallet.get_balance(user.id, "USD") == 0
 
@@ -297,13 +297,13 @@ async def test_compensation_survives_restart_and_replayed_callbacks(tmp_path):
         user, order = await new_order(db)
         await db.wallet.adjust_balance(user.id, 10000, "funding", "USD")
         await db.payments.pay_order_with_balance(order.id, user.id, 10000)
-        await db.payments.record_epay_payment(order.id, "LATE")
+        await db.payments.record_online_payment(order.id, "LATE")
     finally:
         await db.close()
     db = Database(path)
     await db.connect()
     try:
-        await asyncio.gather(*(db.payments.record_epay_payment(order.id, "LATE") for _ in range(4)))
+        await asyncio.gather(*(db.payments.record_online_payment(order.id, "LATE") for _ in range(4)))
         assert await db.wallet.get_balance(user.id, "USD") == 10000
         assert (
             len([tx for tx in await db.wallet.list_balance_transactions(user.id) if tx.kind == "payment_credit"]) == 1
@@ -331,7 +331,7 @@ async def test_one_external_trade_cannot_credit_topup_and_order(db):
     topup = await db.wallet.create_topup(user.id, 10000, "USD")
     await db.wallet.complete_topup(topup.id, "SHARED")
     with pytest.raises(ValueError, match="belongs to another"):
-        await db.payments.record_epay_payment(order.id, "SHARED")
+        await db.payments.record_online_payment(order.id, "SHARED")
     assert (await db.orders.get_order(order.id)).status == OrderStatus.PENDING_PAYMENT
     assert await db.wallet.get_balance(user.id, "USD") == 10000
 
@@ -343,7 +343,7 @@ async def test_compensation_and_receipt_roll_back_together(db):
         await conn.execute("""CREATE TRIGGER stop_receipt BEFORE INSERT ON payment_receipts
             BEGIN SELECT RAISE(ABORT, 'receipt failure'); END""")
     with pytest.raises(sqlite3.IntegrityError, match="receipt failure"):
-        await db.payments.record_epay_payment(order.id, "LATE")
+        await db.payments.record_online_payment(order.id, "LATE")
     assert await db.wallet.get_balance(user.id, "USD") == 0
     assert await db.wallet.list_balance_transactions(user.id) == []
 
@@ -396,7 +396,7 @@ async def test_usd_epay_topup_and_order_callback_use_usd_wallet(db, bot, purchas
     epay = EPayClient(EPayConfig("1000", "audit-secret", "https://pay.example.com", currency="USD"))
     app = web.Application()
     app.update({"db": db, "bot": bot, "purchaser": purchaser, "epay": epay})
-    register_epay_routes(app, "/callback")
+    register_payment_routes(app, "/callback")
     context = FSMContext(storage=FSMStorage(db), key=StorageKey(bot_id=1, chat_id=42, user_id=42))
     try:
         await start_topup(menu_message_of(bot), db, epay, context)
@@ -442,7 +442,7 @@ async def test_topup_callback_accepts_epay_four_decimal_money(db, bot, purchaser
     epay = EPayClient(EPayConfig("1000", "audit-secret", "https://pay.example.com", currency="USD"))
     app = web.Application()
     app.update({"db": db, "bot": bot, "purchaser": purchaser, "epay": epay})
-    register_epay_routes(app, "/callback")
+    register_payment_routes(app, "/callback")
     topup = await db.wallet.create_topup(user.id, 2000, "USD")
     try:
         async with TestClient(TestServer(app)) as client:
@@ -486,7 +486,7 @@ async def test_topup_callback_accepts_three_decimal_money(db, bot, purchaser):
     epay = EPayClient(EPayConfig("1000", "audit-secret", "https://pay.example.com", currency="USD"))
     app = web.Application()
     app.update({"db": db, "bot": bot, "purchaser": purchaser, "epay": epay})
-    register_epay_routes(app, "/callback")
+    register_payment_routes(app, "/callback")
     topup = await db.wallet.create_topup(user.id, 9990, "USD")
     try:
         async with TestClient(TestServer(app)) as client:

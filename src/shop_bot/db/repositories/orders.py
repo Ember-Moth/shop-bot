@@ -77,6 +77,15 @@ class OrderRepository(Repository):
             )
         return [row_to_order(r) for r in rows]
 
+    async def list_expirable(self, cutoff: str, *, after_id: int = 0, limit: int = 50) -> list[Order]:
+        """创建时间早于 cutoff（UTC，与 created_at 同格式）的待付订单，按 ID 分页。"""
+        rows = await self._db.fetch_all(
+            """SELECT * FROM orders WHERE status = 'pending_payment' AND created_at <= ? AND id > ?
+            ORDER BY id LIMIT ?""",
+            (cutoff, after_id, limit),
+        )
+        return [row_to_order(r) for r in rows]
+
     async def list_orders_for_user(self, user_id: int, limit: int = 20) -> list[Order]:
         rows = await self._db.fetch_all(
             "SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit)

@@ -12,7 +12,7 @@ from ..keyboards import escape_markdown
 from ..models import Order, OrderStatus, Product
 from ..services import orders
 from ..services.balance import format_cents
-from ..services.epay import EPayClient
+from ..services.gateway import GatewayError, PaymentGateway
 from ..services.payment_prompts import (
     HEADER_CREATED,
     HEADER_PENDING,
@@ -184,7 +184,7 @@ async def msg_extra(message: Message, state: FSMContext, db: Database) -> None:
 
 
 @router.callback_query(F.data == keyboards.CB_CONFIRM_ORDER)
-async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, epay: EPayClient | None) -> None:
+async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, gateway: PaymentGateway | None) -> None:
     data = await state.get_data()
     product_id = data.get("product_id")
     quantity = data.get("quantity")
@@ -238,24 +238,26 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, e
         return
     bot = callback.bot
     assert bot is not None
-    text, markup = await order_prompt(bot, db, epay, order, HEADER_CREATED)
-    await msg.edit_text(text, parse_mode="Markdown", reply_markup=markup)
-    await db.prompts.record(msg.chat.id, msg.message_id, order_id=order.id)
+    view = await order_prompt(bot, db, gateway, order, HEADER_CREATED)
+    await msg.edit_text(view.text, parse_mode="Markdown", reply_markup=view.markup)
+    await db.prompts.record(msg.chat.id, msg.message_id, order_id=order.id, trade_ref=view.trade_ref)
     await callback.answer()
 
 
-async def send_order_prompt(message: Message, db: Database, epay: EPayClient | None, order: Order, header: str) -> None:
-    """在当前私聊另发一条待付款提示并登记，付款后由后台去掉按钮。"""
+async def send_order_prompt(
+    message: Message, db: Database, gateway: PaymentGateway | None, order: Order, header: str
+) -> None:
+    """在当前私聊另发一条待付款提示并登记，付款或收款信息过期后由后台更新。"""
     bot = message.bot
     assert bot is not None
-    text, markup = await order_prompt(bot, db, epay, order, header)
-    sent = await message.answer(text, parse_mode="Markdown", reply_markup=markup)
-    await db.prompts.record(sent.chat.id, sent.message_id, order_id=order.id)
+    view = await order_prompt(bot, db, gateway, order, header)
+    sent = await message.answer(view.text, parse_mode="Markdown", reply_markup=view.markup)
+    await db.prompts.record(sent.chat.id, sent.message_id, order_id=order.id, trade_ref=view.trade_ref)
 
 
 @router.callback_query(F.data.startswith(keyboards.CB_RESUME_PAY))
-async def cb_resume_payment(callback: CallbackQuery, db: Database, epay: EPayClient | None) -> None:
-    """订单列表里的「支付订单 #N」：重新给出付款方式，已锁定在线渠道的只给收银台。"""
+async def cb_resume_payment(callback: CallbackQuery, db: Database, gateway: PaymentGateway | None) -> None:
+    """订单列表里的「支付订单 #N」：重新给出付款方式，已锁定在线渠道的只给在线付款信息。"""
     raw = (callback.data or "").removeprefix(keyboards.CB_RESUME_PAY)
     if not raw.isascii() or not raw.isdecimal() or len(raw) > 18:
         await callback.answer("参数无效", show_alert=True)
@@ -275,12 +277,12 @@ async def cb_resume_payment(callback: CallbackQuery, db: Database, epay: EPayCli
     if order.status != OrderStatus.PENDING_PAYMENT:
         await callback.answer(f"订单 #{order.id} 当前状态：{order.status.label}", show_alert=True)
         return
-    await send_order_prompt(msg, db, epay, order, HEADER_PENDING)
+    await send_order_prompt(msg, db, gateway, order, HEADER_PENDING)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith(keyboards.CB_TOPUP_GAP))
-async def cb_topup_gap(callback: CallbackQuery, db: Database, epay: EPayClient | None) -> None:
+async def cb_topup_gap(callback: CallbackQuery, db: Database, gateway: PaymentGateway | None) -> None:
     """「补差价并支付」：按当前余额算出差额生成充值单，到账后同一事务自动用余额付清订单。"""
     raw = (callback.data or "").removeprefix(keyboards.CB_TOPUP_GAP)
     if not raw.isascii() or not raw.isdecimal() or len(raw) > 18:
@@ -302,32 +304,37 @@ async def cb_topup_gap(callback: CallbackQuery, db: Database, epay: EPayClient |
         await callback.answer(f"订单 #{order.id} 当前状态：{order.status.label}", show_alert=True)
         return
     if order.payment_method == "epay":
-        await callback.answer("此订单已选择在线支付，请使用原收银台完成付款", show_alert=True)
+        await callback.answer("此订单已选择在线支付，请在「📦 我的订单」里继续在线付款", show_alert=True)
         return
-    if epay is None or epay.currency != order.currency:
+    if gateway is None or gateway.currency != order.currency:
         await callback.answer(f"暂未开通 {order.currency} 在线收款，请联系管理员", show_alert=True)
         return
     balance = await db.wallet.get_balance(user.id, order.currency)
     if balance >= order.amount_cents:
         # 不替买家直接扣款：给出一条带「余额支付」的新提示，由买家确认。
-        await send_order_prompt(msg, db, epay, order, HEADER_PENDING)
+        await send_order_prompt(msg, db, gateway, order, HEADER_PENDING)
         await callback.answer("余额已足够支付本单，请在新消息里点「💰 余额支付」", show_alert=True)
         return
-    gap = gap_offer(order, balance, epay)
+    gap = gap_offer(order, balance, gateway)
     if not gap:
         reason = "当前没有可用余额" if balance <= 0 else "差额超过单笔充值上限"
         await callback.answer(f"{reason}，请直接选择在线支付", show_alert=True)
         return
-    topup, text, markup = await create_topup_invoice(msg, db, epay, user, gap, order=order)
-    sent = await msg.answer(text, parse_mode="Markdown", reply_markup=markup)
-    await db.prompts.record(sent.chat.id, sent.message_id, topup_id=topup.id)
+    try:
+        topup, view = await create_topup_invoice(msg, db, gateway, user, gap, order=order)
+    except GatewayError:
+        await callback.answer("暂时无法生成付款信息，请稍后再试", show_alert=True)
+        return
+    sent = await msg.answer(view.text, parse_mode="Markdown", reply_markup=view.markup)
+    await db.prompts.record(sent.chat.id, sent.message_id, topup_id=topup.id, trade_ref=view.trade_ref)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith(keyboards.CB_EPAY_PAY))
-async def cb_pay_online(callback: CallbackQuery, db: Database, epay: EPayClient | None) -> None:
+async def cb_pay_online(callback: CallbackQuery, db: Database, gateway: PaymentGateway | None) -> None:
+    """选择在线支付，或收款信息过期后重新获取：先锁定在线渠道，再生成付款信息。"""
     raw = (callback.data or "").removeprefix(keyboards.CB_EPAY_PAY)
-    if not raw.isascii() or not raw.isdecimal() or len(raw) > 18 or epay is None:
+    if not raw.isascii() or not raw.isdecimal() or len(raw) > 18 or gateway is None:
         await callback.answer("在线支付暂不可用", show_alert=True)
         return
     msg = callback.message
@@ -338,21 +345,21 @@ async def cb_pay_online(callback: CallbackQuery, db: Database, epay: EPayClient 
     if user is None:
         await callback.answer("请先发 /start 再操作", show_alert=True)
         return
-    order = await db.payments.reserve_epay(int(raw), user.id, epay.currency)
+    order = await db.payments.reserve_epay(int(raw), user.id, gateway.currency)
     if order is None:
         await callback.answer("订单状态或币种不支持此收款渠道", show_alert=True)
         return
     bot = callback.bot
     assert bot is not None
-    text, markup = await order_prompt(bot, db, epay, order, HEADER_PENDING)
-    await msg.edit_text(text, parse_mode="Markdown", reply_markup=markup)
-    await db.prompts.record(msg.chat.id, msg.message_id, order_id=order.id)
+    view = await order_prompt(bot, db, gateway, order, HEADER_PENDING)
+    await msg.edit_text(view.text, parse_mode="Markdown", reply_markup=view.markup)
+    await db.prompts.record(msg.chat.id, msg.message_id, order_id=order.id, trade_ref=view.trade_ref)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith(keyboards.CB_BALANCE_PAY))
 async def cb_pay_with_balance(
-    callback: CallbackQuery, db: Database, purchaser: Purchaser, bot: Bot, epay: EPayClient | None = None
+    callback: CallbackQuery, db: Database, purchaser: Purchaser, bot: Bot, gateway: PaymentGateway | None = None
 ) -> None:
     """余额支付：扣款与订单转 paid 同一事务，随后走统一履约链路。"""
     data = callback.data or ""
@@ -380,13 +387,13 @@ async def cb_pay_with_balance(
         return
     paid, err = await db.payments.pay_order_with_balance(order_id, user.id, order.amount_cents)
     if err == "online payment selected":
-        await callback.answer("此订单已选择在线支付，请使用原收银台完成付款", show_alert=True)
+        await callback.answer("此订单已选择在线支付，请在「📦 我的订单」里继续在线付款", show_alert=True)
         return
     if err == "insufficient":
         balance = await db.wallet.get_balance(user.id, order.currency)
         tip = (
             "可点「➕ 补差价」在线付差额，到账后自动付款，或选择在线支付。"
-            if gap_offer(order, balance, epay)
+            if gap_offer(order, balance, gateway)
             else "请选择在线支付，或先充值同币种余额。"
         )
         await callback.answer(

@@ -21,7 +21,7 @@ from shop_bot.services import orders
 from shop_bot.services.epay import _create_sign
 from shop_bot.services.fulfillment import notify_owner, recover_once
 from shop_bot.services.purchasing import CommbitzPurchaser, DemoPurchaser
-from shop_bot.web.payment import register_epay_routes
+from shop_bot.web.payment import register_payment_routes
 from shop_bot.web.telegram import register_telegram_routes
 from tests.fakes import FakeCommbitzGateway
 
@@ -37,7 +37,7 @@ async def pending(db, user):
 async def http_client(db, epay, purchaser, bot):
     app = web.Application()
     app.update({"db": db, "epay": epay, "purchaser": purchaser, "bot": bot})
-    register_epay_routes(app, "/payment/callback")
+    register_payment_routes(app, "/payment/callback")
     async with TestClient(TestServer(app)) as client:
         yield client
 

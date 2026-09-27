@@ -12,6 +12,7 @@ class OrderStatus(StrEnum):
     DELIVERY_FAILED = "delivery_failed"
     CANCELLED = "cancelled"
     REFUNDED = "refunded"  # 履约失败，已退款到买家余额（终态，不再履约/取消）
+    EXPIRED = "expired"  # 超时未付款，已自动关闭（终态）；之后到账的款项存入买家余额
 
     @property
     def label(self) -> str:
@@ -26,6 +27,7 @@ ORDER_STATUS_LABELS: dict[OrderStatus, str] = {
     OrderStatus.DELIVERY_FAILED: "交付失败",
     OrderStatus.CANCELLED: "已取消",
     OrderStatus.REFUNDED: "已退款",
+    OrderStatus.EXPIRED: "已超时关闭",
 }
 
 
@@ -84,7 +86,7 @@ class Order:
     input_sku: str | None = None  # 下单时锁定的上游 SKU（防止商品后续变更影响采购）
     input_request_type: str | None = None  # 下单时锁定的业务类型
     input_plan_id: str | None = None  # 下单时锁定的上游套餐 ID（交付/绑定核验依据）
-    payment_method: str | None = None  # epay / balance；生成收银台链接前锁定渠道
+    payment_method: str | None = None  # epay（在线渠道，EPay 或 GMPay）/ balance；生成付款信息前锁定渠道
     delivery_esims: str | None = None  # 已验证的 ICCID/LPA JSON，与货品一起原子落库
     notification_cursor: int = 0  # 已成功发送并记账的文本/图片步骤数
     notification_retry_at: float | None = None  # Telegram 限流后的最早重试时间

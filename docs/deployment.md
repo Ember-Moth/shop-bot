@@ -17,6 +17,12 @@
 | `webhook.url` | `SHOP_BOT_WEBHOOK__URL` | 公网 HTTPS 地址（必填，如 `https://bot.example.com`） |
 | `payment.callback_path` | `SHOP_BOT_PAYMENT__CALLBACK_PATH` | 支付网关回调路径 |
 | `payment.secret` | `SHOP_BOT_PAYMENT__SECRET` | 回调签名共享密钥（EPay 用不到） |
+| `payment.order_timeout_minutes` | `SHOP_BOT_PAYMENT__ORDER_TIMEOUT_MINUTES` | 待付订单超时自动关闭的分钟数（默认 30，0 表示不关闭） |
+| `gmpay.url` | `SHOP_BOT_GMPAY__URL` | epusdt 地址（不含路径）；与 pid、secret_key 齐全时新付款走 GMPay |
+| `gmpay.pid` | `SHOP_BOT_GMPAY__PID` | epusdt API 密钥的 PID |
+| `gmpay.secret_key` | `SHOP_BOT_GMPAY__SECRET_KEY` | epusdt API 密钥的 secret_key |
+| `gmpay.currency` | `SHOP_BOT_GMPAY__CURRENCY` | 订单计价法币（默认 USD），epusdt 按汇率折算 |
+| `gmpay.token` / `gmpay.network` | `SHOP_BOT_GMPAY__TOKEN` / `SHOP_BOT_GMPAY__NETWORK` | 收款币种与网络（默认 `usdt` / `tron`），须在 epusdt 启用 |
 | `epay.pid` | `SHOP_BOT_EPAY__PID` | EPay 商户 ID |
 | `epay.key` | `SHOP_BOT_EPAY__KEY` | EPay 商户密钥 |
 | `epay.url` | `SHOP_BOT_EPAY__URL` | EPay 网关地址 |
@@ -53,11 +59,10 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
-    # EPay 支付回调
+    # 支付回调：GMPay（POST JSON）与 EPay（GET/表单）共用此路径
     location /payment/callback {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
-        # EPay 用 form-urlencoded，不需要额外传 Header
     }
 }
 ```
@@ -120,7 +125,7 @@ FSM 保留旧版本实际读取的最早行，避免被后续重复行中的空�
 升级前已发货订单不会主动重发，可用 `/query` 补发已保存的货品。
 发货失败需要管理员 `/paid` 重试；`/query` 与 `/paid` 补发的货品都只私信订单买家。
 接入真实上游前必须验证实际扣款与交付；提交结果不明时转人工核对，不盲目重购。
-EPay V1 查询在 URL 中携带密钥，因此 HTTPX/HTTPCORE 请求调试日志被禁用，支付错误只输出安全的业务信息。
+EPay V1 查询在 URL 中携带密钥，因此 HTTPX/HTTPCORE 请求调试日志被禁用，支付错误只输出安全的业务信息。epusdt 没有实现 EPay 的 `api.php` 查单接口，对接 epusdt 时请改用 GMPay，`/query` 与到期核对才能向网关确认付款。
 
 ## 币种与升级
 

@@ -10,9 +10,11 @@ from weakref import WeakValueDictionary
 import aiosqlite
 
 from .business_notifications import migrate_business_notifications
+from .gmpay import migrate_gmpay
 from .payment_prompts import migrate_payment_prompts
 from .repositories import (
     DeliveryRepository,
+    GMPayTradeRepository,
     OperationsRepository,
     OrderRepository,
     PaymentPromptRepository,
@@ -31,7 +33,7 @@ class Database:
     """单连接数据库。所有读写通过锁保护的连接上下文，事务不能跨请求共享。
 
     数据访问按聚合拆到仓储属性：``users`` / ``products`` / ``orders`` / ``purchases`` /
-    ``deliveries`` / ``wallet`` / ``payments`` / ``prompts`` / ``operations`` / ``work``。本类只负责
+    ``deliveries`` / ``wallet`` / ``payments`` / ``prompts`` / ``gmpay`` / ``operations`` / ``work``。本类只负责
     连接生命周期、锁与事务原语，以及 ``fetch_one`` / ``fetch_all`` 原始查询入口。
     """
 
@@ -48,6 +50,7 @@ class Database:
         self.wallet = WalletRepository(self)
         self.payments = PaymentRepository(self)
         self.prompts = PaymentPromptRepository(self)
+        self.gmpay = GMPayTradeRepository(self)
         self.operations = OperationsRepository(self)
         self.work = WorkRepository(self)
 
@@ -61,6 +64,7 @@ class Database:
                 await migrate_work_queue(conn)
                 await migrate_business_notifications(conn)
                 await migrate_payment_prompts(conn)
+                await migrate_gmpay(conn)
         except BaseException:
             await self.close()
             raise

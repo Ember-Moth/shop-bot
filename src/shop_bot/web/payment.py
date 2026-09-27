@@ -1,6 +1,8 @@
-"""EPay GET/POST 回调：验签、统一核单、保存采购任务后快速应答（开发方案规则 1/2）。
+"""支付回调：验签、统一核单、保存采购任务后快速应答（开发方案规则 1/2）。
 
-履约由后台恢复循环驱动（services/purchasing.py），回调不做耗时的上游请求。
+同一路径同时接收两种回调：GMPay 为 POST JSON（HMAC-SHA256），EPay 为 GET 或 POST 表单（MD5）。
+切换到 GMPay 后仍保留 EPay 回调，切换前生成的付款链接照常入账。履约由后台恢复循环驱动，
+回调不做耗时的上游请求。
 """
 
 from aiohttp import web
@@ -8,16 +10,48 @@ from aiohttp import web
 from ..db import Database
 from ..logging_config import get_logger
 from ..services.epay import EPayClient, EPayError, parse_money_cents
+from ..services.gmpay import ORDER_NOT_FOUND, GMPayError, GMPayGateway
 from ..services.orders import OrderError, confirm_epay_payment
 from ..services.purchasing import Purchaser
 
 logger = get_logger(__name__)
 
 
+async def payment_callback(request: web.Request) -> web.Response:
+    if request.method == "POST" and request.content_type == "application/json":
+        return await gmpay_callback(request)
+    return await epay_callback(request)
+
+
+async def gmpay_callback(request: web.Request) -> web.Response:
+    """epusdt 只在支付成功时回调；返回 success 之外的应答会让它按退避重试。"""
+    db: Database = request.app["db"]
+    gateway: GMPayGateway | None = request.app.get("gmpay")
+    if gateway is None:
+        return web.Response(text="fail", status=404)
+    try:
+        payload = await request.json()
+    except ValueError:
+        return web.Response(text="fail", status=400)
+    if not isinstance(payload, dict):
+        return web.Response(text="fail", status=400)
+    if not gateway.client.verify_callback(payload):
+        logger.warning("gmpay callback signature rejected")
+        return web.Response(text="fail", status=401)
+    try:
+        await gateway.apply_callback(db, payload)
+    except GMPayError as exc:
+        logger.warning("gmpay callback rejected", extra={"error": str(exc)})
+        return web.Response(text="fail", status=404 if exc.code == ORDER_NOT_FOUND else 422)
+    return web.Response(text="success")
+
+
 async def epay_callback(request: web.Request) -> web.Response:
     db: Database = request.app["db"]
     purchaser: Purchaser = request.app["purchaser"]
-    epay: EPayClient = request.app["epay"]
+    epay: EPayClient | None = request.app.get("epay")
+    if epay is None:
+        return web.Response(text="fail", status=404)
     raw = request.query if request.method == "GET" else await request.post()
     # 重复键不能让验签与业务解析看到不同的字段值。
     if any(len(raw.getall(key)) != 1 for key in raw):
@@ -50,7 +84,7 @@ async def epay_callback(request: web.Request) -> web.Response:
 async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -> web.Response:
     """充值单回调：金额/商户/交易号核验 → 到账入账（幂等）→ 通知买家。"""
     db: Database = request.app["db"]
-    epay: EPayClient = request.app["epay"]
+    epay: EPayClient = request.app["epay"]  # 调用方 epay_callback 已确认存在
     topup = await db.wallet.get_topup(topup_id)
     if topup is None:
         logger.warning("topup callback for unknown topup", extra={"order_id": topup_id})
@@ -87,6 +121,6 @@ async def _handle_topup_callback(request: web.Request, topup_id: int, payment) -
     return web.Response(text="success")
 
 
-def register_epay_routes(app: web.Application, callback_path: str) -> None:
+def register_payment_routes(app: web.Application, callback_path: str) -> None:
     app.router.add_get(callback_path, epay_callback)
-    app.router.add_post(callback_path, epay_callback)
+    app.router.add_post(callback_path, payment_callback)

@@ -14,9 +14,18 @@ webhook:                     # Telegram 推送更新的公网 HTTPS 端点
 
 payment:                     # 支付网关回调
   callback_path: /payment/callback
+  order_timeout_minutes: 30  # 待付订单超时自动关闭；0 表示不关闭。关闭后到账的款项存入买家余额
   secret: ""                 # 签名验证共享密钥（EPay 用不到，走自己的 MD5 签名）
 
-epay:                        # EPay（易支付）网关配置
+gmpay:                       # epusdt GMPay 原生接口（推荐）；url/pid/secret_key 齐全时新付款全部走 GMPay
+  url: ""                    # epusdt 地址，例如 https://pay.example.com（不含路径）
+  pid: ""                    # epusdt 后台 API 密钥的 PID
+  secret_key: ""             # 对应的 secret_key；或设 SHOP_BOT_GMPAY__SECRET_KEY
+  currency: USD              # 订单计价法币，epusdt 按汇率折算成加密货币
+  token: usdt                # 收款币种，须在 epusdt 已启用
+  network: tron              # 收款网络，须在 epusdt 已启用且有钱包地址
+
+epay:                        # EPay（易支付）兼容接口；切换到 GMPay 后保留一段时间，让旧付款链接仍能回调入账
   pid: ""                    # 商户 ID
   key: ""                    # 商户密钥
   url: ""                    # 网关地址，例如 https://pay.example.com

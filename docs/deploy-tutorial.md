@@ -37,11 +37,13 @@ admin_ids: [123456789]           # 你的 telegram id，多个用逗号
 webhook:
   url: "https://bot.example.com" # 你的公网 HTTPS 地址
   secret_token: "REPLACE_WITH_RANDOM_SECRET" # 必填，仅允许字母/数字/下划线/连字符
-epay:
+gmpay:                           # 使用 epusdt 时推荐；也可只配 epay 走易支付
+  url: "https://pay.example.com"   # epusdt 地址，不含路径
   pid: "1000"
-  key: "你的商户密钥"
-  url: "https://pay.example.com"
-  currency: USD                # 必须与网关实际收款币种一致
+  secret_key: "epusdt 后台的 secret_key"
+  currency: USD
+  token: usdt
+  network: tron
 ```
 
 ```bash
@@ -49,7 +51,7 @@ sudo chown root:shop-bot /opt/shop-bot/config.yaml
 sudo chmod 640 /opt/shop-bot/config.yaml
 ```
 
-仅演示时可不填 EPay 和上游凭据，使用管理员调入的测试余额。真实模式请先同步目录、用 `/price` 定价，再 `/publish` 上架。
+仅演示时可不填收款和上游凭据，使用管理员调入的测试余额。真实模式请先同步目录、用 `/price` 定价，再 `/publish` 上架。
 
 ## 3. 首次申请 TLS 证书
 
@@ -157,7 +159,7 @@ journalctl -u shop-bot -n 100
 |---|---|
 | `systemctl status` 显示 failed | `journalctl -u shop-bot -n 50` 看具体报错 |
 | bot 无响应 | 确认 `webhook.url` 是 HTTPS 且证书有效；`curl -I https://bot.example.com/webhook` |
-| 支付回调 401 | 确认 `epay.key` 和网关侧一致；看 `journalctl` 里的 signature mismatch |
+| 支付回调 401 | GMPay 确认 `gmpay.pid`/`gmpay.secret_key` 与 epusdt 后台 API 密钥一致；EPay 确认 `epay.key` 和网关侧一致；看 `journalctl` 里的签名告警 |
 | 订单卡住 | 管理员命令 `/orders` 看状态；中断的已付款订单自动恢复，发货失败用 `/paid <id>` 重试 |
 
 ## 升级

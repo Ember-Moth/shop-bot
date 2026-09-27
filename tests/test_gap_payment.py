@@ -12,7 +12,7 @@ from shop_bot.services import orders
 from shop_bot.services.epay import _create_sign
 from shop_bot.services.fulfillment import recover_once
 from shop_bot.services.payment_prompts import HEADER_PENDING, order_prompt
-from shop_bot.web.payment import register_epay_routes
+from shop_bot.web.payment import register_payment_routes
 from tests.test_payment_prompts import buttons, callback, calls, text_message
 
 
@@ -27,7 +27,7 @@ async def shop(db):
 async def http_client(db, epay, purchaser, bot):
     app = web.Application()
     app.update({"db": db, "epay": epay, "purchaser": purchaser, "bot": bot})
-    register_epay_routes(app, "/payment/callback")
+    register_payment_routes(app, "/payment/callback")
     async with TestClient(TestServer(app)) as client:
         yield client
 
@@ -73,7 +73,7 @@ async def test_prompt_offers_gap_only_when_balance_partly_covers(
     *, db, user, shop, bot, epay, balance, options, gap_button
 ):
     order = await order_with_balance(db, user, shop, balance)
-    _, markup = await order_prompt(bot, db, epay, order, HEADER_PENDING)
+    markup = (await order_prompt(bot, db, epay, order, HEADER_PENDING)).markup
     datas = [b.callback_data or "" for b in buttons(markup)]
     assert datas[-1] == "myorders"
     assert [d.split(":")[0] for d in datas[:-1]] == options
@@ -84,9 +84,9 @@ async def test_prompt_offers_gap_only_when_balance_partly_covers(
 
 async def test_gap_is_not_offered_without_online_collection(db, user, shop, bot):
     order = await order_with_balance(db, user, shop, 300)
-    text, markup = await order_prompt(bot, db, None, order, HEADER_PENDING)
-    assert "请联系管理员" in text
-    assert [b.callback_data for b in buttons(markup)] == ["myorders"]
+    view = await order_prompt(bot, db, None, order, HEADER_PENDING)
+    assert "请联系管理员" in view.text
+    assert [b.callback_data for b in buttons(view.markup)] == ["myorders"]
 
 
 async def test_gap_topup_pays_the_order_when_credited(*, db, user, shop, bot, epay, purchaser):
@@ -137,7 +137,7 @@ async def test_gap_credit_stays_in_wallet_when_order_cannot_be_paid(*, db, user,
     elif change == "cancelled":
         await orders.cancel_order(db, order.id)
     else:
-        await db.payments.record_epay_payment(order.id, "ORDER-PAID")
+        await db.payments.record_online_payment(order.id, "ORDER-PAID")
     before = await db.orders.get_order(order.id)
     await db.wallet.complete_topup(topup.id, trade_no="GAP-1")
     assert await db.orders.get_order(order.id) == before

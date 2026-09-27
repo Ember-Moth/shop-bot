@@ -11,7 +11,7 @@ from aiohttp import web as aiohttp_web
 from .commands import register_bot_commands
 from .config import Settings, get_settings
 from .db import Database, FSMStorage
-from .handlers import admin, balance, catalog, kyc, order, start
+from .handlers import admin, balance, catalog, gmpay, kyc, order, start
 from .logging_config import get_logger, setup_logging
 from .models import Product
 from .services.backup import BackupManager
@@ -20,10 +20,13 @@ from .services.commbitz_api import CommbitzClient, CommbitzError, base_url_for
 from .services.daily_report import daily_report_loop
 from .services.epay import EPayClient, EPayConfig
 from .services.fulfillment import recovery_loop
+from .services.gateway import PaymentGateway
+from .services.gmpay import GMPayClient, GMPayConfig, GMPayError, GMPayGateway
 from .services.operations import Operations, RuntimeState
+from .services.order_expiry import order_expiry_loop
 from .services.purchasing import CommbitzPurchaser, DemoPurchaser, Purchaser
 from .web.health import register_health_routes
-from .web.payment import register_epay_routes
+from .web.payment import register_payment_routes
 from .web.telegram import register_telegram_routes, validate_webhook_secret
 
 logger = get_logger(__name__)
@@ -60,8 +63,28 @@ def build_purchaser(commbitz_client: CommbitzClient | None) -> Purchaser:
     return DemoPurchaser()
 
 
+def build_gmpay_gateway(settings: Settings) -> GMPayGateway | None:
+    """配置了 epusdt GMPay 时返回网关；新付款全部经它发起，EPay 只保留给旧链接回调。"""
+    cfg = settings.gmpay
+    if not cfg.enabled:
+        return None
+    client = GMPayClient(
+        GMPayConfig(
+            url=cfg.url,
+            pid=cfg.pid,
+            secret_key=cfg.secret_key,
+            currency=cfg.currency,
+            token=cfg.token,
+            network=cfg.network,
+            timeout=cfg.timeout,
+        )
+    )
+    notify_url = f"{settings.webhook.url.rstrip('/')}{settings.payment.callback_path}"
+    return GMPayGateway(client, notify_url=notify_url)
+
+
 def build_dispatcher(
-    db: Database, purchaser: Purchaser, epay: EPayClient | None, commbitz: CommbitzClient | None
+    db: Database, purchaser: Purchaser, gateway: PaymentGateway | None, commbitz: CommbitzClient | None
 ) -> Dispatcher:
     # FSM 状态持久化到 SQLite，事件隔离用内存（同一 bot 实例内并发事件串行化）
     dp = Dispatcher(
@@ -69,7 +92,7 @@ def build_dispatcher(
         events_isolation=SimpleEventIsolation(),
         db=db,
         purchaser=purchaser,
-        epay=epay,
+        gateway=gateway,
         commbitz=commbitz,
     )
     dp.include_router(start.router)
@@ -77,6 +100,7 @@ def build_dispatcher(
     dp.include_router(order.router)
     dp.include_router(kyc.router)
     dp.include_router(balance.router)
+    dp.include_router(gmpay.router)
     dp.include_router(admin.router)
     return dp
 
@@ -139,7 +163,13 @@ async def amain() -> None:
                 )
             )
             resources.push_async_callback(epay_client.close)
-        dp = build_dispatcher(db, purchaser, epay_client, commbitz_client)
+        gmpay_gateway = build_gmpay_gateway(settings)
+        if gmpay_gateway is not None:
+            resources.push_async_callback(gmpay_gateway.client.close)
+            await _check_gmpay_assets(gmpay_gateway, runtime)
+        gateway: PaymentGateway | None = gmpay_gateway or epay_client
+        logger.info("online payment gateway: %s", "gmpay" if gmpay_gateway else ("epay" if epay_client else "none"))
+        dp = build_dispatcher(db, purchaser, gateway, commbitz_client)
         dp["operations"] = operations
         dp.errors.register(operations.on_handler_error)
         app = aiohttp_web.Application()
@@ -148,11 +178,12 @@ async def amain() -> None:
         app["commbitz"] = commbitz_client
         app["bot"] = bot
         app["epay"] = epay_client
+        app["gmpay"] = gmpay_gateway
         register_telegram_routes(app, dp, bot, settings.webhook.path, settings.webhook.secret_token)
         register_health_routes(app, operations)
         setup_application(app, dp, bot=bot)
-        if epay_client is not None:
-            register_epay_routes(app, settings.payment.callback_path)
+        if epay_client is not None or gmpay_gateway is not None:
+            register_payment_routes(app, settings.payment.callback_path)
 
         runner = aiohttp_web.AppRunner(app)
         resources.push_async_callback(runner.cleanup)
@@ -165,10 +196,13 @@ async def amain() -> None:
         runtime.webhook_ready = True
         logger.info("webhook registered: %s", webhook_url)
         logger.info("listening on %s:%d", settings.webhook.host, settings.webhook.port)
-        runtime.tasks["recovery"] = asyncio.create_task(recovery_loop(db, purchaser, bot, runtime))
+        runtime.tasks["recovery"] = asyncio.create_task(recovery_loop(db, purchaser, bot, runtime, gmpay_gateway))
         runtime.tasks["monitor"] = asyncio.create_task(operations.run())
         if settings.backup.enabled:
             runtime.tasks["backup"] = asyncio.create_task(backups.run())
+        if settings.payment.order_timeout_minutes > 0:
+            timeout = settings.payment.order_timeout_minutes * 60
+            runtime.tasks["expiry"] = asyncio.create_task(order_expiry_loop(db, gateway, timeout, runtime))
         if settings.operations.daily_report and settings.admin_ids:
             runtime.tasks["report"] = asyncio.create_task(daily_report_loop(db, bot, settings, runtime))
         for name, task in runtime.tasks.items():
@@ -194,6 +228,19 @@ async def amain() -> None:
             except Exception:
                 logger.warning("worker failure alert unavailable")
             raise RuntimeError(f"background worker exited: {failed_name}")
+
+
+async def _check_gmpay_assets(gateway: GMPayGateway, runtime: RuntimeState) -> None:
+    """启动时确认 epusdt 已启用配置的收款网络和币种；只告警，不阻止启动。"""
+    cfg = gateway.client.config
+    try:
+        assets = await gateway.client.supported_assets()
+    except GMPayError as exc:
+        logger.warning("gmpay config check failed", extra={"error": str(exc)})
+        return
+    if (cfg.network, cfg.token) not in assets:
+        runtime.failures["gmpay"] = f"epusdt 未启用 {cfg.network} 上的 {cfg.token.upper()} 收款，在线付款会失败"
+        logger.error("gmpay asset %s.%s is not enabled on the gateway", cfg.token, cfg.network)
 
 
 async def _stop_task(task: asyncio.Task) -> None:

@@ -1,4 +1,4 @@
-"""钱包相关交互：充值余额（预设档位/自定义金额 + EPay 链接）、我的余额与交易记录。
+"""钱包相关交互：充值余额（预设档位/自定义金额 + 在线付款信息）、我的余额与交易记录。
 
 入口由 start.py 的 menu_router 分发（start_topup / render_balance / render_history）；
 TopupFlow.amount 状态处理器和钱包按钮回调注册在本模块 router 上。
@@ -9,18 +9,18 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, Message
 
 from .. import keyboards
 from ..db import Database
 from ..logging_config import get_logger
-from ..models import Order, Topup, User
+from ..models import Order, Topup, TopupState, User
 from ..services.balance import format_cents, parse_topup_amount
-from ..services.epay import EPayClient
-from ..services.invoices import payment_url
+from ..services.gateway import GatewayError, PaymentGateway
+from ..services.payment_prompts import PromptView, checkout_lines
 
 router = Router()
 logger = get_logger(__name__)
@@ -46,8 +46,8 @@ class TopupFlow(StatesGroup):
     amount = State()
 
 
-async def start_topup(message: Message, db: Database, epay: EPayClient | None, state: FSMContext) -> None:
-    if epay is None:
+async def start_topup(message: Message, db: Database, gateway: PaymentGateway | None, state: FSMContext) -> None:
+    if gateway is None:
         await message.answer("支付渠道未配置，充值功能暂不可用，请联系管理员")
         return
     await state.clear()  # 充值是新流程，丢弃可能残留的下单/证件状态
@@ -61,46 +61,65 @@ async def start_topup(message: Message, db: Database, epay: EPayClient | None, s
         )
         user = await db.users.get_user_by_telegram_id(from_user.id)
         if user is not None:
-            balance = await db.wallet.get_balance(user.id, epay.currency)
+            balance = await db.wallet.get_balance(user.id, gateway.currency)
     await message.answer(
-        f"💰 充值余额\n\n当前余额：{format_cents(balance)} {epay.currency}\n\n请选择充值金额：",
-        reply_markup=keyboards.topup_amounts(epay.currency),
+        f"💰 充值余额\n\n当前余额：{format_cents(balance)} {gateway.currency}\n\n请选择充值金额：",
+        reply_markup=keyboards.topup_amounts(gateway.currency),
     )
+
+
+async def topup_invoice_view(bot: Bot, db: Database, gateway: PaymentGateway, topup: Topup) -> PromptView:
+    """充值单的付款提示（Markdown）；补差价充值单说明到账后自动付清的订单。网关不可用时抛 GatewayError。"""
+    order = await db.orders.get_order(topup.order_id) if topup.order_id is not None else None
+    if order is None:
+        name, title = "余额充值", f"💰 充值单 `{topup.id}`"
+        body = ["到账后自动通知。"]
+    else:
+        name, title = f"订单 #{order.id} 补差价", f"💰 补差价充值单 `{topup.id}`"
+        body = [
+            f"到账后自动用余额支付订单 #{order.id}（{order.amount_text}），多出部分留在余额。",
+            "如果订单已付款、已取消或改选在线支付，款项全部留在余额。",
+        ]
+    checkout = await gateway.topup_checkout(bot, db, topup, name)
+    lines = [
+        title,
+        f"金额：{format_cents(topup.amount_cents)} {topup.currency}",
+        "",
+        *body,
+        "",
+        *checkout_lines(checkout),
+    ]
+    markup = keyboards.checkout(checkout.web_url, checkout.trade_ref, keyboards.back_to_wallet())
+    return PromptView("\n".join(lines), markup, checkout.trade_ref)
 
 
 async def create_topup_invoice(
-    message: Message, db: Database, epay: EPayClient, user: User, amount_cents: int, *, order: Order | None = None
-) -> tuple[Topup, str, InlineKeyboardMarkup]:
-    """创建充值单并生成 EPay 收银台链接，返回充值单、账单文本（Markdown）与支付按钮。
-
-    传入 order 时为补差价充值：到账后在同一事务内用余额付清该订单。
-    """
+    message: Message,
+    db: Database,
+    gateway: PaymentGateway,
+    user: User,
+    amount_cents: int,
+    *,
+    order: Order | None = None,
+) -> tuple[Topup, PromptView]:
+    """创建充值单并生成付款信息。传入 order 时为补差价充值：到账后在同一事务内用余额付清该订单。"""
     if order is None:
-        topup = await db.wallet.create_topup(user.id, amount_cents, epay.currency)
-        name, title = "余额充值", f"💰 充值单 `{topup.id}` 已创建"
-        body = "点击下方按钮完成支付，到账后自动通知："
+        topup = await db.wallet.create_topup(user.id, amount_cents, gateway.currency)
     else:
-        topup = await db.wallet.gap_topup(user.id, order.id, amount_cents, epay.currency)
-        name, title = f"订单 #{order.id} 补差价", f"💰 补差价充值单 `{topup.id}`"
-        body = (
-            f"到账后自动用余额支付订单 #{order.id}（{order.amount_text}），多出部分留在余额。\n"
-            "如果订单已付款、已取消或改选在线支付，款项全部留在余额。"
-        )
+        topup = await db.wallet.gap_topup(user.id, order.id, amount_cents, gateway.currency)
     bot = message.bot
     assert bot is not None
-    pay_url = await payment_url(
-        bot, epay, name=name, order_no=f"T{topup.id}", amount_cents=topup.amount_cents, currency=topup.currency
-    )
-    text = f"{title}\n金额：{format_cents(topup.amount_cents)} {topup.currency}\n\n{body}"
-    return topup, text, keyboards.topup_invoice(pay_url)
+    return topup, await topup_invoice_view(bot, db, gateway, topup)
 
 
 @router.callback_query(
     F.data.startswith(keyboards.CB_TOPUP_PREFIX) & ~F.data.in_({keyboards.CB_TOPUP_CUSTOM, keyboards.CB_TOPUP_CANCEL})
 )
-async def cb_topup_preset(callback: CallbackQuery, db: Database, epay: EPayClient | None, state: FSMContext) -> None:
+async def cb_topup_preset(
+    callback: CallbackQuery, db: Database, gateway: PaymentGateway | None, state: FSMContext
+) -> None:
     await state.clear()
-    if epay is None:
+    if gateway is None:
         await callback.answer("支付渠道未配置，请联系管理员", show_alert=True)
         return
     # callback data 可被客户端伪造，金额边界必须在服务端复核
@@ -120,22 +139,26 @@ async def cb_topup_preset(callback: CallbackQuery, db: Database, epay: EPayClien
     if msg is None or isinstance(msg, InaccessibleMessage):
         await callback.answer("消息已过期，请重新发起充值", show_alert=True)
         return
-    topup, text, markup = await create_topup_invoice(msg, db, epay, user, amount_cents)
-    await msg.edit_text(text, parse_mode="Markdown", reply_markup=markup)
-    await db.prompts.record(msg.chat.id, msg.message_id, topup_id=topup.id)
+    try:
+        topup, view = await create_topup_invoice(msg, db, gateway, user, amount_cents)
+    except GatewayError:
+        await callback.answer("暂时无法生成付款信息，请稍后再试", show_alert=True)
+        return
+    await msg.edit_text(view.text, parse_mode="Markdown", reply_markup=view.markup)
+    await db.prompts.record(msg.chat.id, msg.message_id, topup_id=topup.id, trade_ref=view.trade_ref)
     await callback.answer()
 
 
 @router.callback_query(F.data == keyboards.CB_TOPUP_CUSTOM)
-async def cb_topup_custom(callback: CallbackQuery, epay: EPayClient | None, state: FSMContext) -> None:
-    if epay is None:
+async def cb_topup_custom(callback: CallbackQuery, gateway: PaymentGateway | None, state: FSMContext) -> None:
+    if gateway is None:
         await callback.answer("支付渠道未配置，请联系管理员", show_alert=True)
         return
     await state.set_state(TopupFlow.amount)
     msg = callback.message
     if msg is not None and not isinstance(msg, InaccessibleMessage):
         await msg.edit_text(
-            f"✏️ 自定义充值金额\n\n请直接回复充值金额（{epay.currency}，1–10000，最多两位小数），"
+            f"✏️ 自定义充值金额\n\n请直接回复充值金额（{gateway.currency}，1–10000，最多两位小数），"
             "例如 `100` 或 `50.50`。\n发送 /start 取消。",
             parse_mode="Markdown",
         )
@@ -152,8 +175,8 @@ async def cb_topup_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(TopupFlow.amount, F.text)
-async def topup_amount_input(message: Message, db: Database, epay: EPayClient | None, state: FSMContext) -> None:
-    if epay is None:
+async def topup_amount_input(message: Message, db: Database, gateway: PaymentGateway | None, state: FSMContext) -> None:
+    if gateway is None:
         await message.answer("支付渠道未配置，充值功能暂不可用，请联系管理员")
         return
     text = message.text
@@ -164,7 +187,7 @@ async def topup_amount_input(message: Message, db: Database, epay: EPayClient | 
         return
     amount_cents = parse_topup_amount(text)
     if amount_cents is None:
-        await message.answer(f"金额无效（需 1–10000 {epay.currency}、最多两位小数），请重新回复，或发 /start 取消。")
+        await message.answer(f"金额无效（需 1–10000 {gateway.currency}、最多两位小数），请重新回复，或发 /start 取消。")
         return
     from_user = message.from_user
     assert from_user is not None
@@ -174,16 +197,54 @@ async def topup_amount_input(message: Message, db: Database, epay: EPayClient | 
         await message.answer("请先发送 /start 完成注册")
         return
     await state.clear()
-    topup, text_out, markup = await create_topup_invoice(message, db, epay, user, amount_cents)
-    sent = await message.answer(text_out, parse_mode="Markdown", reply_markup=markup)
-    await db.prompts.record(sent.chat.id, sent.message_id, topup_id=topup.id)
+    try:
+        topup, view = await create_topup_invoice(message, db, gateway, user, amount_cents)
+    except GatewayError:
+        await message.answer("暂时无法生成付款信息，请稍后在「💰 充值余额」重试。")
+        return
+    sent = await message.answer(view.text, parse_mode="Markdown", reply_markup=view.markup)
+    await db.prompts.record(sent.chat.id, sent.message_id, topup_id=topup.id, trade_ref=view.trade_ref)
 
 
 @router.message(TopupFlow.amount)
-async def topup_amount_non_text(message: Message, epay: EPayClient | None = None) -> None:
+async def topup_amount_non_text(message: Message, gateway: PaymentGateway | None = None) -> None:
     """等待金额时收到图片/贴纸等非文本消息：提示而非让上一个 handler 的 assert 崩溃。"""
-    unit = f"（{epay.currency}）" if epay is not None else ""
+    unit = f"（{gateway.currency}）" if gateway is not None else ""
     await message.answer(f"请回复文本形式的充值金额{unit}，或发 /start 取消。")
+
+
+@router.callback_query(F.data.startswith(keyboards.CB_RETOPUP))
+async def cb_retopup(callback: CallbackQuery, db: Database, gateway: PaymentGateway | None) -> None:
+    """充值单的收款信息过期后重新获取；同一张充值单换一笔新的收款信息。"""
+    raw = (callback.data or "").removeprefix(keyboards.CB_RETOPUP)
+    if not raw.isascii() or not raw.isdecimal() or len(raw) > 18:
+        await callback.answer("参数无效", show_alert=True)
+        return
+    msg = callback.message
+    if msg is None or isinstance(msg, InaccessibleMessage):
+        await callback.answer("消息已过期，请点底部「💰 充值余额」", show_alert=True)
+        return
+    if gateway is None:
+        await callback.answer("支付渠道未配置，请联系管理员", show_alert=True)
+        return
+    user = await db.users.get_user_by_telegram_id(callback.from_user.id)
+    topup = await db.wallet.get_topup(int(raw))
+    if user is None or topup is None or topup.user_id != user.id:
+        await callback.answer("充值单不存在", show_alert=True)
+        return
+    if topup.status != TopupState.PENDING:
+        await callback.answer("这张充值单已到账", show_alert=True)
+        return
+    bot = callback.bot
+    assert bot is not None
+    try:
+        view = await topup_invoice_view(bot, db, gateway, topup)
+    except GatewayError:
+        await callback.answer("暂时无法生成付款信息，请稍后再试", show_alert=True)
+        return
+    await msg.edit_text(view.text, parse_mode="Markdown", reply_markup=view.markup)
+    await db.prompts.record(msg.chat.id, msg.message_id, topup_id=topup.id, trade_ref=view.trade_ref)
+    await callback.answer()
 
 
 @router.callback_query(F.data == keyboards.CB_WALLET_VIEW)

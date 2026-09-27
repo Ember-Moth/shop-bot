@@ -87,7 +87,15 @@ async def prompt_work(db):
 
 
 def test_every_order_status_has_a_chinese_label():
-    assert {status.label for status in OrderStatus} == {"待支付", "已付款", "已交付", "交付失败", "已取消", "已退款"}
+    assert {status.label for status in OrderStatus} == {
+        "待支付",
+        "已付款",
+        "已交付",
+        "交付失败",
+        "已取消",
+        "已退款",
+        "已超时关闭",
+    }
 
 
 async def test_confirm_prompt_shows_balance_and_only_usable_options(db, user, product, bot, epay):
@@ -134,7 +142,7 @@ async def test_online_payment_removes_pay_buttons_from_every_prompt(*, db, user,
     assert all(not (b.callback_data or "").startswith("bal:") for b in buttons(resumed.reply_markup))
     assert sorted(p["message_id"] for p in await prompts(db)) == [5, 99]
 
-    await db.payments.record_epay_payment(order.id, "TRADE-1")
+    await db.payments.record_online_payment(order.id, "TRADE-1")
     assert len(await prompt_work(db)) == 2  # 与付款同事务入队
     before = len(bot.session.sent)
     await recover_once(db, purchaser, bot)
@@ -146,7 +154,7 @@ async def test_online_payment_removes_pay_buttons_from_every_prompt(*, db, user,
 
 async def test_prompt_recorded_after_payment_is_closed_right_away(db, user, product, bot, purchaser):
     order = await orders.create_order(db, user.id, product, 1)
-    await db.payments.record_epay_payment(order.id, "TRADE-EARLY")
+    await db.payments.record_online_payment(order.id, "TRADE-EARLY")
     await db.prompts.record(42, 77, order_id=order.id)
     assert len(await prompt_work(db)) == 1
     await recover_once(db, purchaser, bot)
@@ -165,7 +173,7 @@ async def test_unchanged_or_deleted_prompt_is_not_retried(db, user, product, bot
     order = await orders.create_order(db, user.id, product, 1)
     await db.prompts.record(42, 5, order_id=order.id)
     bot.session.edit_failure = lambda method: TelegramBadRequest(method, "Bad Request: message to edit not found")
-    await db.payments.record_epay_payment(order.id, "TRADE-1")
+    await db.payments.record_online_payment(order.id, "TRADE-1")
     await recover_once(db, purchaser, bot)
     assert [p["state"] for p in await prompts(db)] == ["closed"]
     assert await prompt_work(db) == []
@@ -175,7 +183,7 @@ async def test_rate_limited_prompt_update_is_retried(*, db, user, product, bot, 
     order = await orders.create_order(db, user.id, product, 1)
     await db.prompts.record(42, 5, order_id=order.id)
     bot.session.edit_failure = lambda method: TelegramRetryAfter(method, "Too Many Requests", 5)
-    await db.payments.record_epay_payment(order.id, "TRADE-1")
+    await db.payments.record_online_payment(order.id, "TRADE-1")
     await recover_once(db, purchaser, bot)
     assert [p["state"] for p in await prompts(db)] == ["open"]
     assert len(await prompt_work(db)) == 1
@@ -195,7 +203,7 @@ async def test_restart_requeues_settled_prompts_still_open(tmp_path):
         await db.products.seed_products([product])
         order = await orders.create_order(db, user.id, product, 1)
         await db.prompts.record(42, 5, order_id=order.id)
-        await db.payments.record_epay_payment(order.id, "TRADE-1")
+        await db.payments.record_online_payment(order.id, "TRADE-1")
     finally:
         await db.close()
     with sqlite3.connect(path) as conn:
@@ -297,7 +305,7 @@ async def test_history_lists_money_movements_not_orders(db, user, product, bot):
     by_balance = await orders.create_order(db, user.id, product, 1)
     await db.payments.pay_order_with_balance(by_balance.id, user.id, by_balance.amount_cents)
     online = await orders.create_order(db, user.id, product, 1)
-    await db.payments.record_epay_payment(online.id, "TRADE-ONLINE")
+    await db.payments.record_online_payment(online.id, "TRADE-ONLINE")
     still_pending = await orders.create_order(db, user.id, product, 1)
 
     start._menu_last_seen.clear()

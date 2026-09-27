@@ -1,11 +1,11 @@
 # shop-bot
 
-Telegram 商店 bot（webhook 模式）：用户浏览商品、下单，EPay 支付回调确认后向上游（Commbitz 分销 API）采购并自动交付。
+Telegram 商店 bot（webhook 模式）：用户浏览商品、下单，在线收款（epusdt GMPay，兼容 EPay）确认后向上游（Commbitz 分销 API）采购并自动交付。
 
 ## 功能
 
 - 🛍 商品目录（上游套餐自动同步）浏览、按业务类型下单（eSIM/激活/充值/兑换券/实体 SIM）、订单查询
-- 💳 EPay 支付网关集成，Telegram Web App 内嵌收银台
+- 💳 在线收款：epusdt GMPay 聊天内链上付款（收款地址和精确金额直接发在聊天里，网页收银台备用），兼容 EPay 易支付
 - 🔄 支付回调确认收款 → 后台向上游采购 → 货品持久化 → 私信通知买家
 - 📦 订单收款状态与采购状态机分离（提交一次、已知上游单只查询、结果不明转人工）
 - 🪪 KYC 补交（私聊收集材料）与 eSIM 用量查询
@@ -37,11 +37,41 @@ shop-bot            # 或 uv run python -m shop_bot
 - KYC：需要身份核验的订单（INR/账户级强制），买家 `/kyc <订单号>` 在私聊补交证件，审核通过后自动发货。
 - 用量：`/usage <订单号>` 查询已交付 eSIM 的流量用量。
 
+## GMPay 收款（epusdt）
+
+配置 `gmpay` 段后，新付款全部走 epusdt 的 GMPay 原生接口：
+
+```yaml
+gmpay:
+  url: "https://pay.example.com"   # epusdt 地址，不含路径
+  pid: "1000"
+  secret_key: "epusdt 后台的 secret_key"
+  currency: USD                    # 订单计价法币，epusdt 按汇率折算
+  token: usdt
+  network: tron
+```
+
+- 买家选择在线支付时，Bot 在服务端向 epusdt 下单，把网络、需转账的精确币数、收款地址和截止时间直接发在聊天里，另附网页收银台作为备用入口。有效期内重复打开复用同一笔收款信息。
+- 每次下单记在 `gmpay_trades`，商户订单号带尝试序号：订单 20 为 `20-1`、`20-2`，充值单 5 为 `T5-1`。epusdt 不允许重复使用商户订单号，下单失败或结果不明的尝试直接作废，下次换下一个序号。
+- 收款确认有三条路径：epusdt 的签名 JSON 回调、收款信息到期时的状态核对、买家点「🔄 我已转账」。到期核对兼作回调丢失的兜底；「我已转账」查不到时可回复交易哈希，由 epusdt 到链上核验。入账都经 `payment_receipts` 幂等。
+- 收款信息过期后，显示它的消息改为过期提示并去掉地址和金额，买家可点「重新获取付款信息」拿到新的一笔。
+- 签名为 HMAC-SHA256，数字按 epusdt 的 Go 格式规范化，已用 epusdt 文档和单测中的签名向量验证。每笔订单在签名请求里写明币种，不依赖 epusdt 后台的 EPay 默认币种。
+- 网页收银台地址由 epusdt 返回，取决于 epusdt 的 `app_uri` 配置；非 HTTPS 地址会退回普通链接按钮。
+- 启动时检查 epusdt 是否启用了配置的网络和币种，未启用时发出运维告警。
+
+## 订单超时自动关闭
+
+`payment.order_timeout_minutes`（默认 30，设为 0 关闭此功能）控制待付订单的保留时间。后台每分钟检查一次，超时未付款的订单转为「已超时关闭」，原付款消息随之去掉付款按钮和收款信息；付款提示会写明截止时间。
+
+- 订单或其补差价充值单还有有效的 GMPay 收款信息时暂不关闭，截止后再等两分钟，留给最后一刻的转账和回调。
+- 已选在线支付的订单关闭前先向网关核对一次；已付款就正常入账，网关查询失败时本轮跳过。只用 EPay 且网关不支持查单时，这类订单不会被自动关闭。
+- 关闭后才到账的真实款项按原币种存入买家余额并私信通知，不会丢失。管理员不能再对已关闭订单 `/paid`。
+
 ## 支付回调
 
-EPay 网关 GET 或 POST 到 `payment.callback_path`（默认 `/payment/callback`），form-urlencoded，带 MD5 签名。回调只做验签、核单、确认收款并建立采购任务，随即应答；上游采购由后台恢复循环异步执行。
+GMPay 与 EPay 共用 `payment.callback_path`（默认 `/payment/callback`），不需要改反向代理：POST JSON 按 GMPay 验签，GET 或 POST 表单按 EPay 的 MD5 签名处理。回调只做验签、核单、确认收款并建立采购任务，随即应答；上游采购由后台恢复循环异步执行。
 
-配置 `config.yaml` 的 `epay` 段即可启用：
+切换到 GMPay 后建议保留 `epay` 配置一段时间，切换前发出的 EPay 付款链接仍会按 EPay 协议回调入账。只配置 `epay` 时沿用 EPay 收银台：
 
 ```yaml
 epay:
@@ -62,7 +92,7 @@ epay:
 
 更换商户币种前应先处理旧币种的未完成收款。回调同时校验本地订单币种、配置币种和网关实际回传的币种（若有），不会把旧 CNY 订单按新 USD 设置入账。
 
-签名验证和回调解析逻辑在 `src/shop_bot/services/epay.py` 和 `src/shop_bot/web/payment.py`。
+签名验证和回调解析逻辑在 `src/shop_bot/services/gmpay.py`、`services/epay.py` 和 `web/payment.py`。
 
 ## 管理员命令（需在 `admin_ids` 中）
 
@@ -84,7 +114,7 @@ logging:
 ## 接入点
 
 - **上游采购**：`src/shop_bot/services/purchasing.py` — 采购状态机（提交一次/详情轮询/结果不明转人工）+ Demo/Commbitz 双模式；`services/commbitz_api.py` 封装协议（令牌/目录/采购/KYC/用量）。
-- **支付网关**：`src/shop_bot/services/epay.py` — 实现 EPay V1 签名、查询与回调核单；接其他网关时实现相同接口即可。
+- **支付网关**：`src/shop_bot/services/gateway.py` 定义统一的收款接口，`services/gmpay.py`（epusdt GMPay）与 `services/epay.py`（EPay V1）各自实现；接其他网关时实现同一接口即可。
 
 ## 开发
 
@@ -107,8 +137,9 @@ src/shop_bot/
 ├── logging_config.py   # 日志系统（彩色开发格式 + JSON 生产格式）
 ├── handlers/           # start / catalog / order(FSM) / kyc / admin
 ├── services/           # orders（收款）/ purchasing（采购状态机）/ fulfillment（私信+恢复）
-│                       # epay.py（EPay 协议）/ commbitz_api.py（上游客户端）/ catalog_sync.py（目录同步）
-└── web/                # payment.py（EPay 回调端点）、telegram.py（webhook 路由）
+│                       # gateway.py（收款接口）/ gmpay.py（epusdt GMPay）/ epay.py（EPay 协议）
+│                       # commbitz_api.py（上游客户端）/ catalog_sync.py（目录同步）
+└── web/                # payment.py（GMPay 与 EPay 回调端点）、telegram.py（webhook 路由）
 ```
 
 ## 文档
@@ -142,7 +173,7 @@ src/shop_bot/
 ## 后台调度
 
 - EPay、余额支付、管理员确认收款，在一个 SQLite 事务内保存付款事实、采购记录和任务；回调不等待上游或 Telegram。
-- 固定 3 个采购、2 个交付、1 个钱包通知、1 个业务广播及 1 个付款提示更新协程，通道独立；空闲时每秒检查到期任务，慢 ZIP 上传不会阻塞其他订单采购。
+- 固定 3 个采购、2 个交付、1 个钱包通知、1 个业务广播及 1 个付款提示更新协程，配置 GMPay 时另有 1 个到期核对协程，通道独立；空闲时每秒检查到期任务，慢 ZIP 上传不会阻塞其他订单采购。
 - 等待中的采购按 5–60 秒退避轮询；通知失败按 5–300 秒退避，Telegram 指定的等待时间优先。通知共享全局与单聊限速。
 - `work_items` 只保存任务标识和调度信息；索引领取到期任务，不反复加载历史货品或扫描人工冻结单。历史不一致订单在启动时重新入队。
 - 充值、调账、额外收款补偿通知与账本流水同事务入队，重复支付回调不会产生重复通知任务。Telegram 已收到但本地确认前中断时仍可能补发同一内容。

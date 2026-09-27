@@ -24,8 +24,7 @@ from ..keyboards import (
 )
 from ..logging_config import get_logger
 from ..models import OrderStatus, PurchaseState
-from ..services import orders
-from ..services.epay import EPayClient, EPayError
+from ..services.gateway import GatewayError, PaymentGateway
 from ..services.orders import OrderError
 from ..services.payment_prompts import HEADER_UNPAID
 from ..services.purchasing import Purchaser
@@ -186,7 +185,7 @@ def _menu_debounced(user_id: int, text: str) -> bool:
     F.text.in_({MENU_BUY, MENU_TOPUP, MENU_BALANCE, MENU_ORDERS, MENU_HISTORY, MENU_USAGE, MENU_KYC, MENU_HELP}),
     StateFilter(None),
 )
-async def menu_router(message: Message, db: Database, state: FSMContext, epay: EPayClient | None) -> None:
+async def menu_router(message: Message, db: Database, state: FSMContext, gateway: PaymentGateway | None) -> None:
     """菜单按钮统一入口：防抖后分发到对应处理（仅空闲状态生效）。"""
     from_user = message.from_user
     assert from_user is not None
@@ -201,7 +200,7 @@ async def menu_router(message: Message, db: Database, state: FSMContext, epay: E
     elif text == MENU_HISTORY:
         await render_history(message, db)
     elif text == MENU_TOPUP:
-        await start_topup(message, db, epay, state)
+        await start_topup(message, db, gateway, state)
     elif text == MENU_BALANCE:
         await render_balance(message, db)
     elif text == MENU_USAGE:
@@ -216,7 +215,9 @@ async def menu_router(message: Message, db: Database, state: FSMContext, epay: E
 
 
 @router.message(Command("query"))
-async def cmd_query(message: Message, db: Database, epay: EPayClient | None, purchaser: Purchaser, bot: Bot) -> None:
+async def cmd_query(
+    message: Message, db: Database, gateway: PaymentGateway | None, purchaser: Purchaser, bot: Bot
+) -> None:
     """用户主动查询订单支付状态（回调可能延迟或丢失时兜底）。"""
     text = message.text
     if text is None:
@@ -248,31 +249,34 @@ async def cmd_query(message: Message, db: Database, epay: EPayClient | None, pur
     if order.status == OrderStatus.REFUNDED:
         await message.answer(f"订单 #{order.id} 已退款到余额，可在「💳 我的余额」查看")
         return
+    if order.status == OrderStatus.EXPIRED:
+        await message.answer(
+            f"订单 #{order.id} 超时未付款，已自动关闭。如需购买请重新下单；关闭后才到账的款项会存入余额。"
+        )
+        return
     if order.status in (OrderStatus.CANCELLED, OrderStatus.DELIVERY_FAILED):
         await message.answer(f"订单 #{order.id} 当前状态：{order.status.label}，如需协助请联系管理员")
         return
     if order.status == OrderStatus.PENDING_PAYMENT:
         # 付款按钮只发给买家本人的私聊；管理员代查或群聊里只回复状态。
         owner_private = message.chat.type == "private" and user is not None and order.user_id == user.id
-        if epay is None:
-            if owner_private:
-                await send_order_prompt(message, db, epay, order, HEADER_UNPAID)
-            else:
-                await message.answer(f"订单 #{order.id} 待支付，请稍后再试或联系管理员")
-            return
-        try:
-            payment = await epay.query_order(str(order.id))
-            if not payment.paid:
-                if owner_private:
-                    await send_order_prompt(message, db, epay, order, HEADER_UNPAID)
-                else:
-                    await message.answer(f"订单 #{order.id} 尚未支付")
+        confirmed = None
+        if gateway is not None:
+            try:
+                confirmed = await gateway.reconcile_order(db, order)
+            except GatewayError, OrderError:
+                logger.warning("payment query or validation failed", extra={"order_id": order.id})
+                await message.answer("支付信息暂时无法确认，请稍后再试或联系管理员")
                 return
-            order = await orders.confirm_epay_payment(db, purchaser, epay, order, payment)
-        except EPayError, OrderError:
-            logger.warning("payment query or validation failed", extra={"order_id": order.id})
-            await message.answer("支付信息暂时无法确认，请稍后再试或联系管理员")
+        if confirmed is None:
+            if owner_private:
+                await send_order_prompt(message, db, gateway, order, HEADER_UNPAID)
+            elif gateway is None:
+                await message.answer(f"订单 #{order.id} 待支付，请稍后再试或联系管理员")
+            else:
+                await message.answer(f"订单 #{order.id} 尚未支付")
             return
+        order = confirmed
     if order.status == OrderStatus.DELIVERED:
         await db.deliveries.queue_redelivery(order.id)
         await message.answer(f"订单 #{order.id} 已发货，系统会将货品私信发送给买家")

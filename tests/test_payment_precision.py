@@ -8,7 +8,7 @@ from shop_bot.handlers.start import cmd_query
 from shop_bot.models import OrderStatus, Product
 from shop_bot.services import orders
 from shop_bot.services.epay import _create_sign, parse_money_cents
-from shop_bot.web.payment import register_epay_routes
+from shop_bot.web.payment import register_payment_routes
 from tests.test_payment_flow import callback_params, query_message, query_result
 
 
@@ -68,7 +68,7 @@ async def test_signed_fractional_callback_cannot_create_payment_or_credit(
     ref = str(order.id) if target == "order" else f"T{topup.id}"
     app = web.Application()
     app.update({"db": db, "epay": epay, "purchaser": purchaser, "bot": bot})
-    register_epay_routes(app, "/callback")
+    register_payment_routes(app, "/callback")
     params = callback_params(order, out_trade_no=ref, money=money)
     async with TestClient(TestServer(app)) as client:
         response = await client.post("/callback", data=params)

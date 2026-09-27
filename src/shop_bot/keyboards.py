@@ -21,6 +21,8 @@ CB_CATALOG_PAGE = "catalog:"
 CB_RESUME_PAY = "resume:"  # resume:<订单号>，从订单列表继续支付
 CB_TOPUP_GAP = "gap:"  # gap:<订单号>，补差价充值；不能用 topup: 前缀，那是金额档位
 CB_WALLET_VIEW = "wallet:view"
+CB_GM_CHECK = "gmchk:"  # gmchk:<GMPay 交易记录 ID>，「我已转账」
+CB_RETOPUP = "retopup:"  # retopup:<充值单号>，充值收款信息过期后重新获取
 CATALOG_PAGE_SIZE = 5
 MAX_RESUME_BUTTONS = 5
 
@@ -148,26 +150,59 @@ def order_created(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def topup_invoice(pay_url: str) -> InlineKeyboardMarkup:
+def back_to_orders() -> InlineKeyboardButton:
+    return InlineKeyboardButton(text="📦 查看我的订单", callback_data="myorders")
+
+
+def back_to_wallet() -> InlineKeyboardButton:
     """充值单不在订单列表里，付款后去「我的余额」查看到账。"""
+    return InlineKeyboardButton(text=MENU_BALANCE, callback_data=CB_WALLET_VIEW)
+
+
+def _cashier_button(text: str, url: str) -> InlineKeyboardButton:
+    # Web App 只接受 HTTPS；网关给出 http 地址时退回普通链接，避免整条消息发送失败。
+    if url.startswith("https://"):
+        return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=url))
+    return InlineKeyboardButton(text=text, url=url)
+
+
+def checkout(web_url: str, trade_ref: int | None, back: InlineKeyboardButton) -> InlineKeyboardMarkup:
+    """在线付款按钮。GMPay 已在消息里给出地址和金额，网页收银台只是备用入口。"""
+    rows = []
+    if trade_ref is not None:
+        rows.append([InlineKeyboardButton(text="🔄 我已转账", callback_data=f"{CB_GM_CHECK}{trade_ref}")])
+        if web_url:
+            rows.append([_cashier_button("🌐 网页收银台", web_url)])
+    elif web_url:
+        rows.append([_cashier_button("💳 立即支付", web_url)])
+    rows.append([back])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def order_retry(order_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 立即支付", web_app=WebAppInfo(url=pay_url))],
-            [InlineKeyboardButton(text=MENU_BALANCE, callback_data=CB_WALLET_VIEW)],
+            [InlineKeyboardButton(text="🔄 重新获取付款信息", callback_data=f"{CB_EPAY_PAY}{order_id}")],
+            [back_to_orders()],
+        ]
+    )
+
+
+def topup_retry(topup_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 重新获取付款信息", callback_data=f"{CB_RETOPUP}{topup_id}")],
+            [back_to_wallet()],
         ]
     )
 
 
 def settled_order() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="📦 查看我的订单", callback_data="myorders")]]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[[back_to_orders()]])
 
 
 def settled_topup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=MENU_BALANCE, callback_data=CB_WALLET_VIEW)]]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[[back_to_wallet()]])
 
 
 def my_orders(pending_order_ids: list[int]) -> InlineKeyboardMarkup:

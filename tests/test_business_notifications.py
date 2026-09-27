@@ -39,8 +39,8 @@ async def test_paid_order_broadcasts_once_to_each_target(*, db, user, product, p
     await db.work.configure_business_notifications({event: [*TARGETS, 700] for event in EVENTS})
     order = await orders.create_order(db, user.id, product, 2)
     if method == "epay":
-        await db.payments.record_epay_payment(order.id, "PAY")
-        await db.payments.record_epay_payment(order.id, "PAY")
+        await db.payments.record_online_payment(order.id, "PAY")
+        await db.payments.record_online_payment(order.id, "PAY")
     elif method == "balance":
         await db.wallet.adjust_balance(user.id, 10000, "funding")
         await db.payments.pay_order_with_balance(order.id, user.id, order.amount_cents)
@@ -160,7 +160,7 @@ async def test_broadcast_insertion_failure_rolls_back_payment(db, user, product)
         await conn.execute("""CREATE TRIGGER fail_business BEFORE INSERT ON business_deliveries
             BEGIN SELECT RAISE(ABORT, 'test broadcast failure'); END""")
     with pytest.raises(aiosqlite.IntegrityError, match="broadcast failure"):
-        await db.payments.record_epay_payment(order.id, "PAY")
+        await db.payments.record_online_payment(order.id, "PAY")
     assert (await db.orders.get_order(order.id)).status == "pending_payment"
     assert await broadcasts(db) == []
     assert await db.fetch_all("SELECT * FROM payment_receipts") == []
@@ -168,9 +168,9 @@ async def test_broadcast_insertion_failure_rolls_back_payment(db, user, product)
 
 async def test_enabling_broadcasts_does_not_send_historical_payments(db, user, product, purchaser, bot):
     order = await orders.create_order(db, user.id, product, 1)
-    await db.payments.record_epay_payment(order.id, "PAY")
+    await db.payments.record_online_payment(order.id, "PAY")
     await db.work.configure_business_notifications(dict.fromkeys(EVENTS, TARGETS))
-    await db.payments.record_epay_payment(order.id, "PAY")
+    await db.payments.record_online_payment(order.id, "PAY")
     await recover_once(db, purchaser, bot)
     assert not sent_broadcasts(bot)
 

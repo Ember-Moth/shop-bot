@@ -31,7 +31,7 @@ async def confirm_epay_payment(
     """核单后持久化每笔外部收款；多收的钱按原币种入钱包，不重复采购。"""
     epay.validate_payment(order, payment, allow_additional=True)
     try:
-        confirmed, disposition = await db.payments.record_epay_payment(order.id, payment.trade_no)
+        confirmed, disposition = await db.payments.record_online_payment(order.id, payment.trade_no)
     except ValueError as exc:
         raise OrderError(str(exc), order) from None
     if disposition == "wallet_credit":

@@ -17,9 +17,8 @@ from shop_bot.models import OrderStatus, PurchaseState
 from shop_bot.services import orders
 from shop_bot.services.epay import _create_sign
 from shop_bot.services.fulfillment import process_work, recover_once, recovery_loop
-from shop_bot.services.invoices import payment_url
 from shop_bot.services.purchasing import CommbitzPurchaser, DemoPurchaser
-from shop_bot.web.payment import register_epay_routes
+from shop_bot.web.payment import register_payment_routes
 
 from .fakes import FakeCommbitzGateway
 from .test_esim_media import delivered_order
@@ -30,7 +29,7 @@ from .test_payment_flow import callback_params, query_message
 async def callback_server(db, epay, bot):
     app = web.Application()
     app.update(db=db, epay=epay, bot=bot, purchaser=DemoPurchaser())
-    register_epay_routes(app, "/callback")
+    register_payment_routes(app, "/callback")
     async with TestClient(TestServer(app)) as client:
         yield client
 
@@ -62,7 +61,7 @@ async def test_payment_and_task_intent_roll_back_together(db, user, product, sou
             BEGIN SELECT RAISE(ABORT, 'simulated queue unavailable'); END""")
     with pytest.raises(aiosqlite.IntegrityError, match="queue unavailable"):
         if source == "epay":
-            await db.payments.record_epay_payment(order.id, "TRADE")
+            await db.payments.record_online_payment(order.id, "TRADE")
         elif source == "balance":
             await db.payments.pay_order_with_balance(order.id, user.id, order.amount_cents)
         elif source == "manual":
@@ -286,14 +285,14 @@ async def test_frozen_orders_do_not_generate_per_order_recovery_reads(db, user, 
 
 async def test_invoice_builder_reuses_bot_identity(bot, epay, monkeypatch):
     monkeypatch.setattr(
-        "shop_bot.services.invoices.get_settings",
+        "shop_bot.services.epay.get_settings",
         lambda: SimpleNamespace(
             webhook=SimpleNamespace(url="https://shop.example"),
             payment=SimpleNamespace(callback_path="/callback"),
         ),
     )
     for number in range(3):
-        url = await payment_url(bot, epay, name="test", order_no=str(number), amount_cents=999, currency="CNY")
+        url = await epay.checkout_url(bot, name="test", order_no=str(number), amount_cents=999, currency="CNY")
         assert "audit_bot" in url
     assert sum(method.__api_method__ == "getMe" for method in bot.session.sent) == 1
 

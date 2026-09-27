@@ -2,6 +2,7 @@
 
 from .base import Repository
 from .deliveries import DeliveryRepository
+from .gmpay import GMPayTradeRepository
 from .operations import OperationsRepository
 from .orders import OrderRepository
 from .payments import PaymentRepository
@@ -14,6 +15,7 @@ from .work import WorkRepository
 
 __all__ = [
     "DeliveryRepository",
+    "GMPayTradeRepository",
     "OperationsRepository",
     "OrderRepository",
     "PaymentPromptRepository",

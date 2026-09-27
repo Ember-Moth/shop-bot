@@ -15,13 +15,21 @@ import hmac
 import logging
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
 import httpx
 
+from ..config import get_settings
 from ..logging_config import get_logger
-from ..models import Order
+from ..models import Order, Topup
 from ..money import normalize_currency
+from .gateway import Checkout, GatewayError
+
+if TYPE_CHECKING:
+    from aiogram import Bot
+
+    from ..db import Database
 
 logger = get_logger(__name__)
 
@@ -56,7 +64,7 @@ class EPayQueryResult:
     currency: str = ""  # 网关未回传时，通过配置的商户收款币种核验
 
 
-class EPayError(Exception):
+class EPayError(GatewayError):
     """可安全记录的支付错误，不携带含密钥的 HTTP 请求或响应。"""
 
 
@@ -144,6 +152,54 @@ class EPayClient:
         params["sign_type"] = "MD5"
         base = self._config.url.rstrip("/")
         return f"{base}/submit.php?{urlencode(params)}"
+
+    async def checkout_url(self, bot: Bot, *, name: str, order_no: str, amount_cents: int, currency: str) -> str:
+        """商品与充值共用的签名收银台链接；Bot 公共资料使用 aiogram 缓存。"""
+        settings = get_settings()
+        me = await bot.me()
+        return self.create_pay_url(
+            EPayOrder(
+                name=name,
+                order_no=order_no,
+                amount=amount_cents / 100,
+                currency=currency,
+                notify_url=f"{settings.webhook.url.rstrip('/')}{settings.payment.callback_path}",
+                return_url=f"https://t.me/{me.username}",
+            )
+        )
+
+    async def order_checkout(self, bot: Bot, db: Database, order: Order) -> Checkout:
+        url = await self.checkout_url(
+            bot,
+            name=f"订单 #{order.id}",
+            order_no=str(order.id),
+            amount_cents=order.amount_cents,
+            currency=order.currency,
+        )
+        return Checkout(web_url=url)
+
+    async def topup_checkout(self, bot: Bot, db: Database, topup: Topup, name: str) -> Checkout:
+        url = await self.checkout_url(
+            bot, name=name, order_no=f"T{topup.id}", amount_cents=topup.amount_cents, currency=topup.currency
+        )
+        return Checkout(web_url=url)
+
+    async def reconcile_order(self, db: Database, order: Order) -> Order | None:
+        payment = await self.query_order(str(order.id))
+        if not payment.paid:
+            return None
+        return await self.confirm_payment(db, order, payment)
+
+    async def confirm_payment(self, db: Database, order: Order, payment: EPayQueryResult) -> Order:
+        """回调与主动查询共用：核单后持久化外部收款，多收的钱按原币种入钱包，不重复采购。"""
+        self.validate_payment(order, payment, allow_additional=True)
+        try:
+            confirmed, disposition = await db.payments.record_online_payment(order.id, payment.trade_no)
+        except ValueError:
+            raise EPayError("payment transaction conflicts with another order") from None
+        if disposition == "wallet_credit":
+            logger.warning("additional payment credited to wallet", extra={"order_id": order.id})
+        return confirmed
 
     async def query_order(self, order_no: str) -> EPayQueryResult:
         """查询由本客户端商户凭据授权的订单，不向调用方暴露底层 URL。"""

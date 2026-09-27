@@ -18,6 +18,7 @@ from ..models import Order, OrderStatus, PurchaseState
 from ..telegram_text import text_units
 from .business_notifications import notify_business
 from .esim_media import MAX_ESIMS_PER_ARCHIVE, EsimMedia, delivery_esims, esim_zip, qr_png
+from .gmpay import GMPayGateway
 from .notification_transport import NotificationThrottle
 from .payment_prompts import close_payment_prompt
 from .purchasing import Purchaser, split_payload_chunks
@@ -268,6 +269,7 @@ async def process_work(
     runtime: RuntimeState | None = None,
     *,
     throttle: NotificationThrottle | None = None,
+    gateway: GMPayGateway | None = None,
 ) -> bool:
     """业务幂等保护仍在采购/通知状态机；队列只负责执行时机和失败退避。"""
     done = False
@@ -294,6 +296,12 @@ async def process_work(
                 done = await notify_wallet(db, bot, item.entity_id, throttle)
             elif bot is not None and item.kind == "prompt":
                 done = await close_payment_prompt(db, bot, item.entity_id, throttle)
+            elif bot is not None and item.kind == "gmpay":
+                if gateway is None:
+                    logger.warning("gmpay trade check skipped: gateway not configured")
+                    done = True
+                else:
+                    done = await gateway.check_trade(db, bot, item.entity_id, throttle)
     except TelegramRetryAfter as exc:
         delay = max(delay, exc.retry_after)
         failed = True
@@ -313,6 +321,8 @@ async def _drain_work(
     bot: Bot | None,
     kind: str,
     runtime: RuntimeState | None,
+    *,
+    gateway: GMPayGateway | None = None,
 ) -> int:
     failures = 0
     # 有限批量，避免持续新订单使一次恢复永不返回。
@@ -320,7 +330,7 @@ async def _drain_work(
         item = await db.work.claim_work(kind)
         if item is None:
             break
-        failures += await process_work(db, purchaser, bot, item, runtime)
+        failures += await process_work(db, purchaser, bot, item, runtime, gateway=gateway)
     return failures
 
 
@@ -329,14 +339,15 @@ async def recover_once(
     purchaser: Purchaser,
     bot: Bot | None,
     runtime: RuntimeState | None = None,
+    gateway: GMPayGateway | None = None,
 ) -> int:
-    """有限恢复批次，供维护和测试使用；常驻服务的三个通道完全独立。"""
+    """有限恢复批次，供维护和测试使用；常驻服务的各通道完全独立。"""
     results = await asyncio.gather(*(_drain_work(db, purchaser, bot, "purchase", runtime) for _ in range(3)))
     if bot is not None:
         results += await asyncio.gather(
             *(
-                _drain_work(db, purchaser, bot, kind, runtime)
-                for kind in ("delivery", "delivery", "wallet", "business", "prompt")
+                _drain_work(db, purchaser, bot, kind, runtime, gateway=gateway)
+                for kind in ("delivery", "delivery", "wallet", "business", "prompt", "gmpay")
             )
         )
     return sum(results)
@@ -350,21 +361,31 @@ async def _work_loop(
     throttle: NotificationThrottle,
     *,
     runtime: RuntimeState | None,
+    gateway: GMPayGateway | None = None,
 ) -> None:
     while True:
         item = await db.work.claim_work(kind)
         if item is None:
             await asyncio.sleep(1)
             continue
-        await process_work(db, purchaser, bot, item, runtime, throttle=throttle)
+        await process_work(db, purchaser, bot, item, runtime, throttle=throttle, gateway=gateway)
 
 
-async def recovery_loop(db: Database, purchaser: Purchaser, bot: Bot, runtime: RuntimeState | None = None) -> None:
+async def recovery_loop(
+    db: Database,
+    purchaser: Purchaser,
+    bot: Bot,
+    runtime: RuntimeState | None = None,
+    gateway: GMPayGateway | None = None,
+) -> None:
     throttle = NotificationThrottle()
+    kinds = ["purchase", "purchase", "purchase", "delivery", "delivery", "wallet", "business", "prompt"]
+    if gateway is not None:
+        kinds.append("gmpay")  # 到期核对，兼作回调丢失时的兜底查询
     # 固定工作协程，不为整个积压队列一次性创建 Task。异常会传到主进程监督器。
     async with asyncio.TaskGroup() as group:
-        for kind in ("purchase", "purchase", "purchase", "delivery", "delivery", "wallet", "business", "prompt"):
-            group.create_task(_work_loop(db, purchaser, bot, kind, throttle, runtime=runtime))
+        for kind in kinds:
+            group.create_task(_work_loop(db, purchaser, bot, kind, throttle, runtime=runtime, gateway=gateway))
         while True:
             if runtime is not None:
                 runtime.beat("recovery")
