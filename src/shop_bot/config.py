@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, StrictInt, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from .money import normalize_currency
+from .timefmt import DEFAULT_TIMEZONE, resolve
 
 
 class UpstreamSettings(BaseSettings):
@@ -155,7 +156,7 @@ class OperationsSettings(BaseSettings):
     notification_stale_seconds: int = Field(default=300, ge=1)
     worker_stale_seconds: float = Field(default=180, ge=1)
     health_timeout_seconds: float = Field(default=2, gt=0, le=30)
-    daily_report: bool = True  # 每日 0 点（服务器本地时区）私信管理员昨日流水
+    daily_report: bool = True  # 每日 0 点（按 timezone 配置，默认北京时间）私信管理员昨日流水
 
 
 class BackupSettings(BaseSettings):
@@ -173,6 +174,7 @@ class Settings(BaseSettings):
 
     bot_token: str = ""
     admin_ids: list[int] = Field(default_factory=list)
+    timezone: str = DEFAULT_TIMEZONE  # 买家与管理员看到的时间、日报零点所用时区；数据库仍存 UTC
     database_path: str = "shop_bot.db"
     upstream: UpstreamSettings = Field(default_factory=UpstreamSettings)
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
@@ -184,6 +186,13 @@ class Settings(BaseSettings):
     operations: OperationsSettings = Field(default_factory=OperationsSettings)
     business_notifications: BusinessNotificationsSettings = Field(default_factory=BusinessNotificationsSettings)
     backup: BackupSettings = Field(default_factory=BackupSettings)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        value = value.strip()
+        resolve(value)
+        return value
 
     @classmethod
     def settings_customise_sources(

@@ -25,6 +25,7 @@ from .services.gmpay import GMPayClient, GMPayConfig, GMPayError, GMPayGateway
 from .services.operations import Operations, RuntimeState
 from .services.order_expiry import order_expiry_loop
 from .services.purchasing import CommbitzPurchaser, DemoPurchaser, Purchaser
+from .timefmt import set_display_timezone
 from .web.health import register_health_routes
 from .web.payment import register_payment_routes
 from .web.telegram import register_telegram_routes, validate_webhook_secret
@@ -107,6 +108,7 @@ def build_dispatcher(
 
 async def amain() -> None:
     settings = get_settings()
+    set_display_timezone(settings.timezone)
     setup_logging(
         level=settings.logging.level,
         log_dir=settings.logging.log_dir or None,

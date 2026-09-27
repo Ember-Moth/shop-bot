@@ -11,9 +11,12 @@ import json
 import logging
 import logging.handlers
 import sys
-from datetime import UTC, datetime
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
+
+from .timefmt import display_zone, from_timestamp
 
 
 class JSONFormatter(logging.Formatter):
@@ -21,7 +24,7 @@ class JSONFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "ts": datetime.now(UTC).isoformat(),
+            "ts": from_timestamp(record.created).isoformat(),  # 带时区偏移，默认北京时间
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
@@ -46,6 +49,10 @@ class ColoredFormatter(logging.Formatter):
         "CRITICAL": "\033[35m",  # 紫
     }
     RESET: ClassVar[str] = "\033[0m"
+
+    def converter(self, timestamp: float | None) -> time.struct_time:  # type: ignore[override]
+        """asctime 按显示时区输出，与 JSON 日志一致。"""
+        return datetime.fromtimestamp(timestamp or time.time(), display_zone()).timetuple()
 
     def format(self, record: logging.LogRecord) -> str:
         color = self.COLORS.get(record.levelname, self.RESET)

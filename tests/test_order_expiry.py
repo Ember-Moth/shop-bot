@@ -142,7 +142,7 @@ async def test_prompt_states_the_payment_deadline(*, db, user, product, bot, mon
     view = await order_prompt(bot, db, None, order, HEADER_PENDING)
     if minutes:
         created = datetime.strptime(str(order.created_at), "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
-        deadline = f"{created + timedelta(minutes=minutes):%H:%M}"
-        assert f"请在 {deadline} UTC 前付款，逾期订单自动关闭。" in view.text
+        beijing = created + timedelta(hours=8, minutes=minutes)  # 库内 UTC，显示默认北京时间
+        assert f"请在 {beijing:%H:%M}（北京时间）前付款，逾期订单自动关闭。" in view.text
     else:
         assert "逾期订单自动关闭" not in view.text

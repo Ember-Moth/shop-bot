@@ -12,6 +12,7 @@ from ..services.balance import format_cents, parse_signed_amount
 from ..services.operations import Operations
 from ..services.orders import OrderError
 from ..services.purchasing import CommbitzPurchaser, Purchaser, split_payload_chunks
+from ..timefmt import format_iso
 
 router = Router()
 logger = get_logger(__name__)
@@ -185,7 +186,8 @@ async def cmd_status(message: Message, operations: Operations) -> None:
     lines = [f"{name}: {'正常' if ok else '未就绪'}" for name, ok in checks.items()]
     backup = operations.backups
     if backup.settings.enabled:
-        lines.append(f"最近备份：{backup.last_success or '本进程尚未完成'}")
+        last = format_iso(backup.last_success) if backup.last_success else "本进程尚未完成"
+        lines.append(f"最近备份：{last}")
         lines.append(f"备份状态：{backup.error or '正常'}")
     else:
         lines.append("自动备份：已关闭")

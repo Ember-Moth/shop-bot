@@ -9,7 +9,7 @@
 import math
 import time
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any, NamedTuple
 
 from aiogram import Bot
@@ -21,6 +21,7 @@ from ..config import get_settings
 from ..db import Database
 from ..logging_config import get_logger
 from ..models import Order, OrderStatus, Topup, TopupState
+from ..timefmt import from_db, from_timestamp, zone_label
 from .balance import MAX_TOPUP_CENTS, format_cents, topup_gap
 from .gateway import Checkout, GatewayError, PaymentGateway
 from .notification_transport import NotificationThrottle
@@ -53,8 +54,8 @@ def checkout_lines(checkout: Checkout) -> list[str]:
     lines = []
     if checkout.expires_at is not None:
         minutes = max(1, math.ceil((checkout.expires_at - time.time()) / 60))
-        deadline = datetime.fromtimestamp(checkout.expires_at, UTC).strftime("%H:%M")
-        lines.append(f"请在 {minutes} 分钟内转账，截止 {deadline} UTC")
+        deadline = from_timestamp(checkout.expires_at).strftime("%H:%M")
+        lines.append(f"请在 {minutes} 分钟内转账，截止 {deadline}（{zone_label()}）")
     network = checkout.network or ""
     lines += [
         f"网络：{NETWORK_LABELS.get(network, network.upper())}",
@@ -72,16 +73,13 @@ def order_deadline_line(order: Order) -> str | None:
     minutes = get_settings().payment.order_timeout_minutes
     if minutes <= 0:
         return None
-    created: Any = order.created_at  # SQLite 返回 UTC 文本
-    if not isinstance(created, datetime):
-        try:
-            created = datetime.strptime(str(created), "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
-        except ValueError:
-            return None
-    deadline = (created if created.tzinfo else created.replace(tzinfo=UTC)) + timedelta(minutes=minutes)
+    created = from_db(order.created_at)  # SQLite 返回 UTC 文本
+    if created is None:
+        return None
+    deadline = created + timedelta(minutes=minutes)
     if deadline.timestamp() <= time.time():
         return None
-    return f"请在 {deadline:%H:%M} UTC 前付款，逾期订单自动关闭。"
+    return f"请在 {deadline:%H:%M}（{zone_label()}）前付款，逾期订单自动关闭。"
 
 
 def gap_offer(order: Order, balance_cents: int, gateway: PaymentGateway | None) -> int:

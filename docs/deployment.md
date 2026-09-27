@@ -10,6 +10,7 @@
 | `bot_token` | `SHOP_BOT_BOT_TOKEN` | Bot token（必填） |
 | `admin_ids` | `SHOP_BOT_ADMIN_IDS` | 管理员 telegram id 列表 |
 | `database_path` | `SHOP_BOT_DATABASE_PATH` | SQLite 文件路径 |
+| `timezone` | `SHOP_BOT_TIMEZONE` | 显示时区（IANA 名称，默认 `Asia/Shanghai` 北京时间）；数据库与备份文件名仍用 UTC |
 | `webhook.host` | `SHOP_BOT_WEBHOOK__HOST` | 监听地址 |
 | `webhook.port` | `SHOP_BOT_WEBHOOK__PORT` | 监听端口 |
 | `webhook.secret_token` | `SHOP_BOT_WEBHOOK__SECRET_TOKEN` | 必填，请求来源校验密钥，1–256 个字母/数字/下划线/连字符 |

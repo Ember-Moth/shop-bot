@@ -4,6 +4,7 @@
 bot_token: ""                # @BotFather 的 bot token；或设 SHOP_BOT_BOT_TOKEN
 admin_ids: []                # 有管理员命令权限的 telegram 用户 ID
 database_path: shop_bot.db
+timezone: Asia/Shanghai      # 买家与管理员看到的时间、日报零点所用时区（默认北京时间）；数据库仍存 UTC
 
 webhook:                     # Telegram 推送更新的公网 HTTPS 端点
   host: 127.0.0.1            # 监听地址（通常前面有反向代理）
@@ -50,7 +51,7 @@ operations:
   notification_stale_seconds: 300
   worker_stale_seconds: 180
   health_timeout_seconds: 2
-  daily_report: true         # 每日 0 点（服务器本地时区）私信管理员昨日流水
+  daily_report: true         # 每日 0 点（按 timezone，默认北京时间）私信管理员昨日流水
 
 backup:
   enabled: true              # 启动时备份一次，之后按周期执行；失败一分钟后重试

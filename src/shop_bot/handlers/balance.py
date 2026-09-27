@@ -6,7 +6,6 @@ TopupFlow.amount 状态处理器和钱包按钮回调注册在本模块 router �
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 from aiogram import Bot, F, Router
@@ -21,6 +20,7 @@ from ..models import Order, Topup, TopupState, User
 from ..services.balance import format_cents, parse_topup_amount
 from ..services.gateway import GatewayError, PaymentGateway
 from ..services.payment_prompts import PromptView, checkout_lines
+from ..timefmt import format_db, zone_label
 
 router = Router()
 logger = get_logger(__name__)
@@ -289,25 +289,16 @@ async def render_balance(message: Message, db: Database) -> None:
     await message.answer(await balance_text(db, user))
 
 
-def _local_time(created_at: str) -> str:
-    """库内时间为 UTC；按服务器本地时区显示，与每日报表一致。"""
-    try:
-        moment = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
-    except ValueError:
-        return created_at
-    return moment.astimezone().strftime("%m-%d %H:%M")
-
-
 def _history_line(row: dict[str, Any]) -> str:
     order = f" 订单 #{row['order_id']}" if row["order_id"] else ""
     amount = f"{format_cents(abs(row['amount_cents']))} {row['currency']}"
     if row["source"] == "online":
-        return f"{_local_time(row['created_at'])} · 在线支付{order} · {amount}"
+        return f"{format_db(row['created_at'])} · 在线支付{order} · {amount}"
     sign = "+" if row["amount_cents"] >= 0 else "-"
     label = _HISTORY_KIND_LABELS.get(row["kind"], row["kind"])
     if row["kind"] == "topup" and row["order_id"]:
         label = "补差价充值"  # 到账后已自动付清该订单
-    return f"{_local_time(row['created_at'])} · {label}{order} · {sign}{amount}"
+    return f"{format_db(row['created_at'])} · {label}{order} · {sign}{amount}"
 
 
 async def render_history(message: Message, db: Database) -> None:
@@ -323,4 +314,4 @@ async def render_history(message: Message, db: Database) -> None:
         await message.answer("🧾 交易记录\n\n暂无充值、付款或退款记录。")
         return
     lines = [_history_line(row) for row in rows]
-    await message.answer("🧾 交易记录\n\n" + "\n".join(lines) + "\n\n订单进度请看「📦 我的订单」。")
+    await message.answer(f"🧾 交易记录（{zone_label()}）\n\n" + "\n".join(lines) + "\n\n订单进度请看「📦 我的订单」。")

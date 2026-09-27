@@ -1,6 +1,6 @@
 """每日 0 点向管理员私信昨日流水的定时任务。
 
-窗口按服务器本地时区计算「昨天」，再换算成 UTC 与库内 created_at 比较；
+窗口按显示时区（timezone 配置，默认北京时间）计算「昨天」，再换算成 UTC 与库内 created_at 比较；
 送达成功才写入 daily_report_log（发送失败不标记，可重试），
 进程重启后若发现昨日报表未发也会补发。长睡眠按 30 秒分片并打心跳，
 避免被 worker 监督误判为失联。
@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from aiogram import Bot
 
+from .. import timefmt
 from ..config import Settings
 from ..db import Database
 from ..logging_config import get_logger
@@ -42,7 +43,7 @@ def yesterday_window(now: datetime | None = None) -> tuple[str, str, str]:
 
     库内 created_at 以 UTC 存储；本地 0 点需经 astimezone(utc) 换算后再比较。
     """
-    local_now = now if now is not None else datetime.now().astimezone()
+    local_now = now if now is not None else timefmt.now()
     start_local = (local_now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     end_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     fmt = "%Y-%m-%d %H:%M:%S"
@@ -54,13 +55,13 @@ def yesterday_window(now: datetime | None = None) -> tuple[str, str, str]:
 
 
 def seconds_until_next_midnight(now: datetime | None = None) -> float:
-    local_now = now if now is not None else datetime.now().astimezone()
+    local_now = now if now is not None else timefmt.now()
     next_midnight = (local_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return max(0.0, (next_midnight - local_now).total_seconds())
 
 
 def format_daily_report(summary: dict, date_label: str) -> str:
-    lines = [f"📊 每日流水 · {date_label}", "━━━━━━━━━━━━━━━━━━", ""]
+    lines = [f"📊 每日流水 · {date_label}（{timefmt.zone_label()}）", "━━━━━━━━━━━━━━━━━━", ""]
 
     lines.append("订单（按创建日）：")
     orders_by_status: dict[str, int] = {}
@@ -74,7 +75,7 @@ def format_daily_report(summary: dict, date_label: str) -> str:
         lines.append("  无")
 
     lines.append("")
-    lines.append("外部实收（EPay 到账）：")
+    lines.append("外部实收（在线收款到账）：")
     if summary["receipts"]:
         for row in summary["receipts"]:
             topup_cents = row["cents"] - row["order_cents"]
