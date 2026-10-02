@@ -357,9 +357,16 @@ class CommbitzPurchaser:
                     last_error=str(exc),
                 )
             elif exc.definite_rejection:
-                logger.warning("purchase rejected by upstream", extra={"order_id": order.id})
+                # 异常信息只含 HTTP 状态、请求路径和上游说明（已截断），不含凭据；原因写进正文，文本日志也看得到。
+                reason = str(exc)
+                logger.warning(
+                    "purchase rejected by upstream (order #%s): %s",
+                    order.id,
+                    reason,
+                    extra={"order_id": order.id, "error": reason},
+                )
                 await db.payments.reject_and_refund(
-                    order.id, purchase.id, PurchaseState.SUBMITTING, "upstream rejected before creation"
+                    order.id, purchase.id, PurchaseState.SUBMITTING, f"upstream rejected before creation: {reason}"
                 )
             else:
                 logger.warning("purchase submission unknown", extra={"order_id": order.id, "error": type(exc).__name__})
@@ -420,7 +427,12 @@ class CommbitzPurchaser:
         try:
             details = await self.client.get_order_details(purchase.upstream_request_id)
         except CommbitzError as exc:
-            logger.warning("purchase detail query failed", extra={"order_id": order.id, "error": type(exc).__name__})
+            logger.warning(
+                "purchase detail query failed (order #%s): %s",
+                order.id,
+                exc,
+                extra={"order_id": order.id, "error": str(exc)},
+            )
             if exc.definite_rejection and purchase.state == PurchaseState.UPSTREAM_PENDING:
                 await db.purchases.transition_purchase(
                     purchase.id,

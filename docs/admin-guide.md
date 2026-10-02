@@ -96,3 +96,16 @@
 
 - 待付订单超过 `payment.order_timeout_minutes` 未付款会自动关闭，`/orders expired` 可以查看。
 - 已关闭订单不能再 `/paid`。买家关闭后才付款的，款项会自动存入他的同币种余额，买家可以重新下单用余额支付。
+
+## 上游拒绝的原因
+
+上游在建单前明确拒绝时，系统会自动退款到买家余额并关单，`/purchases` 里不会出现这类订单。拒绝原因同时记在日志和 `purchases.last_error` 里，内容是 Commbitz 返回的 HTTP 状态码和说明，例如 `Plan not found with SKU`。
+
+```bash
+journalctl -u shop-bot -o cat | grep 'purchase rejected by upstream'
+```
+
+```bash
+sudo sqlite3 -readonly -header -column /var/lib/shop-bot/shop_bot.db "SELECT order_id, sku, last_error FROM purchases WHERE state = 'refunded' ORDER BY id DESC LIMIT 10;"
+```
+

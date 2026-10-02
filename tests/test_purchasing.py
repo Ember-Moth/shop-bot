@@ -175,7 +175,7 @@ async def test_timeout_becomes_submission_unknown(*, db, esim_order, commbitz_pu
 
 
 async def test_definite_rejection_auto_refunds_and_closes_order(
-    *, db, user, esim_order, commbitz_purchaser, httpx_mock
+    *, db, user, esim_order, commbitz_purchaser, httpx_mock, caplog
 ):
     """建单前被上游明确拒绝：自动退款到买家余额并关单，不再允许重试（退款规则）。"""
     httpx_mock.add_response(status_code=404, json={"statusCode": 404, "message": "Plan not found with SKU: US-1"})
@@ -185,6 +185,12 @@ async def test_definite_rejection_auto_refunds_and_closes_order(
     assert order is not None and order.status == OrderStatus.REFUNDED
     purchase = await db.purchases.get_purchase_by_order(esim_order.id)
     assert purchase is not None and purchase.state == PurchaseState.REFUNDED
+    # 拒绝原因同时留在采购记录和日志正文里，事后可以查
+    reason = "commbitz HTTP 404 POST /distributor-api/v1/request: Plan not found with SKU: US-1"
+    assert purchase.last_error == f"upstream rejected before creation: {reason}"
+    assert any(
+        r.getMessage() == f"purchase rejected by upstream (order #{esim_order.id}): {reason}" for r in caplog.records
+    )
     # 全额退款到余额并写 refund 流水
     user_after = await db.users.get_user(user.id)
     assert user_after is not None and user_after.balance_cents == esim_order.amount_cents
